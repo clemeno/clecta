@@ -9,6 +9,9 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"
+# GUI (PLAN §6, §9). Default features give the wgpu renderer with a tiny-skia fallback,
+# which is what keeps the "runs on a machine with no GPU driver worth the name" property.
+iced = "0.14.0"
 # Audio output, mixing and decoding (PLAN §7, §8). Wraps `cpal` for the device and its
 # real-time callback thread, and `symphonia` for demux + decode. Default features already
 # give flac / mp3 / mp4-aac / vorbis / wav; `symphonia-mkv` adds Matroska, which is what

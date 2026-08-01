@@ -3,18 +3,23 @@
 Two players, a mixer between them, and a file browser below. See [PLAN.md](PLAN.md) for
 the design and the decision log.
 
-## Current state: audio spike only
+## Current state: spikes only
 
-**There is no window yet.** `iced` is not even a dependency at this point — the only
-thing built so far is a headless spike that proves the rodio API the plan is written
-against (PLAN §7, §8), plus the one module that survives it, `src/mixer.rs`.
+**The app does not exist yet.** What is built is two throwaway spikes, each proving one
+part of the plan against a compiler instead of documentation, plus the one module that
+survives them both, `src/mixer.rs`.
 
-Running the binary with no arguments therefore does nothing but print usage. That is
-expected, not a broken build.
+| Binary | Proves | Plan |
+|---|---|---|
+| `clecta` (`src/main.rs`) | the rodio transport, headless — no GUI to blame | §7, §8 |
+| `ui_spike` (`src/bin/ui_spike.rs`) | the window layout: `pane_grid` splitters, `table` rows | §6, §9 |
 
-## Running the spike
+Both get deleted when the real `main.rs` and `app.rs` land.
 
-It needs two audio files, one per player:
+## Running the audio spike
+
+`cargo run` with no arguments prints usage and exits — that is expected, not a broken
+build. It needs two audio files, one per player:
 
 ```sh
 cargo run -- <file1> <file2>
@@ -31,7 +36,17 @@ Any of `.mp3` `.flac` `.wav` `.ogg` `.m4a` `.mp4` `.mkv` `.webm` (PLAN §3). It 
 
 Roughly nine seconds of audio, at full volume. It exits on its own.
 
-`src/main.rs` is throwaway and gets deleted when the real `main.rs` lands.
+## Running the layout spike
+
+```sh
+cargo run --bin ui_spike
+```
+
+Opens a window with §6's layout: the three player/mixer boxes on top, a files table and
+a folder tree below, two draggable splitters between them. Drag both, press **fold** to
+close the tree and again to bring it back at the width it had, and click the file rows —
+the line under the table reports which cell the click actually landed in, which is the
+point of the exercise. Findings are at the top of `src/bin/ui_spike.rs`.
 
 ## Checks
 

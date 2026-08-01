@@ -232,7 +232,7 @@ this one keeps the desktop-only ones.
   so contrast never depends on the system light/dark preference — the trap cmote
   documents in §14 there.
 
-### The splitters: try `pane_grid` before hand-rolling (§16)
+### The splitters: `pane_grid`, verified (§16)
 
 cmote hand-rolled its two splitters — the drag state, the clamp, the grab/drag/release
 messages and the width arithmetic are spread across `explorer.rs`, `files.rs`,
@@ -247,10 +247,27 @@ split ratios and whether the tree is folded. Bending it into that could cost mor
 ~150 lines it saves, and folding the tree is "close a pane" in its model rather than a
 `bool`.
 
-`ponytail:` this is a build-time evaluation, not a decision to make on paper. Spike
-`pane_grid` in the scaffold; if the fixed layout fights it, cmote's splitter code is a
-known-good fallback sitting one directory over. Either way, **do not write a third
-splitter implementation from scratch.**
+**Spiked, and it fits — `pane_grid` it is.** `src/bin/ui_spike.rs` builds this exact
+layout in about forty lines against cmote's ~150 across six files, and the fear above
+turns out to be unfounded: drag-to-reorder and maximise are **opt-in** through `on_drag`,
+so never calling it costs nothing. Three real costs, all small, all paid in the spike:
+
+- **The fold is `close(pane)`, as feared, and closing destroys the split with it.** So
+  the tree's width lives in app state and is restored with `resize` after the re-`split`.
+  Add a lookup helper too: panes are opaque handles and a re-created pane gets a new one,
+  so the fold button has to *find* the tree rather than remember it. Fourteen lines
+  total.
+- **`State::with_configuration` does not return the `Split` handles**, and the fold needs
+  one. Build the layout with `State::new` + two `split()` calls instead, which do return
+  them — the declarative `Configuration` enum reads better but cannot be used here.
+- **`min_size` is one number, in pixels, for every pane on both axes.** §6 wants "the
+  transport must never be clipped", which is a *per-section* floor; what the widget
+  offers is a global one. Setting it to the transport's height also imposes that as the
+  tree's minimum width. Acceptable, and simpler than cmote's 60 % clamp, but it is not
+  the same rule. `ponytail:` if a section genuinely needs its own floor later, the
+  upgrade is clamping the ratio in the `Resized` handler — where the app already sits.
+
+**Do not write a third splitter implementation from scratch.**
 
 ---
 
@@ -397,11 +414,22 @@ does, which files are offered) unit-testable with no filesystem.
   milliseconds where cmote's SFTP round trips did not.
 - **Rows, not icons** — name, size, modified date, and a leading glyph marking *audio* /
   *video* / *other*. A media browser is scanned by name and length, not by thumbnail.
-- **Use `widget::table`.** iced 0.14 ships one, and three aligned columns with a header is
-  exactly its job — cmote built its rows by hand because it needed an icon *grid* with
-  rubber-band selection, which clecta does not. `ponytail:` if `table` turns out not to
-  take a per-row click / `mouse_area` (needed for the drag-to-player gesture, §10), fall
-  back to `scrollable(column(rows))`; verify at scaffold time.
+- **Not `widget::table` — `scrollable(column(rows))`.** iced 0.14 does ship a `table`, and
+  three aligned columns with a header looked like exactly its job. The spike
+  (`src/bin/ui_spike.rs`) says no: **`table` has no row.** `table::Column::view` produces
+  one *cell* per row, and `Table` flattens every column's cells into one flat list. Two
+  consequences, one fatal:
+  - A click has to be attached per **cell**, not per row — four `mouse_area`s a row here,
+    with the inter-column padding and separator left dead between them. Awkward, and it
+    makes the §10 drag gesture originate from a cell rather than a row, but survivable.
+  - `table::Style` carries **only** `separator_x` and `separator_y` colours. There is no
+    row background, so a selected or hovered row **cannot be drawn at all**. That is what
+    settles it: §9 rows need a selected state.
+
+  So each row is a `mouse_area(container(row![...]))` — one hitbox, one background, one
+  message. The cost is that column alignment becomes manual `width()` on the cells, which
+  is nothing for four fixed columns. cmote built its rows by hand too, though for a
+  different reason (an icon *grid* with rubber-band selection).
 - **Everything is listed, media is distinguished.** Hiding non-media would hide the
   `.cue` and the artwork that tell the user they are in the right folder. Only a media
   row is loadable; the rest are inert.
@@ -577,11 +605,12 @@ aesthetic: it is the requirement.
 - **No C toolchain**, and this too is real rather than aesthetic: cpal binds CoreAudio /
   WASAPI through `objc2` / `windows-sys`, both pure Rust, and symphonia is pure Rust.
   Nothing needs NASM or a vendored C library — the property cmote had to fight for with
-  `ring` (§2 there) comes free here. **Confirmed on the spike's release build:** 1.9 MB,
-  and `otool -L` lists only OS frameworks (CoreAudio, AudioToolbox, Foundation,
-  CoreFoundation, libSystem, libobjc, libiconv) — not one third-party dylib to ship
-  alongside. Re-run that check once iced is in, since wgpu is the one dependency that
-  could change the answer.
+  `ring` (§2 there) comes free here. **Confirmed on the spikes' release builds**, first
+  audio-only (1.9 MB) and then **with iced and wgpu in the tree** (5.8 MB), which was the
+  one dependency that could have changed the answer. `otool -L` lists only OS frameworks
+  either way — CoreAudio, AudioToolbox, AppKit, Metal, QuartzCore, CoreGraphics and
+  friends — not one third-party dylib to ship alongside. wgpu costs 3.9 MB of binary and
+  a `Metal.framework` link, and nothing else.
 - **Building the shipped Intel binary on an Apple Silicon Mac**: add
   `--target x86_64-apple-darwin` (the Xcode CLT SDK carries both slices; Rosetta 2 only to
   *run* it locally). Same split CI uses.
@@ -677,9 +706,11 @@ path, so `/ponytail-debt` can harvest them later.
 | Q2 | Crossfader curve | **Switchable**, `Power` (constant-power) default, `Linear` for the same beat-matched track on both players. One `match`, one state field, persisted | §1, §8, §12 |
 | Q3 | OS drop targeting | **The idle player wins** — no track, else not playing, else Player 1 — with the hover ring showing which. Derived from state: no armed flag, no dialog. In-app drags are aimed normally | §1, §10, §12 |
 | Q4 | Targets + portability | **Windows 11 + macOS Sequoia Intel**, dual CI, and **portability as a hard requirement**: everything written goes to `clecta-data/` beside the app, including beside the `.app` rather than inside it | §1, §9, §11, §12 |
+| Q5 | Splitters | **`widget::pane_grid`**, not a hand-rolled third implementation. Spiked: the fixed layout fits, reordering is opt-in, the fold costs ~14 lines | §6 |
+| Q6 | Files pane rows | **`scrollable(column(rows))`**, not `widget::table`. Spiked: `table` has no row element, so a row cannot carry a selected state | §9 |
 
-Nothing is open. The plan is buildable as written; the first commit is the scaffold
-(`Cargo.toml`, `rustfmt.toml`, `main.rs`, and `mixer.rs` with its test).
+Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
+answer; both are now settled by `src/bin/ui_spike.rs`.
 
 ---
 
