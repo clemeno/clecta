@@ -1,1 +1,7 @@
+# macOS Finder metadata.
 .DS_Store
+
+# Rust build output (the crate root is desktop/, see desktop/PLAN.md §5).
+/desktop/target
+
+# Note: Cargo.lock IS committed (binary crate) for reproducible builds.
