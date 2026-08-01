@@ -82,17 +82,25 @@ log. The plan is buildable as written.
 |---|---|---|---|
 | `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | Pure Rust, wgpu/tiny-skia renderer. `advanced` **not** needed in v1 — no custom widget yet (a waveform would be the first, §14). `lazy` if the files pane needs it (§9) |
 | `rodio` | 0.22.2 | Audio output, mixing, decoding | Wraps `cpal` (device) + `symphonia` (decode). Default features give flac/mp3/mp4-aac/vorbis/wav; add **`symphonia-mkv`** for `.mkv`/`.webm` |
-| `cpal` | 0.18 (via rodio) | OS audio device + callback thread | Not a direct dependency; named here because it owns the real-time thread |
-| `symphonia` | 0.6 (via rodio) | Container demux + codec decode | Pure Rust. MPL-2.0 — permissive, file-level copyleft; fine to link, and `cargo deny`'s licence allow-list must include it |
-| `rfd` | 0.17 | Native folder-open dialog | `NSOpenPanel` / Win32. Same crate as cmote |
-| `serde` / `serde_json` | 1.0 | `clecta-data/settings.json` (§11) | `derive` on one small struct. A corrupt file is logged and treated as absent |
-| `anyhow` | 1.0 | App-level error handling | Context-rich errors, `?` everywhere |
+| `cpal` | 0.17.3 (via rodio) | OS audio device + callback thread | Not a direct dependency; named here because it owns the real-time thread. Version confirmed by the spike, not guessed |
+| `symphonia` | 0.5.5 (via rodio) | Container demux + codec decode | Pure Rust. MPL-2.0 — permissive, file-level copyleft; fine to link, and `cargo deny`'s licence allow-list must include it |
+| `rfd` | 0.17.2 | Native folder-open dialog | `NSOpenPanel` / Win32. Same crate as cmote |
+| `serde` / `serde_json` | 1.0.229 / 1.0.151 | `clecta-data/settings.json` (§11) | `derive` on one small struct. A corrupt file is logged and treated as absent |
+| `anyhow` | 1.0.104 | App-level error handling | Context-rich errors, `?` everywhere |
+
+Every version above is the **latest stable as of 2026-08-01**, checked against the
+crates.io index rather than remembered. The two that are not are transitive and pinned by
+rodio: it depends on `symphonia ^0.5` and `cpal ^0.17`, so newer majors of either cannot
+be taken without rodio taking them first. Nothing to do — a `[patch]` override to force
+them would be a compatibility break bought for no feature we need.
 
 No `dirs` / `directories` crate: `std::env::current_exe()` plus a write-probe is the
 whole portable-path rule (§11), the same call cmote's `paths.rs` makes.
 
-Caret (`^`) requirements in `Cargo.toml`, **`Cargo.lock` committed** — the idiomatic
-reproducibility guarantee for a binary crate, same call as cmote.
+Caret (`^`) requirements in `Cargo.toml` written to the exact patch level in use
+(`rodio = "0.22.2"`, not `"0.22"`) so the manifest records what was actually tested, and
+**`Cargo.lock` committed** — the idiomatic reproducibility guarantee for a binary crate,
+same call as cmote. `cargo update` then moves the whole tree forward within semver.
 
 ### What each format actually gives us
 
@@ -258,8 +266,17 @@ splitter implementation from scratch.**
                                    (position ← 0)
 ```
 
-- **Stop means reset**, as asked: `try_seek(Duration::ZERO)` then `pause()`. It is *not*
-  rodio's `Player::stop()`, which drops the queued source and would force a re-decode.
+- **Stop means reset**, as asked: `pause()` **then** `try_seek(Duration::ZERO)`. It is
+  *not* rodio's `Player::stop()`, which drops the queued source and would force a
+  re-decode.
+  **The order matters, and the spike is what proved it.** rodio applies control changes on
+  a 5 ms `periodic_access` tick, and `try_seek` blocks until the audio thread has actually
+  seeked. Seek first and the callback plays on from 0 until the pause catches up a tick
+  later, so the playhead settles at **5 ms, not 0** — non-deterministically, since it
+  depends on where in the tick the call lands (one machine printed `0ns`, another `5ms`,
+  same binary). Pausing first puts both on the same tick. Safe because rodio's `pausable`
+  sits *inside* `periodic_access`, so the control tick keeps running while paused —
+  it has to, or unpausing would be impossible.
   `ponytail:` if `try_seek` returns `SeekError` (some streams cannot seek), fall back to
   re-opening the file and re-appending — correct either way, fast in the common case.
 - **Loading needs a seekable decoder**, which is not the default. The builder form is
@@ -285,8 +302,23 @@ splitter implementation from scratch.**
 - **End of track** is `player.empty()` going true on the tick — transition to `Stopped`.
   There is no callback for this; polling is the mechanism (§4).
 - **The playhead is `get_pos()`**, read on the same tick. It is the *decoder's* position,
-  which leads the speaker by the device buffer (a few ms). Irrelevant for a readout;
-  it would matter for beat-matching, which is not v1 (§14).
+  which leads the speaker by the device buffer. Measured in the spike: a seek to `30s`
+  read back as `30.155s` immediately after. Irrelevant for a readout; it would matter for
+  beat-matching, which is not v1 (§14).
+
+**Verified by the spike** (`cargo run -- a.mp3 b.mp3`, two mp3s on a 44.1 kHz stereo
+device): every claim above holds against rodio 0.22.2 — `Player::connect_new(sink.mixer())`,
+the seekable builder, `total_duration()` answering (184.8s / 217.4s) only when read before
+`append`, and stop leaving the position at `0ns` with `empty()` still false, replaying from
+the top.
+
+Two things the docs did not mention, both found by running it rather than reading it:
+
+- `MixerDeviceSink` **logs a warning when dropped**, so the real `audio.rs` calls
+  `log_on_drop(false)` on it at construction.
+- **rodio's control tick is 5 ms** (`periodic_access`), which is the unit every
+  pause/seek/volume change is quantised to. That is what makes the stop ordering above
+  matter, and it is the floor on how tightly any two transport calls can be sequenced.
 
 ---
 
@@ -545,7 +577,11 @@ aesthetic: it is the requirement.
 - **No C toolchain**, and this too is real rather than aesthetic: cpal binds CoreAudio /
   WASAPI through `objc2` / `windows-sys`, both pure Rust, and symphonia is pure Rust.
   Nothing needs NASM or a vendored C library — the property cmote had to fight for with
-  `ring` (§2 there) comes free here.
+  `ring` (§2 there) comes free here. **Confirmed on the spike's release build:** 1.9 MB,
+  and `otool -L` lists only OS frameworks (CoreAudio, AudioToolbox, Foundation,
+  CoreFoundation, libSystem, libobjc, libiconv) — not one third-party dylib to ship
+  alongside. Re-run that check once iced is in, since wgpu is the one dependency that
+  could change the answer.
 - **Building the shipped Intel binary on an Apple Silicon Mac**: add
   `--target x86_64-apple-darwin` (the Xcode CLT SDK carries both slices; Rosetta 2 only to
   *run* it locally). Same split CI uses.
