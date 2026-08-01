@@ -23,6 +23,23 @@ pub enum Curve {
 	Linear,
 }
 
+impl Curve {
+	/// Both of them, for the selector in the mixer strip.
+	pub const ALL: [Curve; 2] = [Curve::Power, Curve::Linear];
+}
+
+impl std::fmt::Display for Curve {
+	/// What the selector shows. The *reason* the two differ is the interesting part, so
+	/// the label says what each is for rather than naming the maths.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let label = match self {
+			Curve::Power => "Power — different tracks",
+			Curve::Linear => "Linear — same track",
+		};
+		f.write_str(label)
+	}
+}
+
 /// Collapse both volume faders and the crossfader into the gain each player gets.
 ///
 /// `fader1` / `fader2` are the per-player volume faders (0..=1). `crossfader` is

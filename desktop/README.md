@@ -3,50 +3,42 @@
 Two players, a mixer between them, and a file browser below. See [PLAN.md](PLAN.md) for
 the design and the decision log.
 
-## Current state: spikes only
-
-**The app does not exist yet.** What is built is two throwaway spikes, each proving one
-part of the plan against a compiler instead of documentation, plus the one module that
-survives them both, `src/mixer.rs`.
-
-| Binary | Proves | Plan |
-|---|---|---|
-| `clecta` (`src/main.rs`) | the rodio transport, headless — no GUI to blame | §7, §8 |
-| `ui_spike` (`src/bin/ui_spike.rs`) | the window layout: `pane_grid` splitters, `table` rows | §6, §9 |
-
-Both get deleted when the real `main.rs` and `app.rs` land.
-
-## Running the audio spike
-
-`cargo run` with no arguments prints usage and exits — that is expected, not a broken
-build. It needs two audio files, one per player:
+## Running it
 
 ```sh
-cargo run -- <file1> <file2>
+cargo run
 ```
 
-Any of `.mp3` `.flac` `.wav` `.ogg` `.m4a` `.mp4` `.mkv` `.webm` (PLAN §3). It then:
+The window opens on your home folder. Both spikes that came before it are gone — what
+they proved is now in the app.
 
-1. opens the default output device and connects two players to its mixer,
-2. loads both files with a **seekable** decoder and prints each track's duration,
-3. plays both and sweeps the crossfader across its full travel on **both curves** —
-   `Power` first, then `Linear`, which should sound audibly different in the middle,
-4. seeks player 1 to 30 s,
-5. stops both (rewind + pause, PLAN §7) and replays player 1 to prove the reset is real.
+## What works
 
-Roughly nine seconds of audio, at full volume. It exits on its own.
+- **Two players.** Play / pause / stop, a `M:SS / M:SS` readout, and a **Load…** button
+  each. Stop is a rewind, not a `Player::stop()`: the track stays loaded and plays again
+  from the top (PLAN §7).
+- **The mixer strip.** A volume fader per player and a crossfader, with a
+  **Power / Linear** curve selector. The number beside each fader is the gain actually
+  sent to that player, so the cubic taper and the crossfade are visible as they move
+  (PLAN §8).
+- **The browser.** A files pane and a folder tree, each in its own pane with a draggable
+  splitter. Click a folder name in the tree to show it, the arrow to open it. Click a
+  file row to select it, **double-click** a media row to load it into whichever player is
+  idle, or use **→ Player 1 / → Player 2**. **◧ hide tree** in the status bar folds the
+  tree away and brings it back at the width it had (PLAN §6, §9).
+- **No audio device is survivable.** The app still browses, says so in the status bar,
+  and offers **Reconnect audio** (PLAN §11).
 
-## Running the layout spike
+## What does not, yet
 
-```sh
-cargo run --bin ui_spike
-```
-
-Opens a window with §6's layout: the three player/mixer boxes on top, a files table and
-a folder tree below, two draggable splitters between them. Drag both, press **fold** to
-close the tree and again to bring it back at the width it had, and click the file rows —
-the line under the table reports which cell the click actually landed in, which is the
-point of the exercise. Findings are at the top of `src/bin/ui_spike.rs`.
+- **No persistence.** `paths.rs` and `settings.rs` are not written, so the faders, the
+  curve, the folder and the window size all reset on every launch (PLAN §11).
+- **No drag and drop**, neither in-app nor from Finder / Explorer (PLAN §10). The
+  **Load…** buttons and the double-click are the ways in.
+- **No video picture** — the audio track of an `.mp4` / `.mkv` plays, and that is v1
+  (PLAN §14). No waveform, no cue points, no tempo.
+- **No list virtualization.** A folder of five thousand files builds five thousand
+  widgets per frame. Fine for a music folder; the upgrade path is in PLAN §9.
 
 ## Checks
 
@@ -59,6 +51,13 @@ cargo test
 cargo build --release
 ```
 
-`cargo test` covers `mixer.rs`: both crossfader curves at both ends and the centre, each
-curve's defining identity at the midpoint, the fader-at-zero invariant, and the clamping
-of out-of-range values a corrupt `settings.json` could supply.
+`cargo test` covers the pure modules, and only those — anything needing a device or a
+real folder is manual (PLAN §12):
+
+| Module | What is checked |
+|---|---|
+| `mixer.rs` | both curves at both ends and the centre, each curve's defining identity at the midpoint, the fader-at-zero invariant, clamping |
+| `deck.rs` | every edge of the transport state machine, and that an unaimed load never interrupts a playing player while an idle one exists |
+| `browser.rs` | extension → kind, the natural-numeric sort, the hidden filter, a selection surviving (or not) a refresh |
+| `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
+| `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |

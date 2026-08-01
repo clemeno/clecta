@@ -16,8 +16,10 @@ code is meant to be read as much as run, so this plan is didactic — it explain
 each choice was made, and every deliberate shortcut carries a `ponytail:` note so
 "simple" reads as intent, not ignorance.
 
-Status: **planning — v0. Nothing is implemented.** Every decision is locked; §15 is the
-log. The plan is buildable as written.
+Status: **v0.1 — the app runs.** Two players with a working transport, the mixer strip,
+and the browser (files pane + folder tree) are built and green; **`paths.rs`,
+`settings.rs` and the drop gestures of §10 are not written yet.** Every decision is
+locked; §15 is the log.
 
 ---
 
@@ -33,7 +35,7 @@ log. The plan is buildable as written.
 | Audio | **rodio 0.22** over cpal — one device sink, its `Mixer`, one `rodio::Player` per deck (§4) |
 | Decoding | rodio's **symphonia** backend: flac / mp3 / mp4+aac / vorbis / wav by default, plus **`symphonia-mkv`**. Pure Rust, no C toolchain |
 | Crossfader | **Switchable curve** — constant-power (default) or linear, selectable in the mixer strip (§8) |
-| Async runtime | **None.** cmote needed tokio for SSH; clecta has no network. Audio runs on cpal's own callback thread inside rodio, and directory reads go through `iced::Task` on a blocking thread |
+| Async runtime | **None of ours.** cmote needed tokio for SSH; clecta has no network, and no `async fn` is written here. iced still needs *an* executor for its own `Task`s and timers, so it gets `smol` — see §3 |
 | Filesystem | **`std::fs`** — `read_dir`, `metadata`. No `walkdir`, no `notify`: nothing here walks recursively or watches |
 | File picker | **`rfd`** — native open-folder dialog, same crate cmote uses |
 | Errors | **`anyhow`** at the app boundary; typed `thiserror` enums deferred until a module becomes a real API (same call as cmote) |
@@ -80,7 +82,7 @@ log. The plan is buildable as written.
 
 | Crate | Version | Purpose | Notes |
 |---|---|---|---|
-| `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | Pure Rust, wgpu/tiny-skia renderer. `advanced` **not** needed in v1 — no custom widget yet (a waveform would be the first, §14). `lazy` if the files pane needs it (§9) |
+| `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | Pure Rust, wgpu/tiny-skia renderer. **Feature `smol`** — see below. `advanced` **not** needed in v1 — no custom widget yet (a waveform would be the first, §14). `lazy` if the files pane needs it (§9) |
 | `rodio` | 0.22.2 | Audio output, mixing, decoding | Wraps `cpal` (device) + `symphonia` (decode). Default features give flac/mp3/mp4-aac/vorbis/wav; add **`symphonia-mkv`** for `.mkv`/`.webm` |
 | `cpal` | 0.17.3 (via rodio) | OS audio device + callback thread | Not a direct dependency; named here because it owns the real-time thread. Version confirmed by the spike, not guessed |
 | `symphonia` | 0.5.5 (via rodio) | Container demux + codec decode | Pure Rust. MPL-2.0 — permissive, file-level copyleft; fine to link, and `cargo deny`'s licence allow-list must include it |
@@ -93,6 +95,13 @@ crates.io index rather than remembered. The two that are not are transitive and 
 rodio: it depends on `symphonia ^0.5` and `cpal ^0.17`, so newer majors of either cannot
 be taken without rodio taking them first. Nothing to do — a `[patch]` override to force
 them would be a compatibility break bought for no feature we need.
+
+**The one surprise, found at build time: iced's `smol` feature is not optional.** §1 says
+there is no async runtime, and no `async fn` of ours exists — but iced's default backend
+is `thread-pool`, whose `time` module is *empty*. `time::every`, which the 20 Hz playhead
+tick in §4 is built on, simply does not compile without `tokio` or `smol`. `smol` is the
+smaller of the two for the one function needed. It changes nothing about how the code is
+written; it is a dependency of the framework, surfaced as a feature flag.
 
 No `dirs` / `directories` crate: `std::env::current_exe()` plus a write-probe is the
 whole portable-path rule (§11), the same call cmote's `paths.rs` makes.
@@ -185,6 +194,11 @@ clecta/
             ├── browser.rs   the files pane and its rows
             └── tree.rs      the folder tree pane, its splitter and its fold button
 ```
+
+**Built so far:** everything above except `paths.rs` and `settings.rs`, which land with
+persistence. `ui/mod.rs` also carries the formatting helpers (elide, size, date, clock)
+and their tests — small pure functions with no home of their own, and the kind where a
+subtly wrong answer survives a hundred glances at the screen.
 
 **Naming collision, resolved up front:** rodio's playback handle is called `Player`. The
 UI calls the two halves **"Player 1" / "Player 2"** because that is the user's word for
@@ -605,12 +619,12 @@ aesthetic: it is the requirement.
 - **No C toolchain**, and this too is real rather than aesthetic: cpal binds CoreAudio /
   WASAPI through `objc2` / `windows-sys`, both pure Rust, and symphonia is pure Rust.
   Nothing needs NASM or a vendored C library — the property cmote had to fight for with
-  `ring` (§2 there) comes free here. **Confirmed on the spikes' release builds**, first
-  audio-only (1.9 MB) and then **with iced and wgpu in the tree** (5.8 MB), which was the
-  one dependency that could have changed the answer. `otool -L` lists only OS frameworks
-  either way — CoreAudio, AudioToolbox, AppKit, Metal, QuartzCore, CoreGraphics and
-  friends — not one third-party dylib to ship alongside. wgpu costs 3.9 MB of binary and
-  a `Metal.framework` link, and nothing else.
+  `ring` (§2 there) comes free here. **Re-confirmed at each step**: 1.9 MB for the
+  audio-only spike, 5.8 MB once iced and wgpu were in the tree — the one dependency that
+  could have changed the answer — and **7.6 MB for the app itself**, with rfd and smol
+  added. `otool -L` lists only OS frameworks at every step: CoreAudio, AudioToolbox,
+  AppKit, Metal, QuartzCore, CoreGraphics and friends. Not one third-party dylib to ship
+  alongside, which is the property that makes "copy it anywhere and run it" true.
 - **Building the shipped Intel binary on an Apple Silicon Mac**: add
   `--target x86_64-apple-darwin` (the Xcode CLT SDK carries both slices; Rosetta 2 only to
   *run* it locally). Same split CI uses.
@@ -633,9 +647,13 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   path arithmetic, so no bundle needs to exist to test it.
 - **`settings.rs`** — a round trip, and every broken input (absent, empty, truncated JSON,
   wrong types, out-of-range fader) reading as defaults rather than an error.
-- **`tree.rs`** — expand returns exactly the unlisted paths; collapse takes the subtree;
-  `None` vs `Some(vec![])` survives a collapse/expand round trip; path arithmetic on
-  both path dialects.
+- **`tree.rs`** — collapse takes the subtree and keeps the listings; `None` vs
+  `Some(vec![])` survives a collapse/expand round trip. On what `expand` returns, the
+  implementation split the case in two, and the split is the interesting part: **`expand`
+  always asks for a re-list**, because a folder the user deliberately opens should show
+  what is there *now*, while **`reveal`** — opening the ancestors of a folder chosen
+  elsewhere — returns *exactly* the ones never listed, because nobody asked for that
+  filesystem work. One test each.
 - **`browser.rs`** — extension → category (audio / video / other), the natural-numeric
   sort, the hidden filter.
 - **`deck.rs`** — the transport state machine as a pure `transition(state, event)`, so
