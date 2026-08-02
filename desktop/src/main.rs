@@ -12,6 +12,8 @@ mod browser;
 mod deck;
 mod fsio;
 mod mixer;
+mod paths;
+mod settings;
 mod tree;
 mod ui;
 

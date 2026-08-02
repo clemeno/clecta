@@ -8,9 +8,14 @@
 
 use std::f32::consts::FRAC_PI_2;
 
+use serde::{Deserialize, Serialize};
+
 /// The crossfader's shape. Neither curve is right for everything, which is why hardware
 /// mixers ship the knob.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Stored by name in `settings.json`, so the file stays readable and adding a third curve
+/// later cannot silently renumber the existing two (PLAN §11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Curve {
 	/// `g1 = cos(x·π/2)`, `g2 = sin(x·π/2)`. `g1² + g2² = 1` — loudness holds flat.
 	/// Right for two DIFFERENT tracks, whose signals are uncorrelated and therefore sum

@@ -16,10 +16,10 @@ code is meant to be read as much as run, so this plan is didactic — it explain
 each choice was made, and every deliberate shortcut carries a `ponytail:` note so
 "simple" reads as intent, not ignorance.
 
-Status: **v0.1 — the app runs.** Two players with a working transport, the mixer strip,
-and the browser (files pane + folder tree) are built and green; **`paths.rs`,
-`settings.rs` and the drop gestures of §10 are not written yet.** Every decision is
-locked; §15 is the log.
+Status: **v0.1 — the app runs, and remembers.** Two players with a working transport, the
+mixer strip, the browser (files pane + folder tree) and portable persistence are built
+and green; **the drop gestures of §10 are the one part of the plan not yet written.**
+Every decision is locked; §15 is the log.
 
 ---
 
@@ -195,10 +195,9 @@ clecta/
             └── tree.rs      the folder tree pane, its splitter and its fold button
 ```
 
-**Built so far:** everything above except `paths.rs` and `settings.rs`, which land with
-persistence. `ui/mod.rs` also carries the formatting helpers (elide, size, date, clock)
-and their tests — small pure functions with no home of their own, and the kind where a
-subtly wrong answer survives a hundred glances at the screen.
+**Built so far:** all of it. `ui/mod.rs` also carries the formatting helpers (elide, size,
+date, clock) and their tests — small pure functions with no home of their own, and the
+kind where a subtly wrong answer survives a hundred glances at the screen.
 
 **Naming collision, resolved up front:** rodio's playback handle is called `Player`. The
 UI calls the two halves **"Player 1" / "Player 2"** because that is the user's word for
@@ -609,7 +608,19 @@ aesthetic: it is the requirement.
   a user has manually placed in a directory tree that mimics `.app/Contents/MacOS`, which
   is not a case worth code.
 - **A corrupt or unreadable `settings.json` yields defaults**, logged, never a crash or a
-  refusal to start. A settings file must never be able to brick the app.
+  refusal to start. A settings file must never be able to brick the app. Neither `load`
+  nor `save` returns a `Result`, because there is nothing a caller could usefully do with
+  one. The file is plain text a user can edit, so it is a **trust boundary**, not mere
+  deserialization: a value outside the range the UI can produce — a fader of 1.5, a
+  window ten pixels wide, a folder that has since been deleted — falls back to its
+  default *field by field*, so one hand-edited number does not discard the whole file.
+- **Written once, at exit.** `exit_on_close_request(false)` routes the close through
+  `update`, which writes the file and then calls `iced::exit()` — unconditionally, or the
+  window would refuse to close. The alternative, saving on every change, means a disk
+  write per slider frame. `ponytail:` a plain `fs::write`, not write-to-temp-then-rename:
+  losing the fader positions to a crash mid-write costs one run of defaults. **The known
+  gap is a kill or a crash, which skips the save entirely** — including, possibly, ⌘Q on
+  macOS, which is on the manual smoke-test list for that reason.
 - **One binary, no installer.** Same release profile as cmote (`lto`,
   `codegen-units = 1`, `strip`, `panic = "abort"`). `#![windows_subsystem = "windows"]`
   in `main.rs` so no console window pops on Windows (inert on macOS).
@@ -621,8 +632,8 @@ aesthetic: it is the requirement.
   Nothing needs NASM or a vendored C library — the property cmote had to fight for with
   `ring` (§2 there) comes free here. **Re-confirmed at each step**: 1.9 MB for the
   audio-only spike, 5.8 MB once iced and wgpu were in the tree — the one dependency that
-  could have changed the answer — and **7.6 MB for the app itself**, with rfd and smol
-  added. `otool -L` lists only OS frameworks at every step: CoreAudio, AudioToolbox,
+  could have changed the answer — 7.6 MB for the app itself with rfd and smol added, and
+  **7.7 MB with serde and serde_json**. `otool -L` lists only OS frameworks at every step: CoreAudio, AudioToolbox,
   AppKit, Metal, QuartzCore, CoreGraphics and friends. Not one third-party dylib to ship
   alongside, which is the property that makes "copy it anywhere and run it" true.
 - **Building the shipped Intel binary on an Apple Silicon Mac**: add
@@ -645,8 +656,11 @@ Pure logic is tested; anything needing a device or a real folder is manual.
 - **`paths.rs`** — the `.app/Contents/MacOS` walk-up returns the directory beside the
   bundle, and an ordinary exe path returns the directory beside the binary. Pure string /
   path arithmetic, so no bundle needs to exist to test it.
-- **`settings.rs`** — a round trip, and every broken input (absent, empty, truncated JSON,
-  wrong types, out-of-range fader) reading as defaults rather than an error.
+- **`settings.rs`** — a round trip, and every broken input (empty, truncated JSON, wrong
+  types, not an object) reading as defaults rather than an error. Two more the
+  implementation earned: a *missing* field keeps its default rather than failing the
+  parse, so adding a field cannot invalidate a file someone already has; and an
+  out-of-range value falls back **alone**, with the good values around it kept.
 - **`tree.rs`** — collapse takes the subtree and keeps the listings; `None` vs
   `Some(vec![])` survives a collapse/expand round trip. On what `expand` returns, the
   implementation split the case in two, and the split is the interesting part: **`expand`
@@ -668,7 +682,11 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   row to a player, drag a file in from Finder, pull the audio device — and the
   **portability check**: copy the binary to an empty folder, run it, confirm
   `clecta-data/settings.json` appears *there* and nothing appears in `~/Library` or the
-  registry.
+  registry. **Half of it is already confirmed on macOS**: a release binary copied to an
+  empty folder creates `clecta-data/` beside itself and leaves `~/Library/Application
+  Support/clecta` non-existent. The other half — that `settings.json` lands in it — needs
+  a window someone can actually close, so it stays on this list, along with **⌘Q**, which
+  may bypass the close request and therefore the save.
 
 **CI** mirrors cmote's `.github/workflows/ci.yml` — `cargo fmt --check`, `cargo clippy
 -D warnings`, `cargo test`, `cargo deny` + `cargo audit` — with `working-directory:
@@ -728,7 +746,8 @@ path, so `/ponytail-debt` can harvest them later.
 | Q6 | Files pane rows | **`scrollable(column(rows))`**, not `widget::table`. Spiked: `table` has no row element, so a row cannot carry a selected state | §9 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
-answer; both are now settled by `src/bin/ui_spike.rs`.
+answer; both were settled by a throwaway spike, which is now deleted — what it proved
+lives in `app.rs` and `ui/browser.rs`, and the reasoning is in §6 and §9.
 
 ---
 

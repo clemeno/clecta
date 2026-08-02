@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use iced::widget::pane_grid::Axis;
 use iced::widget::{Space, button, column, container, pane_grid, row, text};
-use iced::{Element, Fill, Subscription, Task, Theme, time};
+use iced::{Element, Fill, Size, Subscription, Task, Theme, time, window};
 
 use crate::audio::Engine;
 use crate::browser::{self, Browser, Entry};
 use crate::deck::{self, Deck, DeckId, Track};
 use crate::mixer::{self, Curve};
+use crate::settings::Settings;
 use crate::tree::Tree;
 use crate::{fsio, ui};
 
@@ -37,13 +38,28 @@ const MIN_PANE: f32 = 170.0;
 const MIXER_WIDTH: f32 = 240.0;
 
 pub fn run() -> iced::Result {
-	iced::application(Clecta::boot, Clecta::update, Clecta::view)
-		.title(Clecta::title)
-		.subscription(Clecta::subscription)
-		.theme(Clecta::theme)
-		.window_size((1180.0, 760.0))
-		.centered()
-		.run()
+	// Read before the window exists, because its size is one of the things restored. A
+	// blocking read of one small file, once, before anything is on screen.
+	let settings = Settings::load();
+	let window = settings.window;
+
+	iced::application(
+		// `boot` is `Fn`, not `FnOnce`, so the settings are cloned into each call rather
+		// than moved. One clone of five fields, once.
+		move || Clecta::boot(settings.clone()),
+		Clecta::update,
+		Clecta::view,
+	)
+	.title(Clecta::title)
+	.subscription(Clecta::subscription)
+	.theme(Clecta::theme)
+	.window_size(window)
+	// Closing has to run through `update` so the settings are written before the process
+	// goes away. Every path out of `CloseRequested` ends in `iced::exit`, or the window
+	// would refuse to close (PLAN §11).
+	.exit_on_close_request(false)
+	.centered()
+	.run()
 }
 
 /// Which region of the window a pane holds. Fixed at boot: the layout is not
@@ -91,6 +107,10 @@ pub enum Message {
 	/// A directory listing came back off the GUI thread.
 	FilesListed(PathBuf, Result<Vec<Entry>, String>),
 	FoldersListed(PathBuf, Result<Vec<PathBuf>, String>),
+	/// The window was resized. Recorded, not saved — the file is written once, at exit.
+	WindowResized(Size),
+	/// The window's close button, or ⌘Q. The last chance to write `settings.json`.
+	CloseRequested,
 }
 
 pub struct Clecta {
@@ -108,13 +128,15 @@ pub struct Clecta {
 	tree_split: Option<pane_grid::Split>,
 	/// The tree's last width, remembered across a fold for the same reason.
 	tree_ratio: f32,
+	/// The window's current size, tracked so it can be restored next run (PLAN §11).
+	window: (f32, f32),
 	/// The one line of feedback the app gives: what loaded, what would not decode, what
 	/// the audio device is (PLAN §7).
 	notice: String,
 }
 
 impl Clecta {
-	fn boot() -> (Self, Task<Message>) {
+	fn boot(settings: Settings) -> (Self, Task<Message>) {
 		// Built by splitting rather than from a `Configuration`, because
 		// `with_configuration` does not return the `Split` handles and the fold needs one.
 		let (mut panes, decks_pane) = pane_grid::State::new(Section::Decks);
@@ -137,24 +159,42 @@ impl Clecta {
 			Err(error) => (None, format!("no audio: {error:#}")),
 		};
 
+		let mut decks = [Deck::default(), Deck::default()];
+		for (deck, fader) in decks.iter_mut().zip(settings.faders) {
+			deck.fader = fader;
+		}
+
 		let mut app = Self {
 			engine,
-			decks: [Deck::default(), Deck::default()],
-			crossfader: 0.5,
-			curve: Curve::default(),
+			decks,
+			crossfader: settings.crossfader,
+			curve: settings.curve,
 			browser: Browser::default(),
 			tree: Tree::new(fsio::roots()),
 			panes,
 			tree_split: Some(tree_split),
 			tree_ratio: TREE_RATIO,
+			window: settings.window,
 			notice,
 		};
 		app.apply_gains();
 
-		// Open on the home folder, so the first thing on screen is a real listing rather
-		// than an empty pane with a button in it.
-		let task = app.select_folder(fsio::home());
+		// Open where the last run left off, or on the home folder — so the first thing on
+		// screen is a real listing rather than an empty pane with a button in it. The
+		// folder is known to exist: `Settings` drops one that does not.
+		let task = app.select_folder(settings.folder.unwrap_or_else(fsio::home));
 		(app, task)
+	}
+
+	/// The state worth keeping, gathered for the one write at exit (PLAN §11).
+	fn settings(&self) -> Settings {
+		Settings {
+			curve: self.curve,
+			faders: [self.decks[0].fader, self.decks[1].fader],
+			crossfader: self.crossfader,
+			folder: self.browser.folder.clone(),
+			window: self.window,
+		}
 	}
 
 	/// The window title. Shows the loaded tracks once there are any, so the app is
@@ -178,13 +218,19 @@ impl Clecta {
 		Theme::Dark
 	}
 
-	/// The tick runs only while something plays (PLAN §4).
 	fn subscription(&self) -> Subscription<Message> {
-		if self.decks.iter().any(Deck::is_playing) {
+		// The tick runs only while something plays (PLAN §4).
+		let tick = if self.decks.iter().any(Deck::is_playing) {
 			time::every(TICK).map(|_| Message::Tick)
 		} else {
 			Subscription::none()
-		}
+		};
+
+		Subscription::batch([
+			tick,
+			window::resize_events().map(|(_, size)| Message::WindowResized(size)),
+			window::close_requests().map(|_| Message::CloseRequested),
+		])
 	}
 
 	fn update(&mut self, message: Message) -> Task<Message> {
@@ -281,6 +327,15 @@ impl Clecta {
 						self.browser.fail(error);
 					}
 				}
+			}
+
+			Message::WindowResized(size) => self.window = (size.width, size.height),
+
+			Message::CloseRequested => {
+				self.settings().save();
+				// Unconditional, and it has to be: `exit_on_close_request(false)` means
+				// nothing else will close the window.
+				return iced::exit();
 			}
 
 			Message::FoldersListed(folder, result) => match result {

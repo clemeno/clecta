@@ -9,8 +9,7 @@ the design and the decision log.
 cargo run
 ```
 
-The window opens on your home folder. Both spikes that came before it are gone — what
-they proved is now in the app.
+The window opens where you left it last time, or on your home folder on a first run.
 
 ## What works
 
@@ -28,11 +27,17 @@ they proved is now in the app.
   tree away and brings it back at the width it had (PLAN §6, §9).
 - **No audio device is survivable.** The app still browses, says so in the status bar,
   and offers **Reconnect audio** (PLAN §11).
+- **It is portable.** Both faders, the crossfader, the curve, the folder and the window
+  size come back next launch, from **`clecta-data/settings.json` beside the executable** —
+  beside the `.app`, not inside it, on macOS. Nothing is written anywhere else: no
+  registry keys, no `~/Library` unless the app itself sits somewhere unwritable. Delete
+  the folder and you have deleted clecta. The file is written when the window closes, and
+  is plain JSON you can edit — a value that makes no sense falls back to its default on
+  its own, and a file that will not parse at all reads as defaults rather than stopping
+  the app (PLAN §11).
 
 ## What does not, yet
 
-- **No persistence.** `paths.rs` and `settings.rs` are not written, so the faders, the
-  curve, the folder and the window size all reset on every launch (PLAN §11).
 - **No drag and drop**, neither in-app nor from Finder / Explorer (PLAN §10). The
   **Load…** buttons and the double-click are the ways in.
 - **No video picture** — the audio track of an `.mp4` / `.mkv` plays, and that is v1
@@ -60,4 +65,10 @@ real folder is manual (PLAN §12):
 | `deck.rs` | every edge of the transport state machine, and that an unaimed load never interrupts a playing player while an idle one exists |
 | `browser.rs` | extension → kind, the natural-numeric sort, the hidden filter, a selection surviving (or not) a refresh |
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
+| `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
+| `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
+
+One thing the suite cannot reach: **the save fires when the window closes**, so killing
+the process or force-quitting loses the last changes. Worth a manual check that ⌘Q saves
+too — it may go around the close request (PLAN §11).
