@@ -17,8 +17,15 @@ const FILE: &str = "settings.json";
 /// A window smaller than this cannot show the two players and the mixer side by side, and
 /// one larger than any real display is a lost window. Both are reachable by editing the
 /// file, so both are clamped on the way in.
+///
+/// The ceiling is not cosmetic: it is a hard renderer limit, found by asking for a
+/// 15000×15000 window and watching wgpu panic during `Surface::configure` — *before* the
+/// first frame, so the app died at launch with a file it was supposed to survive. wgpu
+/// guarantees a maximum texture dimension of only 8192, and a surface is measured in
+/// **physical** pixels, so a 2× display doubles whatever is asked for here. 4096 leaves
+/// the margin, and is already larger than any real display measured in logical points.
 const MIN_WINDOW: f32 = 480.0;
-const MAX_WINDOW: f32 = 16_000.0;
+const MAX_WINDOW: f32 = 4096.0;
 
 /// What survives a restart. Deliberately small: the mixer's settings, where the browser
 /// was, and how big the window was.
@@ -196,8 +203,10 @@ mod tests {
 
 	#[test]
 	fn out_of_range_values_fall_back_one_field_at_a_time() {
-		// Arrange: a hand-edited file, with the crossfader still perfectly good.
-		let text = r#"{"faders": [1.5, -0.2], "crossfader": 0.4, "window": [10.0, 1e9]}"#;
+		// Arrange: a hand-edited file, with the crossfader still perfectly good. The window
+		// height is the value that really crashed wgpu at launch, not a made-up huge
+		// number — this is the regression, pinned.
+		let text = r#"{"faders": [1.5, -0.2], "crossfader": 0.4, "window": [10.0, 15000.0]}"#;
 
 		// Act
 		let settings = Settings::from_json(text);

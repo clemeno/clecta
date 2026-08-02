@@ -54,10 +54,11 @@ cargo build --release --target x86_64-apple-darwin
   size come back next launch, from **`clecta-data/settings.json` beside the executable** —
   beside the `.app`, not inside it, on macOS. Nothing is written anywhere else: no
   registry keys, no `~/Library` unless the app itself sits somewhere unwritable. Delete
-  the folder and you have deleted clecta. The file is written when the window closes, and
-  is plain JSON you can edit — a value that makes no sense falls back to its default on
-  its own, and a file that will not parse at all reads as defaults rather than stopping
-  the app (PLAN §11).
+  the folder and you have deleted clecta. The file is written **two seconds after you
+  change something**, and again when the window closes, so quitting any way at all — ⌘Q
+  included — keeps your settings. It is plain JSON you can edit: a value that makes no
+  sense falls back to its default on its own, and a file that will not parse at all reads
+  as defaults rather than stopping the app (PLAN §11).
 
 ## What does not, yet
 
@@ -111,12 +112,13 @@ real folder is manual (PLAN §12):
 
 Two things the suite cannot reach, both of which need a window a person can click:
 
-- **The save fires when the window closes**, so killing the process or force-quitting
-  loses the last changes. Worth a manual check that ⌘Q saves too — it may go around the
-  close request (PLAN §11). The *folder* half of the portability check is confirmed both
-  ways on macOS: a bare binary and a bundled `Clecta.app` each create `clecta-data/`
-  beside themselves, and nothing appears in `~/Library`. That `settings.json` lands in it
-  needs a window someone can shut.
+- **The close-button save.** ⌘Q *was* the open question here, and the answer was that it
+  never reaches the app at all — so the settings are now written on a two-second throttle
+  as well, which is what a kill, a crash or a ⌘Q relies on (PLAN §11). Both halves of the
+  portability check are confirmed on macOS without a click: a bare binary and a bundled
+  `Clecta.app` each create `clecta-data/` beside themselves with nothing in `~/Library`,
+  and a run started with an oversized window writes the resized value while still
+  running. What is unverified is the close *button* specifically.
 - **The drop gestures themselves.** The policy and the targeting are pure and tested; the
   pointer bookkeeping around them — the ring lighting on one player, the drag disarming
   when it is let go over nothing, a release over a button not leaving it armed — is

@@ -21,7 +21,10 @@ mixer strip, the browser (files pane + folder tree), portable persistence, both 
 gestures, `bundle-macos.sh` (§11) and the CI workflow with its supply-chain gate (§12)
 are all built and green. What is left is the **manual smoke test** (§12), which needs a
 window a person can click — everything on that list that could be checked without one
-now has been. Every decision is locked; §15 is the log.
+now has been. Running it found the two things the plan got wrong: **⌘Q never reaches the
+app**, so saving at exit saved nothing for the way most Mac users quit, and the window
+ceiling in `settings.rs` was **above what wgpu can render**, so a hand-edited file crashed
+the app at launch. Both are fixed, and §11 records what each cost. §15 is the log.
 
 ---
 
@@ -648,13 +651,34 @@ aesthetic: it is the requirement.
   deserialization: a value outside the range the UI can produce — a fader of 1.5, a
   window ten pixels wide, a folder that has since been deleted — falls back to its
   default *field by field*, so one hand-edited number does not discard the whole file.
-- **Written once, at exit.** `exit_on_close_request(false)` routes the close through
-  `update`, which writes the file and then calls `iced::exit()` — unconditionally, or the
-  window would refuse to close. The alternative, saving on every change, means a disk
-  write per slider frame. `ponytail:` a plain `fs::write`, not write-to-temp-then-rename:
-  losing the fader positions to a crash mid-write costs one run of defaults. **The known
-  gap is a kill or a crash, which skips the save entirely** — including, possibly, ⌘Q on
-  macOS, which is on the manual smoke-test list for that reason.
+  **The window ceiling is a renderer limit, not taste**, and it took a real crash to find
+  out: 16000 was the original cap, and a file asking for a 15000×15000 window panicked
+  inside `Surface::configure` before the first frame — `maximum extent for either
+  dimension is 8192`. A settings file killed the app at launch, which is the one thing
+  this module promises cannot happen. wgpu only guarantees 8192, and a surface is
+  measured in *physical* pixels, so a 2× display doubles whatever the file asks for. The
+  cap is now **4096** — still larger than any real display in logical points, with the
+  margin the HiDPI factor needs.
+- **Written on a short throttle, and at exit.** The original design was one write, at
+  exit: `exit_on_close_request(false)` routes the close through `update`, which writes the
+  file and then calls `iced::exit()` — unconditionally, or the window would refuse to
+  close. **That turned out to be reachable only by the close button.** macOS ⌘Q and the
+  app menu's **Quit** run `applicationWillTerminate`, which winit converts to
+  `LoopExiting`; iced 0.14 does not implement winit's `ApplicationHandler::exiting`, so
+  the event is dropped before any clecta code sees it. There is no hook to add — the
+  design had to change, not the wiring. So a `dirty` flag is set by the five things worth
+  keeping, and a `time::every(2s)` subscription **exists only while `dirty` is true**,
+  saving and clearing it. Nothing ticks at rest, and quitting any way at all costs at most
+  the last two seconds. Strictly a *throttle*, not a debounce: the write lands two seconds
+  after the **first** change of a burst rather than being postponed for as long as a fader
+  keeps moving, which caps the exposure instead of extending it. Two things this earned:
+  marking the window dirty unconditionally made **every launch rewrite the file it had
+  just read**, because creating the window emits a resize event carrying the size that was
+  just asked for — so the resize arm compares before it marks; and `boot` clears the flag
+  after restoring the last folder, since restoring is not a change. `ponytail:` still a
+  plain `fs::write`, not write-to-temp-then-rename: losing the fader positions to a crash
+  *mid-write* costs one run of defaults. **The remaining gap is a kill or a crash within
+  two seconds of a change**, which is the honest cost of not writing per slider frame.
 - **One binary, no installer.** Same release profile as cmote (`lto`,
   `codegen-units = 1`, `strip`, `panic = "abort"`). `#![windows_subsystem = "windows"]`
   in `main.rs` so no console window pops on Windows (inert on macOS).
@@ -666,7 +690,8 @@ aesthetic: it is the requirement.
   doing so turned the `.app` rule from three unit tests on strings into a fact: a bundle
   copied to an empty folder and launched creates `clecta-data/` *beside* `Clecta.app`,
   and `~/Library/Application Support/clecta` still does not exist afterwards. Killing
-  that process left the folder empty, which is the save-at-exit gap below, seen.
+  that process left the folder empty, which was the save-at-exit gap above, seen — and is
+  what the throttle now closes.
 - **No C toolchain**, and this too is real rather than aesthetic: cpal binds CoreAudio /
   WASAPI through `objc2` / `windows-sys`, both pure Rust, and symphonia is pure Rust.
   Nothing needs NASM or a vendored C library — the property cmote had to fight for with
@@ -726,10 +751,14 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   registry. **The folder half is confirmed on macOS, both ways**: a bare release binary
   copied to an empty folder creates `clecta-data/` beside itself, and a `Clecta.app` from
   `bundle-macos.sh` creates it beside the *bundle* — the walk-up of §11, run rather than
-  argued. `~/Library/Application Support/clecta` does not exist after either. What is
-  left is the *file*: `settings.json` only appears on a clean close, so it needs a window
-  someone can shut. **⌘Q** stays on the list for the same reason, since it may bypass the
-  close request and therefore the save.
+  argued. `~/Library/Application Support/clecta` does not exist after either. **⌘Q came
+  off this list by failing**: the app menu's **Quit** wrote nothing at all, which is what
+  forced the throttle in §11. The *file* half is confirmed too, and without a click —
+  launch with a settings file asking for a window larger than the display, let the OS
+  resize it, and the app writes `2005×1227` along with the faders and the curve **while
+  still running**; killing rather than closing it proves only the throttle can have
+  written that. Asking for 15000×15000 instead is how the wgpu ceiling in §11 was found.
+  What is left needing a person is the close *button* path and the drop gestures.
 
 **CI** mirrors cmote's `.github/workflows/ci.yml` — four jobs: `rustfmt` on Linux,
 clippy + test on Windows natively, clippy against **`x86_64-apple-darwin`** plus a native
@@ -810,10 +839,13 @@ path, so `/ponytail-debt` can harvest them later.
 | Q4 | Targets + portability | **Windows 11 + macOS Sequoia Intel**, dual CI, and **portability as a hard requirement**: everything written goes to `clecta-data/` beside the app, including beside the `.app` rather than inside it | §1, §9, §11, §12 |
 | Q5 | Splitters | **`widget::pane_grid`**, not a hand-rolled third implementation. Spiked: the fixed layout fits, reordering is opt-in, the fold costs ~14 lines | §6 |
 | Q6 | Files pane rows | **`scrollable(column(rows))`**, not `widget::table`. Spiked: `table` has no row element, so a row cannot carry a selected state | §9 |
+| Q7 | When to save | **A `dirty` flag and a 2s throttle**, alongside the write at close. Not a design preference — the smoke test showed ⌘Q never reaches the app, so saving only at exit lost the settings for the ordinary way of quitting a Mac app | §11, §12 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
-lives in `app.rs` and `ui/browser.rs`, and the reasoning is in §6 and §9.
+lives in `app.rs` and `ui/browser.rs`, and the reasoning is in §6 and §9. **Q7 is the one
+the plan got wrong** rather than left open: §11 asserted the close request was the last
+chance to write, and running the app is what disproved it.
 
 ---
 

@@ -25,6 +25,14 @@ use crate::{fsio, ui};
 /// slow enough that it is not a battery bug — and it only runs while something plays.
 const TICK: Duration = Duration::from_millis(50);
 
+/// How long a changed setting may sit unsaved (PLAN §11). The window closing is *not* a
+/// reliable last chance: macOS ⌘Q and the app menu's **Quit** run
+/// `applicationWillTerminate`, which winit turns into `LoopExiting` — an event iced 0.14
+/// never surfaces, so `CloseRequested` simply does not arrive. Two seconds is long enough
+/// that sweeping a fader writes a handful of times rather than once per pixel, and short
+/// enough that the worst a quit or a crash costs is the last couple of seconds.
+const SAVE_AFTER: Duration = Duration::from_secs(2);
+
 /// Height of the top section, and width of the files pane, as fractions.
 const DECKS_RATIO: f32 = 0.42;
 const TREE_RATIO: f32 = 0.68;
@@ -56,7 +64,8 @@ pub fn run() -> iced::Result {
 	.window_size(window)
 	// Closing has to run through `update` so the settings are written before the process
 	// goes away. Every path out of `CloseRequested` ends in `iced::exit`, or the window
-	// would refuse to close (PLAN §11).
+	// would refuse to close (PLAN §11). This catches the close *button* only — ⌘Q is why
+	// there is also a debounced autosave.
 	.exit_on_close_request(false)
 	.centered()
 	.run()
@@ -107,9 +116,14 @@ pub enum Message {
 	/// A directory listing came back off the GUI thread.
 	FilesListed(PathBuf, Result<Vec<Entry>, String>),
 	FoldersListed(PathBuf, Result<Vec<PathBuf>, String>),
-	/// The window was resized. Recorded, not saved — the file is written once, at exit.
+	/// The window was resized. Recorded, then saved with everything else once the app has
+	/// been still for `SAVE_AFTER`.
 	WindowResized(Size),
-	/// The window's close button, or ⌘Q. The last chance to write `settings.json`.
+	/// The autosave timer fired: something changed `SAVE_AFTER` ago. Only ever sent while
+	/// `dirty`, because the subscription that sends it does not otherwise exist.
+	SaveSettings,
+	/// The window's close button. Writes `settings.json` and exits. **Not** ⌘Q, which
+	/// never reaches the app at all — see `SAVE_AFTER`.
 	CloseRequested,
 	/// Files from outside are hovering the window, or have left again. No position comes
 	/// with either event, which is why the target has to be derived (PLAN §10).
@@ -150,6 +164,9 @@ pub struct Clecta {
 	/// The one line of feedback the app gives: what loaded, what would not decode, what
 	/// the audio device is (PLAN §7).
 	notice: String,
+	/// A persisted setting has changed and is not on disk yet. Drives the autosave
+	/// subscription, which exists only while this is true.
+	dirty: bool,
 }
 
 impl Clecta {
@@ -196,6 +213,7 @@ impl Clecta {
 			hover: None,
 			os_hover: false,
 			notice,
+			dirty: false,
 		};
 		app.apply_gains();
 
@@ -203,6 +221,9 @@ impl Clecta {
 		// screen is a real listing rather than an empty pane with a button in it. The
 		// folder is known to exist: `Settings` drops one that does not.
 		let task = app.select_folder(settings.folder.unwrap_or_else(fsio::home));
+		// Restoring is not a change. Without this, every launch would write the file back
+		// two seconds later having altered nothing.
+		app.dirty = false;
 		(app, task)
 	}
 
@@ -246,8 +267,22 @@ impl Clecta {
 			Subscription::none()
 		};
 
+		// The autosave timer, which exists only while there is something to save: the
+		// subscription is rebuilt after every `update`, so clearing `dirty` in the save
+		// arm below ends it. That makes this a throttle rather than a true debounce — the
+		// file is written at most `SAVE_AFTER` after the *first* change of a burst, not
+		// after the last — which is the behaviour we want. A debounce would postpone the
+		// write for as long as a fader keeps moving; this one caps the exposure instead.
+		// Nothing ticks at rest.
+		let autosave = if self.dirty {
+			time::every(SAVE_AFTER).map(|_| Message::SaveSettings)
+		} else {
+			Subscription::none()
+		};
+
 		Subscription::batch([
 			tick,
+			autosave,
 			window::resize_events().map(|(_, size)| Message::WindowResized(size)),
 			window::close_requests().map(|_| Message::CloseRequested),
 			gestures(),
@@ -319,16 +354,19 @@ impl Clecta {
 
 			Message::FaderChanged(id, value) => {
 				self.decks[id.index()].fader = value;
+				self.dirty = true;
 				self.apply_gains();
 			}
 
 			Message::CrossfaderChanged(value) => {
 				self.crossfader = value;
+				self.dirty = true;
 				self.apply_gains();
 			}
 
 			Message::CurveSelected(curve) => {
 				self.curve = curve;
+				self.dirty = true;
 				self.apply_gains();
 			}
 
@@ -356,7 +394,20 @@ impl Clecta {
 				}
 			}
 
-			Message::WindowResized(size) => self.window = (size.width, size.height),
+			// Only a real change counts. Creating the window emits a resize event carrying
+			// the size it was just asked for, so marking this dirty unconditionally made
+			// every launch rewrite the file it had just read.
+			Message::WindowResized(size) => {
+				if self.window != (size.width, size.height) {
+					self.window = (size.width, size.height);
+					self.dirty = true;
+				}
+			}
+
+			Message::SaveSettings => {
+				self.settings().save();
+				self.dirty = false;
+			}
 
 			Message::FilesHovered(hovering) => self.os_hover = hovering,
 
@@ -539,6 +590,9 @@ impl Clecta {
 		// flight and the stale-listing guard above has something to compare against.
 		self.browser.folder = Some(folder.clone());
 		self.browser.selected = None;
+		// Set here rather than at the two call sites, so a third one cannot forget. `boot`
+		// clears it again, because restoring the last folder is not a change.
+		self.dirty = true;
 
 		let mut tasks = vec![list_files(folder.clone())];
 		tasks.extend(self.tree.reveal(&folder).into_iter().map(list_folders));
