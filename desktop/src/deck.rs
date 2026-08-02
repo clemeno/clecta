@@ -6,6 +6,10 @@
 //! the room (PLAN §12) — and what stops "what should Pause do to a stopped player?" from
 //! being answered differently in three places.
 //!
+//! The drop policy lives here too, at the bottom: `drop_outcome` decides what a dropped
+//! file does and `idle_target` decides which player gets it, and PLAN §10 wants them
+//! side by side because between them they are the whole of what a drop means.
+//!
 //! The type is `Deck`, not `Player`, because rodio's playback handle is already called
 //! `Player`. The *user's* word for the two halves is still "Player 1" / "Player 2", which
 //! is what `DeckId::label` returns (PLAN §5).
@@ -163,6 +167,41 @@ pub fn idle_target(deck1: &Deck, deck2: &Deck) -> DeckId {
 		DeckId::Two
 	} else {
 		DeckId::One
+	}
+}
+
+/// What one dropped path does.
+///
+/// `Decline` rather than a silent no-op, because a gesture that appears to do nothing is
+/// indistinguishable from a broken app (PLAN §10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DropOutcome {
+	Load(PathBuf),
+	Decline(String),
+}
+
+/// Decide what a dropped path does, before any player is touched.
+///
+/// `first` separates the first file of a drop from the rest of it: a multi-file drop
+/// arrives as one event per file, and with two players and no queue the first one wins
+/// and the others are declined out loud (PLAN §10).
+///
+/// Not free of the filesystem — `is_dir` is the only way to tell a folder from a file
+/// with no extension — but free of `self`, which is what makes both gestures share one
+/// decision and lets it be tested with no window (PLAN §12).
+pub fn drop_outcome(path: PathBuf, first: bool) -> DropOutcome {
+	let name = crate::fsio::name_of(&path);
+
+	if !first {
+		DropOutcome::Decline(format!("one file at a time — {name} was ignored"))
+	} else if path.is_dir() {
+		DropOutcome::Decline(format!("{name} is a folder"))
+	} else if !crate::browser::kind_of(&path).is_media() {
+		// The extension only. Whatever the decoder says is the real answer, and `load`
+		// is where that arrives (PLAN §3).
+		DropOutcome::Decline(format!("{name} is not a media file"))
+	} else {
+		DropOutcome::Load(path)
 	}
 }
 
@@ -328,5 +367,59 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	#[test]
+	fn a_dropped_media_file_loads() {
+		// Arrange / Act / Assert: the ordinary case. The path need not exist — only a
+		// folder check touches the disk.
+		let path = PathBuf::from("/music/track.mp3");
+		assert_eq!(drop_outcome(path.clone(), true), DropOutcome::Load(path));
+	}
+
+	#[test]
+	fn a_dropped_folder_is_declined_by_name() {
+		// Arrange: a directory that certainly exists, so no fixture has to be created —
+		// the extension test alone could not tell this from a file (PLAN §10).
+		let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+		// Act
+		let outcome = drop_outcome(path, true);
+
+		// Assert
+		let DropOutcome::Decline(reason) = outcome else {
+			panic!("a folder must be declined");
+		};
+		assert!(reason.contains("folder"), "{reason:?}");
+		assert!(
+			reason.contains("desktop"),
+			"names the thing dropped: {reason:?}"
+		);
+	}
+
+	#[test]
+	fn a_dropped_non_media_file_is_declined() {
+		// Arrange / Act / Assert: declined here rather than after a decoder error, so the
+		// notice says something the user can act on.
+		let outcome = drop_outcome(PathBuf::from("/music/sleeve.jpg"), true);
+		let DropOutcome::Decline(reason) = outcome else {
+			panic!("a non-media file must be declined");
+		};
+		assert!(reason.contains("not a media file"), "{reason:?}");
+	}
+
+	#[test]
+	fn only_the_first_file_of_a_multi_file_drop_is_taken() {
+		// Arrange / Act: a perfectly good second media file, arriving as the second event
+		// of one drop.
+		let outcome = drop_outcome(PathBuf::from("/music/second.flac"), false);
+
+		// Assert: declined, and said out loud — the rest of the drop vanishing in silence
+		// is the outcome PLAN §10 rules out.
+		let DropOutcome::Decline(reason) = outcome else {
+			panic!("the rest of a multi-file drop must be declined");
+		};
+		assert!(reason.contains("one file at a time"), "{reason:?}");
+		assert!(reason.contains("second.flac"), "{reason:?}");
 	}
 }

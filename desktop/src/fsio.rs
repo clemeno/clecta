@@ -90,8 +90,12 @@ fn read_dir(folder: &Path) -> Result<impl Iterator<Item = std::fs::DirEntry>, St
 	Ok(entries.filter_map(Result::ok))
 }
 
-fn name_of(path: &Path) -> String {
+/// A path's last component, for a notice line or a sort key.
+///
+/// Falls back to the whole path, which is what `/` and `C:\` have instead of a name, and
+/// what a notice should say rather than nothing at all.
+pub fn name_of(path: &Path) -> String {
 	path.file_name()
 		.map(|name| name.to_string_lossy().into_owned())
-		.unwrap_or_default()
+		.unwrap_or_else(|| path.display().to_string())
 }

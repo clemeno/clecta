@@ -2,7 +2,7 @@
 //! three transport buttons.
 
 use iced::widget::{button, column, container, row, text};
-use iced::{Center, Element, Fill};
+use iced::{Center, Element, Fill, Theme};
 
 use crate::app::Message;
 use crate::deck::{self, Deck, DeckId, Transport};
@@ -12,7 +12,13 @@ use crate::ui;
 /// responsive elide needs the widget's real width, which only `advanced` gives (PLAN §3).
 const TITLE_CHARS: usize = 34;
 
-pub fn view(id: DeckId, deck: &Deck) -> Element<'_, Message> {
+/// The drop ring's thickness. Thick enough to read as an answer to "where is this going?"
+/// from across the window, which is the whole job it has.
+const RING_WIDTH: f32 = 2.0;
+
+/// `ring` lights this player as the one a release would land on — under the cursor for an
+/// in-app drag, derived for an OS drop, and never on both (PLAN §10).
+pub fn view(id: DeckId, deck: &Deck, ring: bool) -> Element<'_, Message> {
 	let loaded = deck.transport.has_track();
 
 	// Disabled rather than hidden: buttons that come and go make the panel jump, and the
@@ -49,11 +55,30 @@ pub fn view(id: DeckId, deck: &Deck) -> Element<'_, Message> {
 		]
 		.spacing(8),
 	)
-	.style(container::rounded_box)
+	.style(move |theme: &Theme| panel_style(theme, ring))
 	.padding(12)
 	.width(Fill)
 	.height(Fill)
 	.into()
+}
+
+/// The panel, plus the drop ring when this is the player a release would land on.
+///
+/// Green from the `success` palette rather than a hand-picked colour, so it stays legible
+/// if the theme ever changes, and distinct from the focus ring, which is `primary`.
+fn panel_style(theme: &Theme, ring: bool) -> container::Style {
+	let base = container::rounded_box(theme);
+	if !ring {
+		return base;
+	}
+
+	container::Style {
+		border: base
+			.border
+			.color(theme.extended_palette().success.strong.color)
+			.width(RING_WIDTH),
+		..base
+	}
 }
 
 /// The transport state, in the user's words rather than the enum's.

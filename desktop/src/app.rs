@@ -6,16 +6,16 @@
 //! three panes are arranged. That is deliberate — an `update` that is only ever a
 //! dispatch table stays readable as the app grows.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::widget::pane_grid::Axis;
-use iced::widget::{Space, button, column, container, pane_grid, row, text};
-use iced::{Element, Fill, Size, Subscription, Task, Theme, time, window};
+use iced::widget::{Space, button, column, container, mouse_area, pane_grid, row, text};
+use iced::{Element, Fill, Size, Subscription, Task, Theme, event, mouse, time, window};
 
 use crate::audio::Engine;
 use crate::browser::{self, Browser, Entry};
-use crate::deck::{self, Deck, DeckId, Track};
+use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
 use crate::settings::Settings;
 use crate::tree::Tree;
@@ -111,6 +111,15 @@ pub enum Message {
 	WindowResized(Size),
 	/// The window's close button, or ⌘Q. The last chance to write `settings.json`.
 	CloseRequested,
+	/// Files from outside are hovering the window, or have left again. No position comes
+	/// with either event, which is why the target has to be derived (PLAN §10).
+	FilesHovered(bool),
+	/// One file of an OS drop. A multi-file drop arrives as one of these per file.
+	FileDropped(PathBuf),
+	/// During an in-app drag, the pointer entered (`true`) or left (`false`) a player.
+	DragOver(DeckId, bool),
+	/// The left button came up, wherever it is. The end of any in-app drag.
+	DragReleased,
 }
 
 pub struct Clecta {
@@ -130,6 +139,14 @@ pub struct Clecta {
 	tree_ratio: f32,
 	/// The window's current size, tracked so it can be restored next run (PLAN §11).
 	window: (f32, f32),
+	/// The file an in-app drag is carrying. Armed by a press on a media row, disarmed by
+	/// the release — so a plain click is a drag that landed on nothing (PLAN §10).
+	drag: Option<PathBuf>,
+	/// The player the pointer is over. Only ever set while a drag is in flight, because
+	/// that is the only time the panels are drop targets at all.
+	hover: Option<DeckId>,
+	/// Whether files from outside are hovering the window right now.
+	os_hover: bool,
 	/// The one line of feedback the app gives: what loaded, what would not decode, what
 	/// the audio device is (PLAN §7).
 	notice: String,
@@ -175,6 +192,9 @@ impl Clecta {
 			tree_split: Some(tree_split),
 			tree_ratio: TREE_RATIO,
 			window: settings.window,
+			drag: None,
+			hover: None,
+			os_hover: false,
 			notice,
 		};
 		app.apply_gains();
@@ -230,6 +250,7 @@ impl Clecta {
 			tick,
 			window::resize_events().map(|(_, size)| Message::WindowResized(size)),
 			window::close_requests().map(|_| Message::CloseRequested),
+			gestures(),
 		])
 	}
 
@@ -262,7 +283,13 @@ impl Clecta {
 				self.load(id, path);
 			}
 
-			Message::RowSelected(path) => self.browser.selected = Some(path),
+			Message::RowSelected(path) => {
+				// The press both selects the row and arms a drag with it. A release that
+				// is not over a player disarms it and nothing else happens — which is
+				// exactly what a plain click is (PLAN §10).
+				self.drag = browser::kind_of(&path).is_media().then(|| path.clone());
+				self.browser.selected = Some(path);
+			}
 
 			Message::FolderSelected(folder) => return self.select_folder(folder),
 
@@ -330,6 +357,43 @@ impl Clecta {
 			}
 
 			Message::WindowResized(size) => self.window = (size.width, size.height),
+
+			Message::FilesHovered(hovering) => self.os_hover = hovering,
+
+			Message::FileDropped(path) => {
+				// Taking the flag is what makes the *first* file of the drop the one that
+				// counts: every later event in the same burst sees `false` (PLAN §10).
+				//
+				// `ponytail:` this leans on the hover arriving before the drop, which is
+				// the only burst boundary the event stream has. True on macOS and Windows
+				// (checked in winit's `performDragOperation:` and `IDropTarget::Drop`,
+				// neither of which cancels the hover first). A platform that skipped the
+				// hover would decline the drop with a notice, not swallow it.
+				let first = std::mem::take(&mut self.os_hover);
+				let target = deck::idle_target(&self.decks[0], &self.decks[1]);
+				self.accept_drop(target, path, first);
+			}
+
+			Message::DragOver(id, inside) => {
+				// Compared rather than merely cleared: both panels see the same cursor
+				// move, and the one being left is not always the one updated first.
+				if inside {
+					self.hover = Some(id);
+				} else if self.hover == Some(id) {
+					self.hover = None;
+				}
+			}
+
+			Message::DragReleased => {
+				let target = self.hover.take();
+				// Disarmed on every release, whatever it was over, so nothing is left
+				// armed behind a drag the user thought better of.
+				if let Some(path) = self.drag.take()
+					&& let Some(id) = target
+				{
+					self.accept_drop(id, path, true);
+				}
+			}
 
 			Message::CloseRequested => {
 				self.settings().save();
@@ -415,7 +479,7 @@ impl Clecta {
 	/// — it must never wipe a loaded track to show an error (PLAN §7).
 	fn load(&mut self, id: DeckId, path: PathBuf) {
 		if !browser::kind_of(&path).is_media() {
-			self.notice = format!("{} is not a media file", display_name(&path));
+			self.notice = format!("{} is not a media file", fsio::name_of(&path));
 			return;
 		}
 
@@ -426,7 +490,7 @@ impl Clecta {
 
 		match engine.load(id, &path) {
 			Ok(duration) => {
-				let name = display_name(&path);
+				let name = fsio::name_of(&path);
 				self.notice = format!("{}: {name}", id.label());
 
 				let deck = &mut self.decks[id.index()];
@@ -441,6 +505,30 @@ impl Clecta {
 			// `{error:#}` prints the anyhow chain on one line, which is what turns
 			// "cannot decode x.mp4" into "cannot decode x.mp4: unsupported codec".
 			Err(error) => self.notice = format!("{}: {error:#}", id.label()),
+		}
+	}
+
+	/// Apply the drop policy, then load or explain. Both gestures come through here, so a
+	/// folder is declined the same way whichever way it arrived (PLAN §10).
+	fn accept_drop(&mut self, id: DeckId, path: PathBuf, first: bool) {
+		match deck::drop_outcome(path, first) {
+			DropOutcome::Load(path) => self.load(id, path),
+			DropOutcome::Decline(reason) => self.notice = reason,
+		}
+	}
+
+	/// The player a release would land on right now, or `None` when nothing is being
+	/// dragged. Exactly one, or the ring would promise aiming the app cannot do.
+	fn drop_ring(&self) -> Option<DeckId> {
+		if self.os_hover {
+			// An OS drag carries no position, so the target is derived — and shown
+			// before the release rather than discovered after it (PLAN §10).
+			Some(deck::idle_target(&self.decks[0], &self.decks[1]))
+		} else if self.drag.is_some() {
+			// An in-app drag is truly aimed: the pointer is ours the whole way.
+			self.hover
+		} else {
+			None
 		}
 	}
 
@@ -550,8 +638,10 @@ impl Clecta {
 
 	/// The top section: two players with the mixer strip between them (PLAN §6).
 	fn decks_view(&self) -> Element<'_, Message> {
+		let ring = self.drop_ring();
+
 		row![
-			ui::deck::view(DeckId::One, &self.decks[0]),
+			self.deck_view(DeckId::One, ring),
 			container(ui::mixer::view(
 				&self.decks[0],
 				&self.decks[1],
@@ -559,11 +649,28 @@ impl Clecta {
 				self.curve,
 			))
 			.width(MIXER_WIDTH),
-			ui::deck::view(DeckId::Two, &self.decks[1]),
+			self.deck_view(DeckId::Two, ring),
 		]
 		.spacing(8)
 		.padding(8)
 		.into()
+	}
+
+	/// One player, made a drop target only while an in-app drag is in flight.
+	///
+	/// Attached conditionally because `mouse_area` reports every crossing of the panel,
+	/// dragging or not, and outside a drag there is nothing to do with that.
+	fn deck_view(&self, id: DeckId, ring: Option<DeckId>) -> Element<'_, Message> {
+		let panel = ui::deck::view(id, &self.decks[id.index()], ring == Some(id));
+
+		if self.drag.is_none() {
+			return panel;
+		}
+
+		mouse_area(panel)
+			.on_enter(Message::DragOver(id, true))
+			.on_exit(Message::DragOver(id, false))
+			.into()
 	}
 
 	/// One line: what just happened, and the way out when the audio device is gone.
@@ -600,6 +707,28 @@ impl Clecta {
 	}
 }
 
+/// The two drop gestures, both of which need raw events rather than a widget (PLAN §10).
+///
+/// The status is ignored on purpose. A left release over a button is *captured*, and
+/// `listen()` would drop it — which would leave a drag armed for ever the first time
+/// someone let go over the Play button.
+fn gestures() -> Subscription<Message> {
+	event::listen_with(|event, _status, _window| match event {
+		// The OS drop, exactly the three events cmote used. Not one of them carries a
+		// position, and winit is where that is lost (PLAN §10).
+		iced::Event::Window(window::Event::FileHovered(_)) => Some(Message::FilesHovered(true)),
+		iced::Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FilesHovered(false)),
+		iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
+		// The end of an in-app drag. `ponytail:` this fires on every left release in the
+		// app, including the hundreds that are ordinary clicks; the handler leaves in one
+		// comparison when no drag is armed, which is cheaper than gating the subscription.
+		iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+			Some(Message::DragReleased)
+		}
+		_ => None,
+	})
+}
+
 /// List one folder's files, off the GUI thread (PLAN §4).
 ///
 /// `ponytail:` the blocking `read_dir` runs inside the async block, so it occupies an
@@ -624,10 +753,4 @@ fn list_folders(folder: PathBuf) -> Task<Message> {
 		},
 		|(folder, result)| Message::FoldersListed(folder, result),
 	)
-}
-
-fn display_name(path: &Path) -> String {
-	path.file_name()
-		.map(|name| name.to_string_lossy().into_owned())
-		.unwrap_or_else(|| path.display().to_string())
 }

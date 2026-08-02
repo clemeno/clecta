@@ -25,6 +25,13 @@ The window opens where you left it last time, or on your home folder on a first 
   file row to select it, **double-click** a media row to load it into whichever player is
   idle, or use **→ Player 1 / → Player 2**. **◧ hide tree** in the status bar folds the
   tree away and brings it back at the width it had (PLAN §6, §9).
+- **Drag and drop, both ways in.** Drag a row from the files pane onto either player and
+  it loads *there* — the pointer is the app's the whole way, so the drag is truly aimed.
+  Drag a file in from Finder / Explorer and it lands on **the idle player**, because the
+  OS gives no position with the drop; a **green ring** lights the player that will receive
+  it *before* you let go, so the rule is shown rather than sprung. A folder, a non-media
+  file, and the second file of a multi-file drop are each declined in the status bar
+  rather than ignored (PLAN §10).
 - **No audio device is survivable.** The app still browses, says so in the status bar,
   and offers **Reconnect audio** (PLAN §11).
 - **It is portable.** Both faders, the crossfader, the curve, the folder and the window
@@ -38,8 +45,9 @@ The window opens where you left it last time, or on your home folder on a first 
 
 ## What does not, yet
 
-- **No drag and drop**, neither in-app nor from Finder / Explorer (PLAN §10). The
-  **Load…** buttons and the double-click are the ways in.
+- **No aiming an OS drop.** A file dragged in from Finder goes to the idle player, not to
+  the one under the cursor — the position is thrown away by winit and is not recoverable
+  in clecta's own code. The upgrade path is upstream, and PLAN §10 spells it out.
 - **No video picture** — the audio track of an `.mp4` / `.mkv` plays, and that is v1
   (PLAN §14). No waveform, no cue points, no tempo.
 - **No list virtualization.** A folder of five thousand files builds five thousand
@@ -62,13 +70,19 @@ real folder is manual (PLAN §12):
 | Module | What is checked |
 |---|---|
 | `mixer.rs` | both curves at both ends and the centre, each curve's defining identity at the midpoint, the fader-at-zero invariant, clamping |
-| `deck.rs` | every edge of the transport state machine, and that an unaimed load never interrupts a playing player while an idle one exists |
+| `deck.rs` | every edge of the transport state machine, that an unaimed load never interrupts a playing player while an idle one exists, and the drop policy — a folder, a non-media file and the rest of a multi-file drop each declined by name |
 | `browser.rs` | extension → kind, the natural-numeric sort, the hidden filter, a selection surviving (or not) a refresh |
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-One thing the suite cannot reach: **the save fires when the window closes**, so killing
-the process or force-quitting loses the last changes. Worth a manual check that ⌘Q saves
-too — it may go around the close request (PLAN §11).
+Two things the suite cannot reach, both of which need a window a person can click:
+
+- **The save fires when the window closes**, so killing the process or force-quitting
+  loses the last changes. Worth a manual check that ⌘Q saves too — it may go around the
+  close request (PLAN §11).
+- **The drop gestures themselves.** The policy and the targeting are pure and tested; the
+  pointer bookkeeping around them — the ring lighting on one player, the drag disarming
+  when it is let go over nothing, a release over a button not leaving it armed — is
+  wiring that only a real drag exercises (PLAN §10).

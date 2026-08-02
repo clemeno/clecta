@@ -16,10 +16,11 @@ code is meant to be read as much as run, so this plan is didactic — it explain
 each choice was made, and every deliberate shortcut carries a `ponytail:` note so
 "simple" reads as intent, not ignorance.
 
-Status: **v0.1 — the app runs, and remembers.** Two players with a working transport, the
-mixer strip, the browser (files pane + folder tree) and portable persistence are built
-and green; **the drop gestures of §10 are the one part of the plan not yet written.**
-Every decision is locked; §15 is the log.
+Status: **v0.1 — feature-complete against this plan.** Two players with a working
+transport, the mixer strip, the browser (files pane + folder tree), portable persistence
+and both drop gestures are built and green. What is left is not code the plan describes:
+`bundle-macos.sh` (§11), the CI workflow (§12), and the manual smoke test, which needs a
+window a person can click. Every decision is locked; §15 is the log.
 
 ---
 
@@ -545,6 +546,11 @@ fn os_drop_target(p1: &Deck, p2: &Deck) -> DeckId {
 }
 ```
 
+**Built as `deck::idle_target`, not as `os_drop_target`** — the double-click in the files
+pane needs the identical rule, and giving one function two names to suit two callers is
+how two implementations start. The name says what it computes rather than which gesture
+asked (§9's double-click was written against it before the drop existed).
+
 Three properties make this the right shape rather than merely the smallest:
 
 - **Nothing new to hold.** No armed field, no dialog, no persisted choice — so nothing to
@@ -580,6 +586,33 @@ Everything else about the drop is shared, and is decided:
   Player 1 / Player 2**, and each player has a **Load…** button. Drag-and-drop is the
   convenient path, never the only one — a gesture that fails silently on a trackpad is
   not an interface.
+
+### What the implementation added to the plan
+
+- **The in-app drag needs no drag state of its own beyond the file.** A press on a media
+  row already sends `RowSelected`, so that message arms the drag; the release disarms it
+  wherever it lands. **A plain click is a drag that landed on nothing** — same code path,
+  no gesture recogniser, no threshold, no timer.
+- **The release has to come from a raw event, not from the target.** `mouse_area` has
+  `on_release`, but a drag let go over a *button* is captured and the target never hears
+  it — which would leave the drag armed for ever. So `event::listen_with` takes every
+  left release regardless of status, and the player panels report only enter and exit.
+- **Enter/exit must carry which player, and be compared rather than merely cleared.** Both
+  panels see the same cursor move in one pass, in view order, so moving right-to-left
+  fires *enter* on Player 1 before *exit* on Player 2. A bare "clear the hover" on exit
+  would erase the enter that had just happened.
+- **The panels become drop targets only while a drag is in flight.** Outside one,
+  `mouse_area` would publish a message every time the pointer crossed a player, for
+  nothing.
+- **The burst boundary for a multi-file drop is the hover flag.** There is no
+  end-of-drop event: winit reports one `DroppedFile` per file and nothing after them. So
+  the first drop *takes* the hover flag and every later file in the burst sees it already
+  false. Verified against both backends — macOS `performDragOperation:` and Windows
+  `IDropTarget::Drop` each emit only `DroppedFile`, neither cancels the hover first.
+- **`drop_outcome` is not free of the filesystem, and cannot be.** `is_dir` is the only
+  way to tell a dropped folder from an extensionless file. It is free of `self`, which is
+  what the testability actually rests on; the folder case is tested against
+  `CARGO_MANIFEST_DIR`, a directory that is certain to exist, so no fixture is created.
 
 ---
 
@@ -672,11 +705,12 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   sort, the hidden filter.
 - **`deck.rs`** — the transport state machine as a pure `transition(state, event)`, so
   every edge is checked with no audio device in the room.
-- **Drop policy** — `drop_outcome(...) -> DropOutcome` pulled free of `self`, exactly as
-  cmote pulled `drop_outcome` and `plan_uploads`, and tested for the folder / non-media /
-  multi-file cases. **`os_drop_target`** gets its own table: empty+empty → 1,
-  loaded+empty → 2, playing+paused → the paused one, both playing → 1, and the invariant
-  that it never names a playing player while an idle one exists.
+- **Drop policy** (`deck.rs`) — `drop_outcome(...) -> DropOutcome` pulled free of `self`,
+  exactly as cmote pulled `drop_outcome` and `plan_uploads`, and tested for the folder /
+  non-media / multi-file cases, plus the ordinary one that loads. **`idle_target`** — the
+  `os_drop_target` of §10 — gets its own table: empty+empty → 1, loaded+empty → 2,
+  playing+paused → the paused one, both playing → 1, and the invariant that it never
+  names a playing player while an idle one exists.
 - **Manual smoke test**, documented in the README: load both players, play both, sweep
   the crossfader on **both curves**, stop and re-play, load a `.mp4`, fold the tree, drag a
   row to a player, drag a file in from Finder, pull the audio device — and the
