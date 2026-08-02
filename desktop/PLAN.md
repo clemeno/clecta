@@ -16,11 +16,12 @@ code is meant to be read as much as run, so this plan is didactic — it explain
 each choice was made, and every deliberate shortcut carries a `ponytail:` note so
 "simple" reads as intent, not ignorance.
 
-Status: **v0.1 — feature-complete against this plan.** Two players with a working
-transport, the mixer strip, the browser (files pane + folder tree), portable persistence
-and both drop gestures are built and green. What is left is not code the plan describes:
-`bundle-macos.sh` (§11), the CI workflow (§12), and the manual smoke test, which needs a
-window a person can click. Every decision is locked; §15 is the log.
+Status: **v0.1 — complete against this plan.** Two players with a working transport, the
+mixer strip, the browser (files pane + folder tree), portable persistence, both drop
+gestures, `bundle-macos.sh` (§11) and the CI workflow with its supply-chain gate (§12)
+are all built and green. What is left is the **manual smoke test** (§12), which needs a
+window a person can click — everything on that list that could be checked without one
+now has been. Every decision is locked; §15 is the log.
 
 ---
 
@@ -659,7 +660,13 @@ aesthetic: it is the requirement.
   in `main.rs` so no console window pops on Windows (inert on macOS).
 - **`bundle-macos.sh`**, cmote's script adapted: wrap the release binary in a minimal
   `Clecta.app` (`Contents/MacOS/` + `Info.plist`) so Finder launches it as a GUI app
-  instead of through Terminal.
+  instead of through Terminal. It takes an optional binary path, because the shipped
+  artifact is the Intel cross-build and `target/release/` is the wrong one on an Apple
+  Silicon machine. **The bundle is also the only way to run the walk-up above**, and
+  doing so turned the `.app` rule from three unit tests on strings into a fact: a bundle
+  copied to an empty folder and launched creates `clecta-data/` *beside* `Clecta.app`,
+  and `~/Library/Application Support/clecta` still does not exist afterwards. Killing
+  that process left the folder empty, which is the save-at-exit gap below, seen.
 - **No C toolchain**, and this too is real rather than aesthetic: cpal binds CoreAudio /
   WASAPI through `objc2` / `windows-sys`, both pure Rust, and symphonia is pure Rust.
   Nothing needs NASM or a vendored C library — the property cmote had to fight for with
@@ -716,16 +723,41 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   row to a player, drag a file in from Finder, pull the audio device — and the
   **portability check**: copy the binary to an empty folder, run it, confirm
   `clecta-data/settings.json` appears *there* and nothing appears in `~/Library` or the
-  registry. **Half of it is already confirmed on macOS**: a release binary copied to an
-  empty folder creates `clecta-data/` beside itself and leaves `~/Library/Application
-  Support/clecta` non-existent. The other half — that `settings.json` lands in it — needs
-  a window someone can actually close, so it stays on this list, along with **⌘Q**, which
-  may bypass the close request and therefore the save.
+  registry. **The folder half is confirmed on macOS, both ways**: a bare release binary
+  copied to an empty folder creates `clecta-data/` beside itself, and a `Clecta.app` from
+  `bundle-macos.sh` creates it beside the *bundle* — the walk-up of §11, run rather than
+  argued. `~/Library/Application Support/clecta` does not exist after either. What is
+  left is the *file*: `settings.json` only appears on a clean close, so it needs a window
+  someone can shut. **⌘Q** stays on the list for the same reason, since it may bypass the
+  close request and therefore the save.
 
-**CI** mirrors cmote's `.github/workflows/ci.yml` — `cargo fmt --check`, `cargo clippy
--D warnings`, `cargo test`, `cargo deny` + `cargo audit` — with `working-directory:
-desktop` and symphonia's **MPL-2.0** added to the licence allow-list. Set up once the
-crate exists, not before.
+**CI** mirrors cmote's `.github/workflows/ci.yml` — four jobs: `rustfmt` on Linux,
+clippy + test on Windows natively, clippy against **`x86_64-apple-darwin`** plus a native
+test run on the Apple Silicon macOS runner, and `cargo deny` + `cargo audit` on Linux.
+`defaults.run.working-directory: desktop` covers the `run:` steps; the two actions that
+do not use a shell — `rust-cache` and `cargo-deny-action` — are given the path
+explicitly, which is the one thing that does not carry over from a repo whose crate is at
+the root.
+
+**What the supply-chain gate actually guards** (`deny.toml`), beyond copying cmote's:
+
+- **`MPL-2.0` in the allow-list** — symphonia, all thirteen crates of it. Not a
+  formality: it is the one non-permissive licence clecta ships, and while file-level
+  copyleft means linking it in does not make clecta MPL, §3.2 does mean whoever gets the
+  binary must be able to get symphonia's source. Unmodified crates.io releases, so
+  upstream answers it — the obligation only grows teeth if a decoder is ever patched.
+  The rest of the list is the *minimal* set: each entry is demanded outright by some
+  crate, not merely as one arm of an `OR`.
+- **`cc` and `cmake` banned.** The no-C-toolchain property (§11) is the one thing that
+  makes "copy it anywhere and run it" true, and it holds today partly by luck. `cc` is
+  the tell — it is the crate that shells out to a C compiler — and it is in the lock file
+  *already*, under `android-activity` and `wayland-backend`, neither of which is a
+  shipped target. The `[graph] targets` prune is what keeps it out, so the ban is a
+  tripwire: the day a dependency needs a C compiler on Windows or macOS, CI says so
+  instead of the property quietly dying.
+- **No release build in CI.** The README's fourth local check is deliberately not a job:
+  `clippy --all-targets` already type-checks everything, and `lto` + `codegen-units = 1`
+  costs minutes per run to re-prove a thing that only matters at release time.
 
 ---
 

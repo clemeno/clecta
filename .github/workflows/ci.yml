@@ -1,0 +1,115 @@
+# Continuous integration — the quality gate for every push and pull request
+# (PLAN §12/§13). It runs on CI exactly the checks the README asks of a developer
+# locally (`cargo fmt`, `cargo clippy -D warnings`, `cargo test`) and adds the
+# supply-chain audit (`cargo deny` + `cargo audit`) that guards a dependency tree
+# clecta did not write a line of. Nothing here builds a release artifact: this is
+# about keeping `main` green on *both* shipped targets, not about publishing.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# One in-flight run per branch/PR: a new push cancels the previous, still-running job
+# for the same ref rather than burning minutes on a superseded commit.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: the jobs only read the repo. No token write scope is needed.
+permissions:
+  contents: read
+
+# The crate is `desktop/`, not the repo root (PLAN §5) — the root is reserved for a
+# second front end. This covers every `run:` step; the two actions that need the path
+# instead (rust-cache, cargo-deny) are told separately, below.
+defaults:
+  run:
+    working-directory: desktop
+
+jobs:
+  # ── Formatting ──────────────────────────────────────────────────────────────
+  # rustfmt is platform-independent and compiles nothing, so it runs once on the
+  # cheapest runner. `--check` fails rather than rewrites.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # ── Windows (the primary target) ────────────────────────────────────────────
+  # windows-latest is x86_64, i.e. our `x86_64-pc-windows-msvc` target natively, so
+  # clippy and the tests run with no cross-compile. This is the build the portable
+  # clecta.exe ships from.
+  windows:
+    name: clippy + test (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Cache the registry and target dir keyed on the lockfile, so a run that does
+      # not touch dependencies re-uses the previous compile. Worth more here than in
+      # most projects: iced and wgpu are the bulk of a cold build.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  # ── macOS (the second target) ───────────────────────────────────────────────
+  # GitHub's macOS runners are Apple Silicon, but clecta ships for Intel
+  # (`x86_64-apple-darwin`, PLAN §1). So clippy runs *against the Intel target* — a
+  # cross-compile that proves the shipped target builds clean — while the tests run
+  # natively on aarch64. Everything under test is pure logic with no architecture in
+  # it (PLAN §12), so a native run validates it without Rosetta.
+  macos:
+    name: clippy (x86_64-apple-darwin) + test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      - run: cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings
+      - run: cargo test
+
+  # ── Supply chain ────────────────────────────────────────────────────────────
+  # Audited from the committed Cargo.lock, which is platform-independent, so this runs
+  # once on Linux and compiles nothing. The two tools split the work:
+  #   * cargo-deny  — licenses (the allow-list in desktop/deny.toml), banned crates
+  #     (no `cc`: no C toolchain, PLAN §11), and unknown sources. NOT advisories.
+  #   * cargo-audit — the RustSec advisory scan. Owning advisories here keeps
+  #     deny.toml about policy and stops the same database being scanned twice.
+  supply-chain:
+    name: cargo-deny + cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: desktop/Cargo.toml
+          command: check bans licenses sources
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # No `--ignore` list, unlike cmote's, because clecta's tree has no vulnerability to
+      # accept. Two crates are flagged *unmaintained* — `paste` (RUSTSEC-2024-0436) and
+      # `ttf-parser` (RUSTSEC-2026-0192), both transitive through iced — and cargo-audit
+      # exits 0 on warnings, so they are printed and the build stays green. That is the
+      # behaviour we want: neither is a vulnerability and neither is ours to replace, but
+      # silencing them by ID would also hide the day one turns into something real. No
+      # `--deny warnings` for the same reason in reverse: it would fail every build over
+      # a dependency we do not control.
+      - run: cargo audit

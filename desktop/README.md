@@ -11,6 +11,22 @@ cargo run
 
 The window opens where you left it last time, or on your home folder on a first run.
 
+### As a macOS app
+
+```sh
+cargo build --release
+./bundle-macos.sh
+```
+
+Gives `target/release/Clecta.app`, which Finder launches as an app rather than through
+Terminal, and which keeps `clecta-data/` *beside* the bundle instead of inside it
+(PLAN §11). The shipped binary is Intel, so on an Apple Silicon Mac bundle that instead:
+
+```sh
+cargo build --release --target x86_64-apple-darwin
+./bundle-macos.sh target/x86_64-apple-darwin/release/clecta
+```
+
 ## What works
 
 - **Two players.** Play / pause / stop, a `M:SS / M:SS` readout, and a **Load…** button
@@ -55,12 +71,28 @@ The window opens where you left it last time, or on your home folder on a first 
 
 ## Checks
 
-The same four CI runs (PLAN §12), all of which must be clean:
+What CI runs (PLAN §12), all of which must be clean:
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo deny check bans licenses sources
+cargo audit
+```
+
+CI runs clippy and the tests on **both** shipped targets — natively on Windows, and
+cross-compiled against `x86_64-apple-darwin` on the macOS runner, which is Apple Silicon.
+The supply-chain pair guards the dependency tree: the licence allow-list in
+[deny.toml](deny.toml) is the minimal set the tree actually needs, and `cc` is banned so
+that the day something wants a C compiler on a shipped target, CI says so rather than the
+portable single-binary property quietly dying.
+
+The release build is deliberately *not* a CI job — clippy already type-checks everything,
+and `lto` costs minutes to re-prove something that only matters when shipping. Run it
+yourself for that:
+
+```sh
 cargo build --release
 ```
 
@@ -81,7 +113,10 @@ Two things the suite cannot reach, both of which need a window a person can clic
 
 - **The save fires when the window closes**, so killing the process or force-quitting
   loses the last changes. Worth a manual check that ⌘Q saves too — it may go around the
-  close request (PLAN §11).
+  close request (PLAN §11). The *folder* half of the portability check is confirmed both
+  ways on macOS: a bare binary and a bundled `Clecta.app` each create `clecta-data/`
+  beside themselves, and nothing appears in `~/Library`. That `settings.json` lands in it
+  needs a window someone can shut.
 - **The drop gestures themselves.** The policy and the targeting are pure and tested; the
   pointer bookkeeping around them — the ring lighting on one player, the drag disarming
   when it is let go over nothing, a release over a button not leaving it armed — is

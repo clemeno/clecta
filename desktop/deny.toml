@@ -1,0 +1,81 @@
+# cargo-deny configuration — the supply-chain gate (PLAN §12).
+#
+# `cargo deny` audits the *dependency tree*, which is where a Rust app's real risk lives:
+# our own code is memory-safe by construction, and ~450 crates arrived with iced. CI runs
+# `cargo deny check bans licenses sources`; advisories are `cargo audit`'s job in the same
+# job, so neither tool scans the same database twice.
+#
+# Schema is cargo-deny v2 (`version = 2` per section). Older keys such as
+# `[licenses].unlicensed` were folded into the defaults and no longer exist.
+
+# ── Graph ─────────────────────────────────────────────────────────────────────
+# Only the two platforms clecta ships (PLAN §1). Unpruned, cargo-deny walks every
+# target's crates — the full lock is ~470 packages, macOS resolves ~330 and Windows
+# ~300, and the rest are the Linux/Android/wasm windowing crates iced can pull
+# (wayland, x11, ndk) that we never build. Auditing those would fail the build over
+# code we do not ship.
+[graph]
+targets = [
+	"x86_64-pc-windows-msvc",
+	"x86_64-apple-darwin",
+]
+
+# ── Advisories ────────────────────────────────────────────────────────────────
+# CI gates advisories through `cargo audit`, so this section only matters to a bare
+# `cargo deny check` run locally. The defaults — deny known vulnerabilities, warn on
+# unmaintained — are what we want.
+[advisories]
+version = 2
+yanked = "deny"       # refuse a build pinned to a yanked crate version
+ignore = []           # no advisory exceptions here — the honest list lives in CI
+
+# ── Licenses ──────────────────────────────────────────────────────────────────
+# Every crate we ship must carry a license we can legally redistribute. This list is
+# the *minimal* set that satisfies the current tree: each entry is demanded outright
+# by at least one crate (not merely one arm of an `OR`), and every AND/OR expression
+# in both target graphs is satisfied by these alone. A new dependency dragging in an
+# unlisted license fails CI on purpose — that is a decision for a human.
+#
+# MPL-2.0 is the one non-permissive license here, and it is not decoration: symphonia,
+# the whole decoder stack (PLAN §7), is MPL-2.0. It is *file-level* copyleft, so
+# statically linking it into clecta does not make clecta MPL — but §3.2 does require
+# that whoever gets the binary can get symphonia's source. Unmodified crates.io
+# releases, so upstream is the answer; the obligation only grows teeth if we ever
+# patch a decoder.
+[licenses]
+version = 2
+allow = [
+	"MIT",           # most of the tree, iced included, and clecta itself
+	"Apache-2.0",    # the other half of the usual dual license — and cpal / winit alone
+	"MPL-2.0",       # symphonia, every crate of it (see above)
+	"BSD-2-Clause",  # arrayref
+	"BSD-3-Clause",  # tiny-skia, the software renderer that makes a GPU optional
+	"BSL-1.0",       # clipboard-win
+	"CC0-1.0",       # hexf-parse — public-domain dedication
+	"ISC",           # libloading
+	"Unicode-3.0",   # the unicode data tables
+	"Zlib",          # foldhash, slotmap
+]
+
+# ── Bans ──────────────────────────────────────────────────────────────────────
+# The one rule with teeth (PLAN §11): **no C toolchain**. It is what makes "copy the
+# binary anywhere and run it" true, and it currently holds by luck as much as design —
+# cpal binds CoreAudio / WASAPI through pure-Rust `objc2` / `windows-sys`, and
+# symphonia decodes in Rust. `cc` is the tell: it is the crate that shells out to a C
+# compiler, and it appears in the lock file only under `android-activity` and
+# `wayland-backend`, neither of which is a shipped target. Banning it means the day a
+# dependency needs a C compiler on Windows or macOS, CI says so loudly instead of the
+# property quietly dying.
+[bans]
+multiple-versions = "warn"   # duplicate versions are common and low-risk: reported, not fatal
+deny = [
+	{ name = "cc" },
+	{ name = "cmake" },
+]
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+# Only crates.io. An unknown registry or a raw git dependency has to be added
+# deliberately — it will not slip in unnoticed.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
