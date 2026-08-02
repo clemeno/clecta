@@ -119,10 +119,16 @@ pub struct Deck {
 	pub fader: f32,
 	/// The loaded track's amplitude scan, drawn by `ui::waveform` (PLAN §14a).
 	///
-	/// Empty until it lands: the scan decodes the whole file off the GUI thread and a long
-	/// track takes seconds. Empty also covers a scan that failed, which is a case the
-	/// notice line has already explained — a player with no waveform still plays.
+	/// Empty until it lands: the scan decodes the whole file on a thread of its own and a
+	/// long track takes a good fraction of a second. Empty also covers a scan that failed,
+	/// which is a case the notice line has already explained — a player with no waveform
+	/// still plays.
 	pub peaks: Vec<f32>,
+	/// A scan is running for this player right now, which is what makes the strip animate.
+	///
+	/// Not derivable from `peaks` being empty: so is an empty player, and so is one whose
+	/// scan failed, and neither of those should be shown as working.
+	pub scanning: bool,
 }
 
 impl Default for Deck {
@@ -134,6 +140,7 @@ impl Default for Deck {
 			// Wide open, not zero. A player that starts silent reads as broken.
 			fader: 1.0,
 			peaks: Vec::new(),
+			scanning: false,
 		}
 	}
 }

@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use iced::futures::channel::oneshot;
 use iced::widget::pane_grid::Axis;
 use iced::widget::{Space, button, column, container, mouse_area, pane_grid, row, text};
 use iced::{Element, Fill, Size, Subscription, Task, Theme, event, mouse, time, window};
@@ -32,6 +33,14 @@ const TICK: Duration = Duration::from_millis(50);
 /// that sweeping a fader writes a handful of times rather than once per pixel, and short
 /// enough that the worst a quit or a crash costs is the last couple of seconds.
 const SAVE_AFTER: Duration = Duration::from_secs(2);
+
+/// The scanning animation (PLAN §14a): how often the band moves, and how many steps it
+/// takes to cross. 40 ms is 25 fps, which is smooth for a sliding shape without being the
+/// playhead's 20 Hz; thirty steps makes a pass take 1.2 s, slow enough to read as
+/// deliberate. Like the tick and the autosave, the subscription exists only while it is
+/// needed — here, while a scan is actually running.
+const SWEEP: Duration = Duration::from_millis(40);
+const SWEEP_STEPS: u32 = 30;
 
 /// Height of the top section, and width of the files pane, as fractions.
 const DECKS_RATIO: f32 = 0.42;
@@ -119,6 +128,8 @@ pub enum Message {
 	/// A waveform scan finished. Carries the path it was started for, because a player can
 	/// be given another track while the scan runs (PLAN §14a).
 	PeaksScanned(DeckId, PathBuf, Result<Vec<f32>, String>),
+	/// Advance the scanning animation one step. Sent only while a scan is running.
+	Sweep,
 	/// The window was resized. Recorded, then saved with everything else once the app has
 	/// been still for `SAVE_AFTER`.
 	WindowResized(Size),
@@ -170,6 +181,10 @@ pub struct Clecta {
 	/// A persisted setting has changed and is not on disk yet. Drives the autosave
 	/// subscription, which exists only while this is true.
 	dirty: bool,
+	/// The scanning animation's step counter. A plain integer rather than a timestamp, so
+	/// nothing in `view` has to read the clock — the phase is whatever the last `Sweep`
+	/// left behind.
+	sweep: u32,
 }
 
 impl Clecta {
@@ -217,6 +232,7 @@ impl Clecta {
 			os_hover: false,
 			notice,
 			dirty: false,
+			sweep: 0,
 		};
 		app.apply_gains();
 
@@ -283,9 +299,18 @@ impl Clecta {
 			Subscription::none()
 		};
 
+		// The scanning animation, on the same "only while it is needed" rule as the two
+		// above. Nothing animates once both scans have landed.
+		let sweep = if self.decks.iter().any(|deck| deck.scanning) {
+			time::every(SWEEP).map(|_| Message::Sweep)
+		} else {
+			Subscription::none()
+		};
+
 		Subscription::batch([
 			tick,
 			autosave,
+			sweep,
 			window::resize_events().map(|(_, size)| Message::WindowResized(size)),
 			window::close_requests().map(|_| Message::CloseRequested),
 			gestures(),
@@ -464,9 +489,10 @@ impl Clecta {
 			},
 
 			Message::PeaksScanned(id, path, result) => {
-				// A scan takes seconds, and a player can be given a second track inside
-				// them. An array that no longer belongs to what is loaded is dropped, or it
-				// would draw the previous track under this one's playhead.
+				// A scan takes a moment, and a player can be given a second track inside it.
+				// An array that no longer belongs to what is loaded is dropped, or it would
+				// draw the previous track under this one's playhead. `scanning` is left
+				// alone in that case, because the *newer* scan is still running.
 				if self.decks[id.index()]
 					.track
 					.as_ref()
@@ -475,6 +501,7 @@ impl Clecta {
 				{
 					return Task::none();
 				}
+				self.decks[id.index()].scanning = false;
 				match result {
 					Ok(peaks) => self.decks[id.index()].peaks = peaks,
 					// Odd but reachable: playback opened the file and the scan did not,
@@ -482,6 +509,10 @@ impl Clecta {
 					Err(error) => self.notice = format!("{}: {error}", id.label()),
 				}
 			}
+
+			// Wrapping, because this counter is only ever read modulo `SWEEP_STEPS`, and an
+			// app left scanning for three years should not panic in a debug build.
+			Message::Sweep => self.sweep = self.sweep.wrapping_add(1),
 		}
 
 		Task::none()
@@ -574,6 +605,7 @@ impl Clecta {
 				// Cleared now rather than when the new scan lands, so the strip is never
 				// showing the outgoing track's shape under the incoming track's playhead.
 				deck.peaks = Vec::new();
+				deck.scanning = true;
 				deck.track = Some(Track {
 					path: path.clone(),
 					name,
@@ -751,7 +783,10 @@ impl Clecta {
 	/// Attached conditionally because `mouse_area` reports every crossing of the panel,
 	/// dragging or not, and outside a drag there is nothing to do with that.
 	fn deck_view(&self, id: DeckId, ring: Option<DeckId>) -> Element<'_, Message> {
-		let panel = ui::deck::view(id, &self.decks[id.index()], ring == Some(id));
+		// One phase for both players, so two scans running at once sweep together rather
+		// than drifting apart into something that looks like a rendering fault.
+		let sweep = (self.sweep % SWEEP_STEPS) as f32 / SWEEP_STEPS as f32;
+		let panel = ui::deck::view(id, &self.decks[id.index()], ring == Some(id), sweep);
 
 		if self.drag.is_none() {
 			return panel;
@@ -845,22 +880,39 @@ fn list_folders(folder: PathBuf) -> Task<Message> {
 	)
 }
 
-/// Scan a track's waveform off the GUI thread (PLAN §4, §14).
+/// Scan a track's waveform on a thread of its own (PLAN §4, §14a).
 ///
-/// `ponytail:` like the two directory reads above, the blocking work sits inside the async
-/// block and so occupies an executor thread rather than a dedicated blocking pool — but
-/// for *seconds* rather than milliseconds. At most two run at once, and the GUI thread is
-/// not one of them, so the worst visible effect is a directory listing queueing behind a
-/// scan on a machine with few cores. Move it to its own `std::thread` if that ever shows.
+/// **Not** the pattern the two directory reads above use, and the difference is the whole
+/// point. iced's smol executor runs on **one** thread unless `SMOL_THREADS` says otherwise,
+/// so a scan sitting inside an async block did not merely queue the next directory listing
+/// — it stopped every subscription in the app, the 20 Hz playhead tick included. Measured
+/// both ways from the moment a scan starts: **641 ms with no tick at all**, then a dozen
+/// delivered in the same millisecond, against a steady **49–51 ms** once the decode moved
+/// off the executor. Pressing Play during a scan gave audio and a frozen clock, which is
+/// how this was found.
+///
+/// So the decode gets a real thread and the executor gets a `oneshot` to await, which is
+/// the one thing it is good at. Two threads at most, one per player, each living exactly as
+/// long as the scan it was spawned for.
 ///
 /// The error is flattened to a `String` here because a `Message` has to be `Clone` and an
 /// `anyhow::Error` is not — the same reason `fsio` returns one (PLAN §9).
 fn scan_peaks(id: DeckId, path: PathBuf) -> Task<Message> {
-	Task::perform(
-		async move {
-			let result = audio::peaks(&path).map_err(|error| format!("{error:#}"));
-			(path, result)
-		},
-		move |(path, result)| Message::PeaksScanned(id, path, result),
-	)
+	let (sender, receiver) = oneshot::channel();
+	let scanned = path.clone();
+
+	std::thread::spawn(move || {
+		// The receiver is gone if the app quit mid-scan, and there is nothing to do about
+		// that but let this thread end.
+		let _ = sender.send(audio::peaks(&scanned).map_err(|error| format!("{error:#}")));
+	});
+
+	Task::perform(receiver, move |delivered| {
+		// `Err` means the thread ended without answering, which it can only do by panicking.
+		// Reported rather than swallowed: a strip that stays flat for ever with no line in
+		// the status bar is the one outcome worse than a slow scan.
+		let result =
+			delivered.unwrap_or_else(|_| Err("the waveform scan stopped unexpectedly".to_string()));
+		Message::PeaksScanned(id, path, result)
+	})
 }

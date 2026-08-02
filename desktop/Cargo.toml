@@ -33,6 +33,14 @@ rodio = { version = "0.22.2", features = ["symphonia-mkv"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 
+# Optimize the *dependencies* in a debug build, and only them. Decoding a track for its
+# waveform (PLAN §14a) took 16.7 s under `cargo run` against 325 ms under `--release` —
+# symphonia is arithmetic in a tight loop, and unoptimized arithmetic is 50× arithmetic.
+# clecta's own code stays at opt-level 0, so it is still debuggable and still rebuilds in
+# seconds; the dependencies are compiled once and cached.
+[profile.dev.package."*"]
+opt-level = 3
+
 # Release profile (PLAN §11): a small, fast, self-contained portable binary.
 #   lto            — link-time optimization across crates
 #   codegen-units  — one unit trades build time for better optimization

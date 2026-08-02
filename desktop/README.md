@@ -11,6 +11,12 @@ cargo run
 
 The window opens where you left it last time, or on your home folder on a first run.
 
+A debug build optimizes its **dependencies** but not clecta itself
+([Cargo.toml](Cargo.toml)). That is not tidiness: decoding a track for its waveform took
+16.7 s under a plain `cargo run` and 0.5 s with it, because the work happens inside
+symphonia and unoptimized arithmetic is fifty times arithmetic. clecta's own code stays
+unoptimized, so it is still debuggable and still rebuilds in seconds (PLAN §14a).
+
 ### As a macOS app
 
 ```sh
@@ -32,11 +38,12 @@ cargo build --release --target x86_64-apple-darwin
 - **Two players.** Play / pause / stop, a `M:SS / M:SS` readout, and a **Load…** button
   each. Stop is a rewind, not a `Player::stop()`: the track stays loaded and plays again
   from the top (PLAN §7).
-- **A waveform per player.** The whole file is scanned once when it loads, in the
-  background, and the strip fills in when it lands — seconds for a long track, and the
-  player is playable throughout. The part already played is coloured, and a playhead
-  crosses it. It is a picture, not a control: clicking it does not seek yet (PLAN §14a,
-  §14).
+- **A waveform per player.** The whole file is scanned once when it loads, on a thread of
+  its own, and the strip fills in when it lands — around a third of a second for a
+  three-minute track. The player is playable the whole time, and a band sweeps the strip
+  while the scan runs so the wait is visible rather than mysterious. The part already
+  played is coloured, and a playhead crosses it. It is a picture, not a control: clicking
+  it does not seek yet (PLAN §14a, §14).
 - **The mixer strip.** A volume fader per player and a crossfader, with a
   **Power / Linear** curve selector. The number beside each fader is the gain actually
   sent to that player, so the cubic taper and the crossfade are visible as they move
@@ -116,7 +123,7 @@ real folder is manual (PLAN §12):
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
-| `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, and every pixel column of every width in range |
+| `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, and the scanning band never drawn outside the strip |
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 

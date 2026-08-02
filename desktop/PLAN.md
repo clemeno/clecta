@@ -166,12 +166,21 @@ Three places code runs. Only two of them are ours.
 - **The tick only runs while something plays.** `Subscription::none()` when both players
   are stopped or paused, otherwise `time::every(50ms)`. A UI that redraws 20×/s while
   idle is a laptop-battery bug, and iced makes the fix one `if`.
-- **Directory reads and waveform scans are the blocking work.** `read_dir` on a cold
+- **Directory reads go on the executor. Waveform scans do not.** `read_dir` on a cold
   network mount can take seconds, so it goes through `Task::perform`, and the pane shows
   its previous contents until the new listing lands (cmote's "never flash empty" rule, §18
-  there). A scan takes seconds on *any* mount, and goes the same way — the difference is
-  that the panel shows an empty strip while it runs rather than a stale one, for the
-  reason §14a gives.
+  there). A scan is much longer and gets a **thread of its own**, because iced's smol
+  executor is *one thread* by default — blocking it stops every subscription in the app,
+  the playhead tick included. §14a has the measurement.
+
+  `ponytail:` the directory reads are left on the executor, and now that the blast radius
+  is known that is a *measured* bet rather than an assumed one: a local `read_dir` is
+  milliseconds, so it costs at most one dropped frame. The bet loses on a cold network
+  mount, where §9 already admits `read_dir` can take seconds — and seconds on that thread
+  now means a frozen clock, not a late listing. The fix is the one `scan_peaks` already
+  uses, applied to `list_files` and `list_folders`; it is not applied today because no
+  network mount has been measured, and guessing is what produced this bug in the first
+  place.
 
 ---
 
@@ -751,13 +760,16 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   `os_drop_target` of §10 — gets its own table: empty+empty → 1, loaded+empty → 2,
   playing+paused → the paused one, both playing → 1, and the invariant that it never
   names a playing player while an idle one exists.
-- **`waveform.rs`** — the folding and the pixel fit (§14a), which between them are all the
-  arithmetic the display has. That a scan stays inside its bounds however long the file is,
+- **`waveform.rs`** — the folding, the pixel fit and the scanning band (§14a), which between
+  them are all the arithmetic the display has. That a scan stays inside its bounds however
+  long the file is,
   that a halving keeps the loudest sample rather than smearing it, that a `NaN` from a
   decoder does not blank its column, and — the one that matters most, because its caller is
   a `draw` and a slice out of range there is a panic mid-frame — that **every column of
   every width is in range**, including widgets wider and narrower than the scan and a
-  column past the end of its own width.
+  column past the end of its own width — and the same guard for the scanning band, which
+  slides in from off one edge and out past the other and must never be drawn outside the
+  strip on the way.
 - **`audio.rs`** — one test, and the only one this module can have: everything else here
   needs an output device. A *scan* does not, so the decode path is checked for real, from a
   file on disk to the array the widget draws. The fixture is generated rather than
@@ -891,8 +903,66 @@ transients it exists to show; a kick drum becomes a bump.
 `audio::peaks` is a *second, independent* decode of a file that is already loaded. It has
 to be: the playing decoder cannot be read twice, and reading it would move the playhead.
 It decodes every sample and throws them all away as it goes, so the memory cost is the
-array and nothing else — but the time cost is **seconds** for a long track, which is why
-it is the third thing in §4's diagram to run off the GUI thread.
+array and nothing else — but the time cost is real, which is why it is the third thing in
+§4's diagram to run off the GUI thread.
+
+How real, measured on one 3½-minute MP3:
+
+| build | scan |
+|---|---|
+| `cargo run`, as first written | **16 745 ms** |
+| `cargo run`, with `[profile.dev.package."*"] opt-level = 3` | **509 ms** |
+| `--release` | **325 ms** |
+
+Those three lines of `Cargo.toml` are the single largest change in this section, and they
+are worth understanding rather than copying: symphonia is arithmetic in a tight loop, and
+unoptimized arithmetic is *fifty times* arithmetic. Optimizing only the **dependencies**
+keeps clecta's own code at `opt-level = 0`, so it stays debuggable and still rebuilds in
+seconds; the dependencies compile once and cache. Any project whose real work happens
+inside a dependency wants this, and a learning project is exactly where "debug builds are
+slow" gets mistaken for "my code is slow".
+
+### The single-threaded executor
+
+`Task::perform` was the wrong tool, and the way that showed up is worth recording: pressing
+Play during a scan produced *audio with a frozen clock*. The transport said "playing", the
+sound came out, and `0:00 / 3:42` sat there.
+
+iced's smol backend spawns `SMOL_THREADS` worker threads and **defaults to one**. So a scan
+inside an async block did not merely queue the next directory listing, which is what the
+first `ponytail:` note here guessed — it stopped the whole runtime. The 20 Hz playhead tick
+is a subscription; so is the autosave. Both stopped dead. Measured from the moment a scan
+starts:
+
+| scan runs on | ticks during the scan |
+|---|---|
+| the executor (`Task::perform`) | **641 ms of nothing**, then a dozen delivered in the same millisecond |
+| its own `std::thread` | a steady **49–51 ms**, throughout |
+
+So the decode gets a real thread and the executor gets a `oneshot` to await, which is the
+one thing it is good at. Two threads at most, one per player, each living exactly as long
+as the scan that spawned it.
+
+The general lesson is not "smol is bad" — it is that **`Task::perform` is for `await`, not
+for work.** Anything that occupies a CPU belongs on a thread, and an async runtime with one
+worker turns "this is a bit slow" into "the app is frozen".
+
+### Saying that a scan is running
+
+Half a second of nothing is long enough to look broken, so the strip animates: a band
+travelling along the flat centre line, `sweep_band` in `waveform.rs` and one more
+`fill_quad` in the widget. It is drawn *in the strip* rather than written in the status bar
+because the strip is the thing being waited for, and it needs no words in any language.
+
+Two details are deliberate. There is **no threshold** — the band appears the moment a scan
+starts rather than after 250 ms, because the gate costs a timestamp per player to spare a
+one-frame flash on a file short enough not to matter. And `Deck::scanning` is a real field
+rather than `peaks.is_empty()`, because an empty player and a *failed* scan both have no
+peaks and neither of them is working on anything.
+
+The animation is a plain integer counter advanced by a `Sweep` message, so nothing in
+`view` reads a clock, and its subscription follows the same rule as the tick and the
+autosave: it exists only while it is needed, and nothing animates at rest.
 
 It is a free function rather than an `Engine` method, and that is not tidiness: a scan
 needs no output device, so the waveform still appears while the app is saying "no audio"
@@ -977,6 +1047,8 @@ the automation could.
 | Q8 | Sizing the peak array | **Halve as it fills**, never divide. The sample count is not knowable up front — a stream has no duration at all — so the mipmap replaces the branch instead of guarding it, in one pass and for a file of any length | §14a |
 | Q9 | Drawing the waveform | **A custom `advanced::Widget`**, not `canvas`. The plan called for the `Widget` as the lesson (§16), and laziness agreed for once: `advanced` is a feature toggle that adds nothing to `Cargo.lock`, while `canvas` would pull `lyon` in to tessellate rectangles | §14a, §12 |
 | Q10 | Picking colours from a palette | **Compare the values, never trust the role name.** Not a preference either: `background.weak` is what `rounded_box` paints a panel, so a strip using it for its bed drew nothing at all | §14a |
+| Q11 | Where long work runs | **A `std::thread` and a `oneshot`, not `Task::perform`.** iced's smol executor defaults to *one* worker, so CPU work in an async block stops every subscription in the app — the playhead clock froze while a track was being scanned | §4, §14a |
+| Q12 | Saying a scan is running | **A band sweeping the strip, from the first frame.** In the strip rather than the status bar, because the strip is what is being waited for; no 250 ms threshold, because the gate costs more than the flash it prevents | §14a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

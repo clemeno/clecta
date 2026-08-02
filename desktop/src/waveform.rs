@@ -113,6 +113,31 @@ pub fn column_peak(peaks: &[f32], column: usize, columns: usize) -> f32 {
 	peaks[start..end].iter().copied().fold(0.0, f32::max)
 }
 
+/// How much of the strip the scanning band covers, as a fraction of its width.
+const SWEEP_WIDTH: f32 = 0.18;
+
+/// The visible part of the scanning band, as `(start, end)` offsets into a strip `width`
+/// wide, or `None` when the band is entirely off one end.
+///
+/// `phase` runs `0.0..=1.0` and the band travels from *fully off the left* to *fully off
+/// the right*, so it slides in and out rather than appearing and vanishing at the edges.
+/// That is the whole reason this is arithmetic worth its own function: the clamping at both
+/// ends is where an off-by-one would draw a band hanging outside the strip, and the caller
+/// is a `draw`.
+pub fn sweep_band(width: f32, phase: f32) -> Option<(f32, f32)> {
+	if width <= 0.0 {
+		return None;
+	}
+
+	let band = width * SWEEP_WIDTH;
+	let left = phase.clamp(0.0, 1.0) * (width + band) - band;
+
+	let start = left.max(0.0);
+	let end = (left + band).min(width);
+
+	(end > start).then_some((start, end))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -212,6 +237,37 @@ mod tests {
 				assert!(
 					(0.0..=0.5).contains(&value),
 					"{column} of {columns} gave {value}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn the_scanning_band_slides_in_and_out_rather_than_appearing() {
+		// Arrange / Act / Assert: off both ends at the extremes, and fully inside halfway.
+		assert_eq!(sweep_band(100.0, 0.0), None, "still off the left");
+		assert_eq!(sweep_band(100.0, 1.0), None, "already off the right");
+
+		let (start, end) = sweep_band(100.0, 0.5).expect("visible halfway");
+		assert!(
+			start > 0.0 && end < 100.0,
+			"{start}..{end} should be inside"
+		);
+		assert!((end - start - 18.0).abs() < 0.01, "full width halfway");
+	}
+
+	#[test]
+	fn the_scanning_band_never_leaves_the_strip() {
+		// Arrange / Act / Assert: the guard, for the same reason as the columns above —
+		// this is read by a `draw`, including on a strip of no width at all.
+		assert_eq!(sweep_band(0.0, 0.5), None, "a strip with no width");
+
+		for step in 0..=100 {
+			let phase = step as f32 / 100.0;
+			if let Some((start, end)) = sweep_band(240.0, phase) {
+				assert!(
+					start >= 0.0 && end <= 240.0 && start < end,
+					"phase {phase} gave {start}..{end}"
 				);
 			}
 		}

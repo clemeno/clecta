@@ -33,7 +33,12 @@ const PLAYHEAD: f32 = 2.0;
 /// difference between a fade-out and a scan that has not landed yet.
 const MIN_BAR: f32 = 1.0;
 
-/// One player's waveform: the scan, and how far through it the playhead is.
+/// The scanning band's thickness. Thicker than the flat line it rides on, so it reads as
+/// something happening rather than as a defect in the line.
+const SWEEP_BAR: f32 = 4.0;
+
+/// One player's waveform: the scan, how far through it the playhead is, and whether a scan
+/// is still running.
 ///
 /// Borrows the scan rather than owning it — the array lives in the `Deck` and is rebuilt
 /// only when a track is loaded, so cloning it into the view every frame would be a copy of
@@ -43,14 +48,25 @@ struct Waveform<'a> {
 	/// `0.0..=1.0`, or `None` when there is nothing to measure against: an empty player,
 	/// or a stream whose length the decoder could not work out (PLAN §7).
 	progress: Option<f32>,
+	/// The scanning animation's phase, `0.0..=1.0`, or `None` when no scan is running —
+	/// which covers an empty player and a scan that failed as well as a finished one.
+	sweep: Option<f32>,
 }
 
 /// The strip, ready to drop into a panel.
 ///
 /// A function rather than a public struct, because there is nothing to configure: every
 /// choice it could offer is a constant above, decided once for both players.
-pub fn view<'a, Message: 'a>(peaks: &'a [f32], progress: Option<f32>) -> Element<'a, Message> {
-	Element::new(Waveform { peaks, progress })
+pub fn view<'a, Message: 'a>(
+	peaks: &'a [f32],
+	progress: Option<f32>,
+	sweep: Option<f32>,
+) -> Element<'a, Message> {
+	Element::new(Waveform {
+		peaks,
+		progress,
+		sweep,
+	})
 }
 
 /// Implemented for the concrete `Theme` rather than a generic one, because the colours are
@@ -118,8 +134,8 @@ where
 		let middle = bounds.y + bounds.height / 2.0;
 		let played = self.progress.unwrap_or(0.0) * bounds.width;
 
-		// A flat line while there is no scan: an empty player, or the seconds a long track
-		// takes to analyse. Without it the strip is a bare rectangle, which reads as broken
+		// A flat line while there is no scan: an empty player, or the moment before a track's
+		// shape arrives. Without it the strip is a bare rectangle, which reads as broken
 		// rather than as waiting — which is exactly how the first version of this widget was
 		// reported, when a contrast mistake made every bar invisible.
 		if self.peaks.is_empty() {
@@ -135,6 +151,28 @@ where
 				},
 				palette.secondary.base.color,
 			);
+
+			// A band travelling along that line while the decode runs. It says "working"
+			// rather than "empty", and it is drawn here rather than written in the status
+			// bar because this is the thing being waited for (PLAN §14a).
+			if let Some((start, end)) = self
+				.sweep
+				.and_then(|phase| waveform::sweep_band(bounds.width, phase))
+			{
+				renderer.fill_quad(
+					renderer::Quad {
+						bounds: Rectangle {
+							x: bounds.x + start,
+							y: middle - SWEEP_BAR / 2.0,
+							width: end - start,
+							height: SWEEP_BAR,
+						},
+						border: iced::border::rounded(SWEEP_BAR / 2.0),
+						..Default::default()
+					},
+					palette.primary.base.color,
+				);
+			}
 		}
 
 		for column in 0..columns {

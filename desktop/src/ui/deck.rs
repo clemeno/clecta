@@ -17,8 +17,10 @@ const TITLE_CHARS: usize = 34;
 const RING_WIDTH: f32 = 2.0;
 
 /// `ring` lights this player as the one a release would land on — under the cursor for an
-/// in-app drag, derived for an OS drop, and never on both (PLAN §10).
-pub fn view(id: DeckId, deck: &Deck, ring: bool) -> Element<'_, Message> {
+/// in-app drag, derived for an OS drop, and never on both (PLAN §10). `sweep` is the
+/// scanning animation's phase, which the strip uses only while this player is being
+/// scanned (PLAN §14a).
+pub fn view(id: DeckId, deck: &Deck, ring: bool, sweep: f32) -> Element<'_, Message> {
 	let loaded = deck.transport.has_track();
 
 	// Disabled rather than hidden: buttons that come and go make the panel jump, and the
@@ -42,7 +44,7 @@ pub fn view(id: DeckId, deck: &Deck, ring: bool) -> Element<'_, Message> {
 				deck.track.as_ref().and_then(|track| track.duration)
 			))
 			.size(13),
-			ui::waveform::view(&deck.peaks, progress(deck)),
+			ui::waveform::view(&deck.peaks, progress(deck), deck.scanning.then_some(sweep)),
 			row![
 				transport_button("▶", deck::Event::Play, loaded && !deck.is_playing()),
 				transport_button("⏸", deck::Event::Pause, deck.is_playing()),
