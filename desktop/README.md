@@ -32,6 +32,11 @@ cargo build --release --target x86_64-apple-darwin
 - **Two players.** Play / pause / stop, a `M:SS / M:SS` readout, and a **Load…** button
   each. Stop is a rewind, not a `Player::stop()`: the track stays loaded and plays again
   from the top (PLAN §7).
+- **A waveform per player.** The whole file is scanned once when it loads, in the
+  background, and the strip fills in when it lands — seconds for a long track, and the
+  player is playable throughout. The part already played is coloured, and a playhead
+  crosses it. It is a picture, not a control: clicking it does not seek yet (PLAN §14a,
+  §14).
 - **The mixer strip.** A volume fader per player and a crossfader, with a
   **Power / Linear** curve selector. The number beside each fader is the gain actually
   sent to that player, so the cubic taper and the crossfade are visible as they move
@@ -65,8 +70,11 @@ cargo build --release --target x86_64-apple-darwin
 - **No aiming an OS drop.** A file dragged in from Finder goes to the idle player, not to
   the one under the cursor — the position is thrown away by winit and is not recoverable
   in clecta's own code. The upgrade path is upstream, and PLAN §10 spells it out.
+- **No scrubbing.** The waveform shows where you are; it will not take you somewhere else.
+  The seek itself already exists — Stop uses it — so what is missing is the gesture
+  (PLAN §14).
 - **No video picture** — the audio track of an `.mp4` / `.mkv` plays, and that is v1
-  (PLAN §14). No waveform, no cue points, no tempo.
+  (PLAN §14). No cue points, no tempo.
 - **No list virtualization.** A folder of five thousand files builds five thousand
   widgets per frame. Fine for a music folder; the upgrade path is in PLAN §9.
 
@@ -108,9 +116,11 @@ real folder is manual (PLAN §12):
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
+| `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, and every pixel column of every width in range |
+| `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Two things the suite cannot reach, both of which need a window a person can click:
+Three things the suite cannot reach, all of which need a window a person can look at:
 
 - **The close-button save.** ⌘Q *was* the open question here, and the answer was that it
   never reaches the app at all — so the settings are now written on a two-second throttle
@@ -123,3 +133,8 @@ Two things the suite cannot reach, both of which need a window a person can clic
   pointer bookkeeping around them — the ring lighting on one player, the drag disarming
   when it is let go over nothing, a release over a button not leaving it armed — is
   wiring that only a real drag exercises (PLAN §10).
+- **What the waveform looks like.** Its numbers are checked three ways, including a
+  scratch build that printed what the running app scanned from a file with a known
+  envelope, and the app drew it at 20 Hz for forty seconds without a panic. Nobody has
+  *seen* it: screen capture from a script is blocked by the same permission wall as
+  scripted clicking (PLAN §12).

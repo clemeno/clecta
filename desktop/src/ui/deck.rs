@@ -42,6 +42,7 @@ pub fn view(id: DeckId, deck: &Deck, ring: bool) -> Element<'_, Message> {
 				deck.track.as_ref().and_then(|track| track.duration)
 			))
 			.size(13),
+			ui::waveform::view(&deck.peaks, progress(deck)),
 			row![
 				transport_button("▶", deck::Event::Play, loaded && !deck.is_playing()),
 				transport_button("⏸", deck::Event::Pause, deck.is_playing()),
@@ -79,6 +80,18 @@ fn panel_style(theme: &Theme, ring: bool) -> container::Style {
 			.width(RING_WIDTH),
 		..base
 	}
+}
+
+/// How far through the track the playhead is, for the waveform's playhead line.
+///
+/// `None` whenever there is nothing to measure against — an empty player, or a stream the
+/// decoder could not give a length for (PLAN §7) — which is the case the readout above
+/// shows as `--:--` and the strip shows by drawing no playhead at all.
+fn progress(deck: &Deck) -> Option<f32> {
+	let total = deck.track.as_ref()?.duration?.as_secs_f32();
+	// A zero-length track would divide by nothing, and a playhead can overrun its total by
+	// a tick's worth at the very end, so the ratio is clamped rather than trusted.
+	(total > 0.0).then(|| (deck.position.as_secs_f32() / total).clamp(0.0, 1.0))
 }
 
 /// The transport state, in the user's words rather than the enum's.

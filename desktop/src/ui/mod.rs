@@ -10,6 +10,7 @@ pub mod browser;
 pub mod deck;
 pub mod mixer;
 pub mod tree;
+pub mod waveform;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

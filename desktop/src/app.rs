@@ -13,7 +13,7 @@ use iced::widget::pane_grid::Axis;
 use iced::widget::{Space, button, column, container, mouse_area, pane_grid, row, text};
 use iced::{Element, Fill, Size, Subscription, Task, Theme, event, mouse, time, window};
 
-use crate::audio::Engine;
+use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
@@ -116,6 +116,9 @@ pub enum Message {
 	/// A directory listing came back off the GUI thread.
 	FilesListed(PathBuf, Result<Vec<Entry>, String>),
 	FoldersListed(PathBuf, Result<Vec<PathBuf>, String>),
+	/// A waveform scan finished. Carries the path it was started for, because a player can
+	/// be given another track while the scan runs (PLAN §14a).
+	PeaksScanned(DeckId, PathBuf, Result<Vec<f32>, String>),
 	/// The window was resized. Recorded, then saved with everything else once the app has
 	/// been still for `SAVE_AFTER`.
 	WindowResized(Size),
@@ -303,19 +306,19 @@ impl Clecta {
 					.set_directory(self.browser.folder.clone().unwrap_or_else(fsio::home))
 					.pick_file()
 				{
-					self.load(id, file);
+					return self.load(id, file);
 				}
 			}
 
 			Message::LoadSelected(id) => {
 				if let Some(path) = self.browser.selection().map(|entry| entry.path.clone()) {
-					self.load(id, path);
+					return self.load(id, path);
 				}
 			}
 
 			Message::LoadUnaimed(path) => {
 				let id = deck::idle_target(&self.decks[0], &self.decks[1]);
-				self.load(id, path);
+				return self.load(id, path);
 			}
 
 			Message::RowSelected(path) => {
@@ -422,7 +425,7 @@ impl Clecta {
 				// hover would decline the drop with a notice, not swallow it.
 				let first = std::mem::take(&mut self.os_hover);
 				let target = deck::idle_target(&self.decks[0], &self.decks[1]);
-				self.accept_drop(target, path, first);
+				return self.accept_drop(target, path, first);
 			}
 
 			Message::DragOver(id, inside) => {
@@ -442,7 +445,7 @@ impl Clecta {
 				if let Some(path) = self.drag.take()
 					&& let Some(id) = target
 				{
-					self.accept_drop(id, path, true);
+					return self.accept_drop(id, path, true);
 				}
 			}
 
@@ -459,6 +462,26 @@ impl Clecta {
 				// in the notice is enough; the tree is navigation, not the task at hand.
 				Err(error) => self.notice = error,
 			},
+
+			Message::PeaksScanned(id, path, result) => {
+				// A scan takes seconds, and a player can be given a second track inside
+				// them. An array that no longer belongs to what is loaded is dropped, or it
+				// would draw the previous track under this one's playhead.
+				if self.decks[id.index()]
+					.track
+					.as_ref()
+					.map(|track| &track.path)
+					!= Some(&path)
+				{
+					return Task::none();
+				}
+				match result {
+					Ok(peaks) => self.decks[id.index()].peaks = peaks,
+					// Odd but reachable: playback opened the file and the scan did not,
+					// because it was replaced or unmounted between the two reads.
+					Err(error) => self.notice = format!("{}: {error}", id.label()),
+				}
+			}
 		}
 
 		Task::none()
@@ -526,17 +549,18 @@ impl Clecta {
 		}
 	}
 
-	/// Decode a file into a player. A failure leaves the previous track alone and says so
-	/// — it must never wipe a loaded track to show an error (PLAN §7).
-	fn load(&mut self, id: DeckId, path: PathBuf) {
+	/// Decode a file into a player, and start the waveform scan behind it. A failure leaves
+	/// the previous track alone and says so — it must never wipe a loaded track to show an
+	/// error (PLAN §7).
+	fn load(&mut self, id: DeckId, path: PathBuf) -> Task<Message> {
 		if !browser::kind_of(&path).is_media() {
 			self.notice = format!("{} is not a media file", fsio::name_of(&path));
-			return;
+			return Task::none();
 		}
 
 		let Some(engine) = self.engine.as_ref() else {
 			self.notice = "no audio device — press Reconnect audio".to_string();
-			return;
+			return Task::none();
 		};
 
 		match engine.load(id, &path) {
@@ -547,24 +571,35 @@ impl Clecta {
 				let deck = &mut self.decks[id.index()];
 				deck.transport = deck::transition(deck.transport, deck::Event::Loaded);
 				deck.position = Duration::ZERO;
+				// Cleared now rather than when the new scan lands, so the strip is never
+				// showing the outgoing track's shape under the incoming track's playhead.
+				deck.peaks = Vec::new();
 				deck.track = Some(Track {
-					path,
+					path: path.clone(),
 					name,
 					duration,
 				});
+
+				scan_peaks(id, path)
 			}
 			// `{error:#}` prints the anyhow chain on one line, which is what turns
 			// "cannot decode x.mp4" into "cannot decode x.mp4: unsupported codec".
-			Err(error) => self.notice = format!("{}: {error:#}", id.label()),
+			Err(error) => {
+				self.notice = format!("{}: {error:#}", id.label());
+				Task::none()
+			}
 		}
 	}
 
 	/// Apply the drop policy, then load or explain. Both gestures come through here, so a
 	/// folder is declined the same way whichever way it arrived (PLAN §10).
-	fn accept_drop(&mut self, id: DeckId, path: PathBuf, first: bool) {
+	fn accept_drop(&mut self, id: DeckId, path: PathBuf, first: bool) -> Task<Message> {
 		match deck::drop_outcome(path, first) {
 			DropOutcome::Load(path) => self.load(id, path),
-			DropOutcome::Decline(reason) => self.notice = reason,
+			DropOutcome::Decline(reason) => {
+				self.notice = reason;
+				Task::none()
+			}
 		}
 	}
 
@@ -644,6 +679,7 @@ impl Clecta {
 
 		// A new device means new players, so whatever was loaded is gone from the audio
 		// side even though the model still lists it.
+		let mut tasks = Vec::new();
 		for id in DeckId::ALL {
 			let Some(path) = self.decks[id.index()]
 				.track
@@ -652,10 +688,10 @@ impl Clecta {
 			else {
 				continue;
 			};
-			self.load(id, path);
+			tasks.push(self.load(id, path));
 		}
 
-		Task::none()
+		Task::batch(tasks)
 	}
 
 	/// Push the collapsed gains to both players. Called after anything that can change
@@ -806,5 +842,25 @@ fn list_folders(folder: PathBuf) -> Task<Message> {
 			(folder, result)
 		},
 		|(folder, result)| Message::FoldersListed(folder, result),
+	)
+}
+
+/// Scan a track's waveform off the GUI thread (PLAN §4, §14).
+///
+/// `ponytail:` like the two directory reads above, the blocking work sits inside the async
+/// block and so occupies an executor thread rather than a dedicated blocking pool — but
+/// for *seconds* rather than milliseconds. At most two run at once, and the GUI thread is
+/// not one of them, so the worst visible effect is a directory listing queueing behind a
+/// scan on a machine with few cores. Move it to its own `std::thread` if that ever shows.
+///
+/// The error is flattened to a `String` here because a `Message` has to be `Clone` and an
+/// `anyhow::Error` is not — the same reason `fsio` returns one (PLAN §9).
+fn scan_peaks(id: DeckId, path: PathBuf) -> Task<Message> {
+	Task::perform(
+		async move {
+			let result = audio::peaks(&path).map_err(|error| format!("{error:#}"));
+			(path, result)
+		},
+		move |(path, result)| Message::PeaksScanned(id, path, result),
 	)
 }

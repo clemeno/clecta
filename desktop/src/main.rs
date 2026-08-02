@@ -16,6 +16,7 @@ mod paths;
 mod settings;
 mod tree;
 mod ui;
+mod waveform;
 
 fn main() -> iced::Result {
 	app::run()

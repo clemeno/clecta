@@ -117,6 +117,12 @@ pub struct Deck {
 	/// This player's volume fader, 0..=1. Not a gain: `mixer::gains` tapers it and folds
 	/// the crossfader in (PLAN §8).
 	pub fader: f32,
+	/// The loaded track's amplitude scan, drawn by `ui::waveform` (PLAN §14a).
+	///
+	/// Empty until it lands: the scan decodes the whole file off the GUI thread and a long
+	/// track takes seconds. Empty also covers a scan that failed, which is a case the
+	/// notice line has already explained — a player with no waveform still plays.
+	pub peaks: Vec<f32>,
 }
 
 impl Default for Deck {
@@ -127,6 +133,7 @@ impl Default for Deck {
 			position: Duration::ZERO,
 			// Wide open, not zero. A player that starts silent reads as broken.
 			fader: 1.0,
+			peaks: Vec::new(),
 		}
 	}
 }

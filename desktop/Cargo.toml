@@ -15,7 +15,10 @@ anyhow = "1.0.104"
 # default `thread-pool` backend ships an empty `time` module, so `time::every` (the 20 Hz
 # playhead tick, PLAN §4) does not exist without it. smol is the smaller of the two
 # offered; tokio would pull far more for the same one function.
-iced = { version = "0.14.0", features = ["smol"] }
+# `advanced` exposes the `Widget` trait the waveform implements (PLAN §14). It is a feature
+# toggle on crates already in the tree, not a new dependency: nothing is added to
+# Cargo.lock by turning it on, which is why the waveform costs no supply chain (PLAN §12).
+iced = { version = "0.14.0", features = ["smol", "advanced"] }
 # Native folder picker (PLAN §3). NSOpenPanel / Win32, same crate as cmote.
 rfd = "0.17.2"
 # Audio output, mixing and decoding (PLAN §7, §8). Wraps `cpal` for the device and its
