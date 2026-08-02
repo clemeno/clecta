@@ -779,14 +779,17 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   resize it, and the app writes `2005×1227` along with the faders and the curve **while
   still running**; killing rather than closing it proves only the throttle can have
   written that. Asking for 15000×15000 instead is how the wgpu ceiling in §11 was found.
-  What is left needing a person is the close *button* path and the drop gestures — and now
-  the waveform, whose *pixels* nobody has seen. Its numbers are checked three ways: the
-  unit tests above, the generated-WAV decode, and a scratch build that auto-loaded a file
-  with a known envelope and printed what the running app scanned (1723 columns, peaks of
-  0.928 and 0.586 exactly where the envelope put them). The app then drew it at 20 Hz for
-  forty seconds without a panic, which exercises `draw` but does not *look* at it.
-  `screencapture` from this shell returns a black frame — the same permission wall as the
-  scripted-click attempt above — so the last step is a human glance.
+  What is left needing a person is the close *button* path and the drop gestures.
+  **The waveform came off this list the way ⌘Q did — by failing.** Its numbers were checked
+  three ways before anyone looked: the unit tests above, the generated-WAV decode, and a
+  scratch build that auto-loaded a file with a known envelope and printed what the running
+  app scanned (1723 columns, peaks of 0.928 and 0.586 exactly where the envelope put them,
+  laid out at 424×56, drawn at 20 Hz for forty seconds with no panic). All three agreed,
+  all three were right, and the strip was blank — a contrast mistake, told in §14a.
+  `screencapture` from a script returns a black frame, the same permission wall as the
+  scripted-click attempt above, so there was no way to close that gap without a person.
+  Two attempts is what it cost, and it is the second time on this list that the thing the
+  automation could not reach is the thing that was broken.
 
 **CI** mirrors cmote's `.github/workflows/ci.yml` — four jobs: `rustfmt` on Linux,
 clippy + test on Windows natively, clippy against **`x86_64-apple-darwin`** plus a native
@@ -924,12 +927,43 @@ Two deliberate consequences:
   a couple of thousand columns; drawing one quad per column would be three times the work
   and would alias into a grey smear.
 - **It is implemented for the concrete `Theme`**, not a generic one, because the colours
-  are read from its palette: `primary` for the played part, `background.strong` for the
-  rest, `danger` for the playhead. Naming roles rather than colours is what keeps the strip
+  are read from its palette. Naming roles rather than colours is what keeps the strip
   legible if the theme ever stops being `Dark`.
 
 `advanced` is a *feature toggle* on crates already in the tree — turning it on adds nothing
 to `Cargo.lock`, which is checked. The waveform costs no supply chain (§12).
+
+### A role is not a contrast
+
+The first version of this widget shipped invisible. Every number was right — 424×56 of
+layout, 1723 columns of scan, a playhead at the correct fraction — and what appeared on
+screen was a red vertical line on an empty panel. Nothing else.
+
+The cause was the palette, chosen by reading role names and never by comparing values. The
+bed was `background.weak`, which is *exactly* what `container::rounded_box` paints the
+panel behind it, so the bed did not exist. The bars were `background.strong`, which in the
+Dark theme is `#50545d` against that panel's `#43464e` — thirteen levels of grey, in a bar
+one pixel wide.
+
+Printing the palette is what settled it, and the four roles are now picked by comparing:
+
+| part | role | dark theme |
+|---|---|---|
+| the bed | `background.weakest` | `#323439`, darker than the panel's `#43464e` |
+| not yet played | `secondary.base` | `#878a90` |
+| already played | `primary.base` | `#5865f2` |
+| the playhead | `danger.base` | `#c3423f` |
+
+The empty strip gained a flat centre line at the same time, for the same reason: a bare
+rectangle reads as broken rather than as waiting, and "waiting" is the honest state for
+the seconds a long track spends being scanned.
+
+Worth saying plainly, because it is the transferable part: **§12's verification was
+thorough and could not have caught this.** Seven unit tests, a real-file decode, and a
+printout from the running app all agreed, and all of them were measuring numbers that were
+already correct. The defect was entirely in the mapping from correct numbers to visible
+pixels, and the only instrument for that is an eye. It took one glance to find what none of
+the automation could.
 
 | # | Question | Decision | Landed in |
 |---|---|---|---|
@@ -942,6 +976,7 @@ to `Cargo.lock`, which is checked. The waveform costs no supply chain (§12).
 | Q7 | When to save | **A `dirty` flag and a 2s throttle**, alongside the write at close. Not a design preference — the smoke test showed ⌘Q never reaches the app, so saving only at exit lost the settings for the ordinary way of quitting a Mac app | §11, §12 |
 | Q8 | Sizing the peak array | **Halve as it fills**, never divide. The sample count is not knowable up front — a stream has no duration at all — so the mipmap replaces the branch instead of guarding it, in one pass and for a file of any length | §14a |
 | Q9 | Drawing the waveform | **A custom `advanced::Widget`**, not `canvas`. The plan called for the `Widget` as the lesson (§16), and laziness agreed for once: `advanced` is a feature toggle that adds nothing to `Cargo.lock`, while `canvas` would pull `lyon` in to tessellate rectangles | §14a, §12 |
+| Q10 | Picking colours from a palette | **Compare the values, never trust the role name.** Not a preference either: `background.weak` is what `rounded_box` paints a panel, so a strip using it for its bed drew nothing at all | §14a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

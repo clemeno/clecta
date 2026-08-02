@@ -54,9 +54,20 @@ pub fn view<'a, Message: 'a>(peaks: &'a [f32], progress: Option<f32>) -> Element
 }
 
 /// Implemented for the concrete `Theme` rather than a generic one, because the colours are
-/// read from its palette — the played part is `primary`, the rest `background.strong`, and
-/// the playhead `danger`. Naming roles instead of colours is what keeps the strip legible
-/// if the theme ever stops being `Dark`.
+/// read from its palette. Naming roles instead of colours is what keeps the strip legible
+/// if the theme ever stops being `Dark` — but a *role* is not automatically a contrast, and
+/// the first attempt at this widget proved it by drawing nothing anyone could see: the bed
+/// was `background.weak`, which is exactly what `container::rounded_box` paints the panel
+/// behind it, and the bars were `background.strong`, thirteen levels of grey above that in
+/// a bar one pixel wide. The four roles below were picked by printing the palette and
+/// comparing, which is the only way to know:
+///
+/// | part | role | dark theme |
+/// |---|---|---|
+/// | the bed | `background.weakest` | `#323439`, darker than the panel's `#43464e` |
+/// | not yet played | `secondary.base` | `#878a90` |
+/// | already played | `primary.base` | `#5865f2` |
+/// | the playhead | `danger.base` | `#c3423f` |
 impl<Message, Renderer> Widget<Message, Theme, Renderer> for Waveform<'_>
 where
 	Renderer: renderer::Renderer,
@@ -90,14 +101,15 @@ where
 		let palette = theme.extended_palette();
 
 		// The bed, drawn first and always: an empty player, or one whose scan is still
-		// running, has to read as a control rather than as a gap in the panel.
+		// running, has to read as a control rather than as a gap in the panel. Which means
+		// it has to be *darker* than the panel, not merely a different name for it.
 		renderer.fill_quad(
 			renderer::Quad {
 				bounds,
 				border: iced::border::rounded(2.0),
 				..Default::default()
 			},
-			palette.background.weak.color,
+			palette.background.weakest.color,
 		);
 
 		// One bar per pixel of the width actually laid out — which is why the scan's own
@@ -105,6 +117,25 @@ where
 		let columns = bounds.width.max(0.0) as usize;
 		let middle = bounds.y + bounds.height / 2.0;
 		let played = self.progress.unwrap_or(0.0) * bounds.width;
+
+		// A flat line while there is no scan: an empty player, or the seconds a long track
+		// takes to analyse. Without it the strip is a bare rectangle, which reads as broken
+		// rather than as waiting — which is exactly how the first version of this widget was
+		// reported, when a contrast mistake made every bar invisible.
+		if self.peaks.is_empty() {
+			renderer.fill_quad(
+				renderer::Quad {
+					bounds: Rectangle {
+						x: bounds.x,
+						y: middle - MIN_BAR / 2.0,
+						width: bounds.width,
+						height: MIN_BAR,
+					},
+					..Default::default()
+				},
+				palette.secondary.base.color,
+			);
+		}
 
 		for column in 0..columns {
 			let peak = waveform::column_peak(self.peaks, column, columns);
@@ -118,9 +149,9 @@ where
 			// chart growing off the floor.
 			let half = (peak * bounds.height / 2.0).max(MIN_BAR / 2.0);
 			let colour = if (column as f32) < played {
-				palette.primary.strong.color
+				palette.primary.base.color
 			} else {
-				palette.background.strong.color
+				palette.secondary.base.color
 			};
 
 			renderer.fill_quad(

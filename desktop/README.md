@@ -133,8 +133,8 @@ Three things the suite cannot reach, all of which need a window a person can loo
   pointer bookkeeping around them — the ring lighting on one player, the drag disarming
   when it is let go over nothing, a release over a button not leaving it armed — is
   wiring that only a real drag exercises (PLAN §10).
-- **What the waveform looks like.** Its numbers are checked three ways, including a
-  scratch build that printed what the running app scanned from a file with a known
-  envelope, and the app drew it at 20 Hz for forty seconds without a panic. Nobody has
-  *seen* it: screen capture from a script is blocked by the same permission wall as
-  scripted clicking (PLAN §12).
+- **What the waveform looks like.** Its numbers are checked three ways — unit tests, a real
+  decode, and a printout from the running app — and the first version was still invisible,
+  because the bars were painted thirteen levels of grey away from the panel behind them.
+  Numbers cannot catch that; screen capture from a script is blocked by the same permission
+  wall as scripted clicking, so it takes an eye (PLAN §14a).
