@@ -217,7 +217,7 @@ clecta/
             ├── mixer.rs     the two faders and the crossfader
             ├── browser.rs   the files pane and its rows
             ├── tree.rs      the folder tree pane, its splitter and its fold button
-            └── waveform.rs  the custom advanced::Widget: a bar per pixel column, plus the playhead (§14a)
+            └── waveform.rs  the custom advanced::Widget: a bar per pixel column, the playhead, the scrub (§14a)
 ```
 
 **Built so far:** all of it. `ui/mod.rs` also carries the formatting helpers (elide, size,
@@ -919,6 +919,13 @@ otherwise pure; anything needing a device or a real folder is manual.
   immediately**: it caught that `f32::clamp` passes a `NaN` through unchanged, so the
   first version's clamp was decoration and a mis-measured strip would have panicked
   `Duration::mul_f32` on the click (§14b).
+- **`ui/waveform.rs`** — the only test under `ui/`, and the exception that shows the rule:
+  everything else in that folder is composition, but this file holds a *gesture*, and a
+  gesture has rules. `scrub(event, over, scrubbing)` is pure, so all three are checked
+  without a window — a press arms only over the strip, a move seeks only while the button is
+  held (and follows it *outside* the strip, which is what lets a drag run past either end),
+  a release disarms wherever it happens, and the events that pass through in quantity — the
+  right button, the cursor leaving — do nothing even mid-scrub (§14b).
 - **`app.rs`** — what a *divider drag* is allowed to store (§6), and which key means
   refresh (§14). Nothing else here is arithmetic any more: the players' height reaches the
   widget as a literal and iced does the compacting. So the tests cover the one calculation
@@ -1030,10 +1037,6 @@ path, so `/ponytail-debt` can harvest them later.
 - **Video rendering.** v1 decodes the audio track only. Upgrade path: an ffmpeg binding
   and a texture in a custom iced widget — a large C dependency and a licensing question,
   worth paying only when the picture is actually the feature.
-- **Drag-scrubbing.** Clicking the waveform to seek **landed** — see §14b, which is where
-  the prediction this entry made got checked. What is still deferred is holding the button
-  and dragging: that needs `Tree` state for the held flag, which is the line the widget
-  currently does not cross.
 - **Cue points, loops, tempo / pitch, BPM detection.** Real DJ features. Tempo needs a
   time-stretch stage rodio does not have (`rubato` or a phase vocoder).
 - **Headphone cue / pre-listen.** Needs a *second* output device and a second mixer —
@@ -1168,13 +1171,15 @@ Two traps came with running it in the background, both of which are the same tra
   scan *lands* would leave the outgoing track's shape on screen under the incoming track's
   playhead for a few seconds, which reads as a bug rather than as waiting.
 
-### The widget is three methods — then five
+### The widget is three methods — then five, then seven
 
 `ui/waveform.rs` first implemented `advanced::Widget` with `size`, `layout` and `draw`.
 Everything else the trait asks for has a default that is already right for a widget with
 no children, no state and no events — which is worth saying out loud, because the trait
 looks like nine methods of work and is not. Making it clickable (§14b) added exactly two
-more, and no state: the count went three, five, and stopped.
+more and no state; making it *draggable* added `tag` and `state` for a single `bool`. Three,
+five, seven — and the shape of that sequence is the point: each capability paid for itself
+separately, and none of them made the previous one more complicated.
 
 `layout` is `layout::atomic`: no children to place, no intrinsic size to negotiate, take
 the width offered and the fixed height asked for. `draw` is `fill_quad` and nothing else —
@@ -1231,8 +1236,11 @@ the automation could.
 ## 14b. Scrubbing (`ui/waveform.rs`, `audio.rs`)
 
 §14 deferred this and predicted what it would cost: "a `Widget` that handles events needs
-`update` and a `Shell`". That was right, and it was the whole bill — two methods, no state,
-and a strip that was a picture is now a control.
+`update` and a `Shell`". That was right, and for the *click* it was the whole bill — two
+methods, no state, and a strip that was a picture became a control. **Dragging** came
+after, and cost exactly what §14 said it would and nothing more: `tag` and `state` for one
+`bool`. The section keeps both halves in the order they happened, because the second one is
+the cheaper story only because the first one had already decided everything hard.
 
 ### Seeking is the one thing that does not touch the transport
 
@@ -1278,7 +1286,7 @@ hand-edited file, and for exactly the same reason: this is a trust boundary, not
 formality. The app-side handler repeats the test rather than trusting the widget, because
 it is the code that does the multiplying.
 
-### What the two new methods actually do
+### What the methods actually do
 
 - **`update`** acts on `ButtonPressed`, not `ButtonReleased`. A transport control should
   answer as the button goes down; waiting for the release makes a click that drifted three
@@ -1290,10 +1298,46 @@ it is the code that does the multiplying.
   where "seekable" is `progress.is_some()` — the same test that decides whether a playhead
   is drawn, and not a coincidence: a strip with no total to place a playhead against has no
   total to seek within. An empty player therefore reads as not-a-control without needing a
-  greyed-out look.
+  greyed-out look. It also stays `Pointer` for as long as a scrub is held, wherever the
+  cursor has wandered to: the gesture still belongs to this strip, and a cursor that changed
+  shape halfway through a drag would say it had been dropped.
+- **`tag` / `state`** are the whole cost of dragging: one `bool`, `scrubbing`, in the
+  widget's `Tree` state. Not a field on the struct — the struct is rebuilt from scratch
+  every frame by `view`, so anything written into it is gone before the next event arrives.
+  `Tree` state is where iced keeps the thing a widget has to remember *between* frames, and
+  a held mouse button is the definition of that.
 
-Still no `Tree` state, which is what keeps this cheap: a *click* needs no memory. Holding
-the button and dragging would need the held flag, and that is the line §14 still defers.
+### A drag is the same seek, more often
+
+This is the part worth writing down, because it is why the diff was small. A scrub needed
+**no new message and no new arm in the app**. The widget already published a fraction on a
+press; dragging publishes the same fraction on each move, and `Clecta::seek` cannot tell the
+difference. Everything the click had already settled — the fraction rather than a time, the
+range test on the way out, the playhead written by hand because the tick is not running —
+is settled for the drag too. The lesson generalises: a gesture that produces the *same*
+message its click already produced is nearly free; one that needs a new message is not.
+
+The rules of the gesture are pure and tested, in a `scrub` function beside the widget, for
+the same reason `deck::transition` sits beside the app. There are only three of them and
+each is wrong in a way only a window would show:
+
+- **A press arms only when the pointer is over the strip.** A press anywhere else in the
+  window belongs to something else; arming on it would make the next mouse move seek a
+  track nobody touched.
+- **A move follows wherever it goes, once armed** — over the panel, past either end, out of
+  the window. `seek_fraction` clamps, so leaving the strip parks the playhead at the edge it
+  left by, which is what makes a scrub forgiving of a hand that wanders. The clamp was
+  already tested for this: the test's own comment said "reachable while a button is held and
+  dragged", months before anything could hold and drag.
+- **A release disarms wherever it happens.** Over the mixer, over the browser, off the
+  window — a button let go is let go, and a strip left armed would scrub on the next stray
+  move. This is the rule that cannot be tested by trying it once and it working.
+
+`ponytail:` one seek per pointer move, and `Engine::seek` blocks the GUI thread until the
+audio thread has performed it. Fine for a local file, where a seek is a format-level jump
+rather than a decode, and a stutter would be audible immediately rather than lurking. If a
+slow source ever makes a scrub stutter, the fix is to coalesce the moves within a frame,
+not to make the widget cleverer.
 
 ---
 

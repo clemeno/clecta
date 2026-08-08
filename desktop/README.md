@@ -42,9 +42,11 @@ cargo build --release --target x86_64-apple-darwin
   its own, and the strip fills in when it lands — around a third of a second for a
   three-minute track. The player is playable the whole time, and a band sweeps the strip
   while the scan runs so the wait is visible rather than mysterious. The part already
-  played is coloured, and a playhead crosses it. **Click it to jump there** — the transport
-  does not change, so a playing track carries on from the new place and a paused one stays
-  paused there (PLAN §14a, §14b).
+  played is coloured, and a playhead crosses it. **Click it to jump there, or hold and drag
+  along it to scrub** — the transport does not change either way, so a playing track carries
+  on from the new place and a paused one stays paused there. A scrub follows the pointer
+  past either end of the strip and off the panel, and stops wherever you let go (PLAN §14a,
+  §14b).
 - **The mixer strip.** A volume fader per player and a crossfader, with a
   **Power / Linear** curve selector. The number beside each fader is the gain actually
   sent to that player, so the cubic taper and the crossfade are visible as they move.
@@ -92,9 +94,6 @@ cargo build --release --target x86_64-apple-darwin
 - **No aiming an OS drop.** A file dragged in from Finder goes to the idle player, not to
   the one under the cursor — the position is thrown away by winit and is not recoverable
   in clecta's own code. The upgrade path is upstream, and PLAN §10 spells it out.
-- **No drag-scrubbing.** Clicking the waveform jumps; holding and dragging along it does
-  not follow. A click needs no memory, so the widget stays stateless; a drag would need the
-  button-held flag (PLAN §14).
 - **No video picture** — the audio track of an `.mp4` / `.mkv` plays, and that is v1
   (PLAN §14). No cue points, no tempo.
 - **No list virtualization.** A folder of five thousand files builds five thousand
@@ -140,12 +139,14 @@ cargo build --release
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
 | `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height; plus which key means refresh — F5 and ⌘R yes, a bare `r` no |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
+| `ui/waveform.rs` | the scrub's three rules: a press arms only over the strip, a move seeks only while the button is held and follows it outside the strip too, a release disarms wherever it happens |
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Six things the suite cannot reach, all of which need a window a person can look at. **Five
-of the six pass on macOS, by hand**, and the last two rounds are why the list exists: three
-of the app's defects so far were found here and none of them by a passing test.
+Seven things the suite cannot reach, all of which need a window a person can look at. **Five
+of the seven pass on macOS, by hand**; the last two are new and unchecked. The last two
+rounds are why the list exists: three of the app's defects so far were found here and none
+of them by a passing test.
 
 - **The close-button save.** ⌘Q *was* the open question here, and the answer was that it
   never reaches the app at all — so the settings are now written on a two-second throttle
@@ -167,6 +168,11 @@ of the app's defects so far were found here and none of them by a passing test.
   and a paused one stays put, and the cursor turns into a hand over a loaded strip and not
   over an empty one. Confirmed, first try — the arithmetic had already been tested and the
   only question was the wiring (PLAN §14b).
+- **The scrub.** *Not checked yet.* Its rules are a tested pure function, so what is left is
+  everything the rules assume: that a drag off the strip keeps sending moves, that the
+  release still arrives when the button comes up outside the window, and that a seek per
+  pointer move does not make a playing track stutter — the one `ponytail:` note this feature
+  left behind (PLAN §14b).
 - **Dragging the divider, and then the window edge.** This is the one that failed, twice.
   The height had been measured with a probe widget and was exact every time, and the panel
   still *wobbled* as the window's bottom edge moved: iced lays out at the new window size a

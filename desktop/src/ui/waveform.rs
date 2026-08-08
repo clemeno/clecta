@@ -3,7 +3,7 @@
 //! Everything else under `ui/` composes widgets iced already has. This one cannot: a bar
 //! per pixel column is not a `row` of four hundred elements, and the shape has to be
 //! re-fitted to whatever width the panel happens to have this frame. So it implements
-//! `advanced::Widget` directly, which turns out to be three methods — `size`, `layout`,
+//! `advanced::Widget` directly, which as a *picture* was three methods — `size`, `layout`,
 //! `draw` — because every other one has a default that is already right for a widget with
 //! no children, no state and no events.
 //!
@@ -11,13 +11,14 @@
 //! built-in widget's background is made of: there is no second, lower rendering layer
 //! being reached for.
 //!
-//! It is now a control as well as a picture: `update` turns a click into a seek, which is
-//! the two extra methods PLAN §14 said scrubbing would cost — `update` for the event and
-//! `mouse_interaction` so the pointer says the strip is clickable before it is clicked.
+//! It is now a control as well as a picture: `update` turns a press into a seek and a drag
+//! into a scrub, which cost the four methods PLAN §14 said they would — `update` for the
+//! events, `mouse_interaction` so the pointer says the strip is a control before it is
+//! touched, and `tag` / `state` for the one bit the gesture has to remember.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
-use iced::advanced::widget::{Tree, Widget};
+use iced::advanced::widget::{Tree, Widget, tree};
 use iced::advanced::{Clipboard, Shell};
 use iced::{Element, Event, Length, Rectangle, Size, Theme, mouse};
 
@@ -63,6 +64,50 @@ struct Waveform<'a, Message> {
 	on_seek: Box<dyn Fn(f32) -> Message + 'a>,
 }
 
+/// The one thing the strip remembers, and the reason it has a `Tree` state at all: whether
+/// the pointer is dragging along it. A *click* needs no memory, which is why this widget had
+/// none until scrubbing was added (PLAN §14).
+#[derive(Debug, Default)]
+struct State {
+	scrubbing: bool,
+}
+
+/// What a mouse event does to a strip, given whether the pointer is over it and whether a
+/// scrub is already under way.
+///
+/// Pure and separate from `update` for the same reason `deck::transition` is separate from
+/// the app: the rules of the gesture are three lines of `match` and every one of them is
+/// wrong in a way a window would have to be opened to notice. Tested at the bottom of this
+/// file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scrub {
+	/// Arm the drag, and seek to where the pointer went down.
+	Start,
+	/// Already armed: follow the pointer, inside the strip or not.
+	Follow,
+	/// Disarm. Not a seek — the playhead is already where the drag left it.
+	Stop,
+	Ignore,
+}
+
+/// The gesture, as a function of the event and the two bits of context around it.
+fn scrub(event: &Event, over: bool, scrubbing: bool) -> Scrub {
+	match event {
+		// A press *inside* the strip only. Elsewhere in the window it belongs to something
+		// else, and arming on it would make the next mouse move seek out of nowhere.
+		Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if over => Scrub::Start,
+		// A move is followed wherever it goes once armed — over the panel above, past either
+		// end of the strip, outside the window. `seek_fraction` clamps, so leaving the strip
+		// parks the playhead at the edge it left by, which is what makes a scrub forgiving of
+		// a hand that wanders.
+		Event::Mouse(mouse::Event::CursorMoved { .. }) if scrubbing => Scrub::Follow,
+		// A release disarms wherever it happens, `over` or not: a button let go outside the
+		// strip is still let go, and a strip left armed would scrub on the next stray move.
+		Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Scrub::Stop,
+		_ => Scrub::Ignore,
+	}
+}
+
 /// The strip, ready to drop into a panel.
 ///
 /// A function rather than a public struct, because there is nothing to configure: every
@@ -104,18 +149,29 @@ where
 		Size::new(Length::Fill, Length::Fixed(HEIGHT))
 	}
 
-	/// A left press inside the strip is a seek (PLAN §14).
+	fn tag(&self) -> tree::Tag {
+		tree::Tag::of::<State>()
+	}
+
+	fn state(&self) -> tree::State {
+		tree::State::new(State::default())
+	}
+
+	/// A left press inside the strip is a seek, and holding it is a scrub (PLAN §14).
 	///
 	/// Press, not release: a transport control should answer the instant the button goes
 	/// down, and waiting for the release would make a click that drifted a few pixels feel
-	/// like it went somewhere else.
+	/// like it went somewhere else. A scrub is then the same seek repeated, which is why
+	/// adding it needed no new message and no new arm in the app — the widget publishes the
+	/// fraction it always published, just more often.
 	///
-	/// No `Tree` state, so this stays a stateless widget. That is only possible because a
-	/// *click* needs no memory — a drag-scrub would need the button-held flag, and that is
-	/// the line this deliberately does not cross.
+	/// `ponytail:` one seek per pointer move, and `Engine::seek` blocks the GUI thread until
+	/// the audio thread has done it. Fine for a local file, where the seek is a format-level
+	/// jump rather than a decode; if a slow source ever makes a scrub stutter, the fix is to
+	/// coalesce the moves within a frame rather than to make the widget cleverer.
 	fn update(
 		&mut self,
-		_tree: &mut Tree,
+		tree: &mut Tree,
 		event: &Event,
 		layout: Layout<'_>,
 		cursor: mouse::Cursor,
@@ -124,20 +180,39 @@ where
 		shell: &mut Shell<'_, Message>,
 		_viewport: &Rectangle,
 	) {
-		if self.progress.is_none()
-			|| !matches!(
-				event,
-				Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-			) {
+		let bounds = layout.bounds();
+		let state = tree.state.downcast_mut::<State>();
+
+		// The strip's guard rather than the gesture's, so it is checked before the state
+		// machine and an empty player can never arm one: a strip with no length has nothing
+		// for a fraction to be a fraction of. Disarming rather than merely returning covers
+		// the track being unloaded mid-drag.
+		if self.progress.is_none() {
+			state.scrubbing = false;
 			return;
 		}
 
-		let bounds = layout.bounds();
-		let Some(cursor) = cursor.position_over(bounds) else {
+		match scrub(event, cursor.is_over(bounds), state.scrubbing) {
+			Scrub::Start => state.scrubbing = true,
+			Scrub::Follow => {}
+			Scrub::Stop => {
+				state.scrubbing = false;
+				return;
+			}
+			Scrub::Ignore => return,
+		}
+
+		// The event's own position for a move, because that is the one the move is *about*;
+		// the cursor for the press, which is over the strip by the time `Start` is returned.
+		let position = match event {
+			Event::Mouse(mouse::Event::CursorMoved { position }) => Some(*position),
+			_ => cursor.position(),
+		};
+		let Some(position) = position else {
 			return;
 		};
 
-		if let Some(fraction) = waveform::seek_fraction(bounds.width, cursor.x - bounds.x) {
+		if let Some(fraction) = waveform::seek_fraction(bounds.width, position.x - bounds.x) {
 			shell.publish((self.on_seek)(fraction));
 			// Nothing under this strip handles a left press today — the panel's `mouse_area`
 			// exists only while a drag is armed and only watches enter/exit. This is the
@@ -149,15 +224,21 @@ where
 
 	/// A pointer over a strip that can be seeked, and nothing over one that cannot — so an
 	/// empty player is visibly not a control, without needing a disabled look.
+	///
+	/// It stays a pointer for as long as a scrub is held, wherever the cursor has wandered
+	/// to: the gesture still belongs to this strip, and a cursor that changed shape halfway
+	/// through would say it had been dropped.
 	fn mouse_interaction(
 		&self,
-		_tree: &Tree,
+		tree: &Tree,
 		layout: Layout<'_>,
 		cursor: mouse::Cursor,
 		_viewport: &Rectangle,
 		_renderer: &Renderer,
 	) -> mouse::Interaction {
-		if self.progress.is_some() && cursor.is_over(layout.bounds()) {
+		let scrubbing = tree.state.downcast_ref::<State>().scrubbing;
+
+		if self.progress.is_some() && (scrubbing || cursor.is_over(layout.bounds())) {
 			mouse::Interaction::Pointer
 		} else {
 			mouse::Interaction::None
@@ -295,6 +376,74 @@ where
 				},
 				palette.danger.base.color,
 			);
+		}
+	}
+}
+
+/// The gesture's rules, which are the only thing in this file a test can reach: everything
+/// else here is a `fill_quad` (PLAN §14).
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn pressed() -> Event {
+		Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+	}
+
+	fn released() -> Event {
+		Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+	}
+
+	fn moved() -> Event {
+		Event::Mouse(mouse::Event::CursorMoved {
+			position: iced::Point::new(10.0, 10.0),
+		})
+	}
+
+	#[test]
+	fn a_press_arms_a_scrub_only_over_the_strip() {
+		// Arrange / Act / Assert: a press elsewhere in the window must leave the strip
+		// disarmed, or the next mouse move anywhere would seek a track nobody touched.
+		assert_eq!(scrub(&pressed(), true, false), Scrub::Start, "over");
+		assert_eq!(scrub(&pressed(), false, false), Scrub::Ignore, "elsewhere");
+	}
+
+	#[test]
+	fn a_move_seeks_only_while_the_button_is_held() {
+		// Arrange / Act / Assert: the whole difference between a scrub and a hover. Note
+		// the second case — armed and *outside* the strip still follows, which is what lets
+		// a drag run past either end.
+		assert_eq!(scrub(&moved(), true, true), Scrub::Follow, "held, over");
+		assert_eq!(scrub(&moved(), false, true), Scrub::Follow, "held, outside");
+		assert_eq!(
+			scrub(&moved(), true, false),
+			Scrub::Ignore,
+			"merely hovering"
+		);
+	}
+
+	#[test]
+	fn a_release_disarms_wherever_it_happens() {
+		// Arrange / Act / Assert: a scrub that ended over the mixer, the browser or off the
+		// window is still ended. A strip left armed would scrub on the next stray move.
+		for over in [true, false] {
+			assert_eq!(scrub(&released(), over, true), Scrub::Stop, "over: {over}");
+		}
+	}
+
+	#[test]
+	fn nothing_else_touches_the_playhead() {
+		// Arrange: the events that pass through this widget in quantity and must cost it
+		// nothing — the right button, and the wheel over a strip.
+		let others = [
+			Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)),
+			Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)),
+			Event::Mouse(mouse::Event::CursorLeft),
+		];
+
+		// Act / Assert: including while armed, since a right-click mid-scrub must not end it.
+		for event in others {
+			assert_eq!(scrub(&event, true, true), Scrub::Ignore, "{event:?}");
 		}
 	}
 }
