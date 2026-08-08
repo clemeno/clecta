@@ -351,11 +351,24 @@ So the players stopped being a pane. The layout is now a plain column:
 
 ```rust
 column![
-    container(decks).height(decks_shown(window_height, decks_height)),  // pixels, from state
-    divider(),                                                          // 6 px, hand-written
-    pane_grid(files | tree),                                            // still a ratio, rightly
+    container(decks).height(self.decks_height),  // a literal, straight from state
+    divider(),                                   // 6 px, hand-written
+    pane_grid(files | tree),                     // still a ratio, rightly
 ]
 ```
+
+**The window's height does not appear in it, and that is the fix.** The first rewrite still
+used it for one thing — deciding when to compact — and that was enough to keep wobbling,
+because the ceiling binds exactly when the panel is tall relative to the window, which is
+exactly when someone is dragging the edge. A stale number used on one frame in ten is still
+a wobble. So the layout stopped reading the window at all.
+
+What compacts a panel taller than its window is now iced itself. `Limits::height` clamps a
+`Fixed` with `amount.min(self.max.height)`, and that maximum is the room the layout actually
+has, measured during the layout that uses it — never a frame behind. Measured, not assumed:
+a probe widget printed the pane at 700 in a 1013-pixel window, 620 in a 660-pixel one and
+520 in a 560-pixel one, each exactly the room left, with `decks_height` still holding 700
+throughout. Pulling the window open gives it all back.
 
 A literal height read at the moment of layout cannot be stale, so the wobble is gone by
 construction rather than by tuning. What it costs is the divider, and the cost is the reason
@@ -369,20 +382,26 @@ message rebuilds every row of the files pane (§9); and the release that ends it
 ratio arithmetic and the four tests they replaced. The tree's splitter is untouched — a
 *width* as a share of the window is exactly what `pane_grid` is good at.
 
-`CHROME` survives the rewrite, but only for the ceiling: knowing when a window is too short
-still needs to know what the window spends on everything that is not the body. That is the
-one number left that iced cannot be asked for, and it is why the status bar keeps its pinned
-height.
+`CHROME` survives the rewrite, and the status bar keeps its pinned height, for one caller
+only: `dragged_height`, which stops a *drag* before it pushes the browser off the bottom of
+the window. That is the one place the window's height is still read and the one place it is
+safe to, because a divider drag is not a window resize — nothing is moving but the pointer,
+so `self.window` is current rather than a frame behind. Without it the divider could be
+dragged past the window's own edge and become ungrabbable, which is the one way a user could
+get stuck.
 
 Two details that are the whole behaviour:
 
 - **The wanted height is never overwritten when it is compacted.** Squashing the window
-  clamps what is *drawn*; `decks_height` still holds what the user chose, so pulling the
-  window open again restores the panel rather than keeping whatever the squashed window
-  happened to fit. This is why the clamp lives in `decks_shown` and not in the field.
-- **Below two minimums, the players give way and the browser does not.** A window too short
-  for both floors has to break one of them, and the browser is the pane that scrolls — a
-  squashed file list is still usable, a clipped transport is not.
+  clamps what is *drawn* — iced's clamp, on the frame that draws it — while `decks_height`
+  still holds what the user chose, so pulling the window open again restores the panel
+  rather than keeping whatever the squashed window happened to fit.
+- **In a window too short for both, the players win and the browser goes to nothing.** The
+  reverse of the first attempt, and deliberate: guaranteeing the browser a minimum is
+  exactly the calculation that needed the window's height every frame, and it bought a
+  wobble. The browser is the pane that scrolls and the one that comes straight back when
+  the window grows, so it is the one that can afford to lose. A drag cannot get you there —
+  only a window shrunk below the panel's own height can, and growing it undoes that.
 
 `ponytail:` if a pane ever needs to keep a *width* the same way, this generalizes; nothing
 here is written twice yet, so nothing is abstracted.
@@ -900,16 +919,15 @@ otherwise pure; anything needing a device or a real folder is manual.
   immediately**: it caught that `f32::clamp` passes a `NaN` through unchanged, so the
   first version's clamp was decoration and a mis-measured strip would have panicked
   `Duration::mul_f32` on the click (§14b).
-- **`app.rs`** — the one testable thing in the wiring, and it earned its `mod tests`: the
-  arithmetic that keeps the players at a height (§6). That the panel is drawn at the height
-  asked for at *every* window height from the shortest that fits to 2000 — `assert_eq!`, not
-  a tolerance, because the height now goes straight to the widget and nothing rounds it on
-  the way; that a too-short window compacts it without going under `MIN_PANE` or starving the
-  browser, and that pulling the window open again restores what the user chose, which is the
-  property the whole compaction exists for; that a window too short for *both* floors gives
-  up the players' rather than the browser's; and that an impossible window — zero, shorter
-  than its own chrome, or `NaN` — still yields a finite height no smaller than `MIN_PANE`
-  instead of putting a `NaN` into a layout.
+- **`app.rs`** — what a *divider drag* is allowed to store (§6), and nothing else, because
+  nothing else here is arithmetic any more: the players' height reaches the widget as a
+  literal and iced does the compacting. So the tests cover the one calculation left. That a
+  drag inside the bounds is stored untouched — `assert_eq!`, not a tolerance, or the panel
+  would creep a pixel every time it was grabbed; that a drag far below the window still
+  leaves the browser `MIN_PANE`, at every window height from 400 to 2000, which is what
+  keeps the divider on screen and grabbable; that a drag above the window's top reads as the
+  floor rather than as a panel of nothing; and that an impossible window — zero, shorter than
+  its own chrome, or `NaN` — stores a finite height instead of a `NaN`.
 - **`audio.rs`** — one test, and the only one this module can have: everything else here
   needs an output device. A *scan* does not, so the decode path is checked for real, from a
   file on disk to the array the widget draws. The fixture is generated rather than
@@ -1283,6 +1301,7 @@ the button and dragging would need the held flag, and that is the line §14 stil
 | Q14 | What a seek does to the transport | **Nothing.** Playing keeps playing from the new place, paused stays paused there. Not a `deck::Event` and never through `transition`, because a self-edge on all four states is "nothing happens" written four times — and no pause around `try_seek`, which would gap a playing track | §14b, §7 |
 | Q15 | How the players' section is sized | **A pixel height, persisted, compacted only when the window is too short.** Its rows are all fixed, so a ratio hands the extra space to the one pane that cannot use it. And since iced 0.14 cannot report a laid-out size, the chrome around the body is made a *constant* — status bar pinned to 24 px — rather than measured or guessed | §6, §11 |
 | Q16 | Which widget holds that height | **Not `pane_grid` — a plain column and a 6 px hand-written divider.** Converting pixels to `pane_grid`'s ratio was arithmetically exact and visibly wrong: iced redraws at the new window size a frame *before* the resize message reaches `update`, so the panel scaled and snapped back on every frame of a live drag. A literal height cannot be stale. Partially reverses Q5, which still stands for the tree | §6 |
+| Q17 | Who compacts a panel too tall for its window | **iced does.** Keeping the window's height for the compaction ceiling alone was still enough to wobble, because the ceiling binds exactly when the edge is being dragged. `Limits::height` clamps a `Fixed` to the room the layout actually has, measured on the frame that uses it, so the app hands over a literal and reads the window's height nowhere in `view`. The price is that a window shorter than the panel takes it out of the browser rather than the players | §6 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
@@ -1292,11 +1311,13 @@ chance to write, and running the app is what disproved it. Q8 is the one the pla
 thought to ask: §14 said "the whole file decoded to a peak array" as though the array's
 size were the easy part.
 
-**Q16 is the one a *later* decision got wrong**, which is a different failure from Q7 and
-worth separating: Q15 was not mistaken about what the app should do, only about what the
-widget could be made to do it with. Both were settled the same way, by looking at a running
-window — and that is now three of the sixteen (Q7, Q10, Q16) plus the two contrast bugs of
-§14a, every one of them found by an eye and none by the tests that were passing at the time.
+**Q16 and Q17 are the ones a *later* decision got wrong**, which is a different failure from
+Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
+the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
+one use of the window's height that was enough to keep the defect alive. Both were settled
+the same way, by looking at a running window. That is now four of the seventeen (Q7, Q10,
+Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
+and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
 
 ---
 

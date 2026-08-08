@@ -43,7 +43,7 @@ const SWEEP: Duration = Duration::from_millis(40);
 const SWEEP_STEPS: u32 = 30;
 
 /// Width of the files pane, as a fraction. The *height* of the top section is not a
-/// fraction at all — see `decks_shown` (PLAN §6).
+/// fraction at all — see `Clecta::view` (PLAN §6).
 const TREE_RATIO: f32 = 0.68;
 
 /// The smallest a pane may be dragged to, in pixels. One value for every pane on both
@@ -58,9 +58,9 @@ const PANE_SPACING: f32 = 6.0;
 ///
 /// `CHROME` is what the window spends on everything that is not the body: padding twice,
 /// the gap above the status bar, and the bar itself. The bar's height is *pinned* rather
-/// than measured from its text so this stays a constant, which is what lets `decks_shown`
-/// know when a window is too short without asking iced how big anything turned out — it
-/// has no way to answer (PLAN §6).
+/// than measured from its text so this stays a constant, which is what lets `dragged_height`
+/// stop a divider drag before it pushes the browser off the bottom. The *layout* needs none
+/// of it — iced compacts a too-tall panel itself (PLAN §6).
 const WINDOW_PADDING: f32 = 6.0;
 const STATUS_GAP: f32 = 4.0;
 const STATUS_HEIGHT: f32 = 24.0;
@@ -100,7 +100,7 @@ pub fn run() -> iced::Result {
 /// user-managed, only the split ratio and whether the tree is folded (PLAN §6).
 ///
 /// The players are *not* in here. They keep a height in pixels, and `pane_grid` can only
-/// place a splitter at a ratio — see `decks_shown`.
+/// place a splitter at a ratio — see `Clecta::view`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
 	Files,
@@ -459,7 +459,7 @@ impl Clecta {
 				// what makes the panel follow the cursor instead of jumping by the
 				// divider's height the moment it is grabbed.
 				self.decks_height =
-					decks_shown(self.window.1, y - WINDOW_PADDING - PANE_SPACING / 2.0);
+					dragged_height(self.window.1, y - WINDOW_PADDING - PANE_SPACING / 2.0);
 				self.dirty = true;
 			}
 
@@ -873,15 +873,22 @@ impl Clecta {
 		.min_size(MIN_PANE)
 		.on_resize(8, Message::Resized);
 
-		// A height in pixels, straight from state and read at the moment of layout — which is
-		// the whole reason the players are not a `pane_grid` pane. A ratio would have to be
-		// recomputed from the window's size, and a window resize is delivered to the app
-		// *after* the frame that used it, so the panel visibly scaled and snapped back on
-		// every frame of a live drag (PLAN §6).
+		// The whole rule, and there is deliberately nothing else to it: the players get the
+		// height they were given, the browser gets `Fill`, so a window resize moves the
+		// bottom of the file list and nothing else (PLAN §6).
+		//
+		// Note what is *not* here — the window's height. Every earlier version needed it,
+		// to turn pixels into `pane_grid`'s ratio or to work out when to compact, and every
+		// one of them wobbled: iced lays out at the new window size a frame before the app
+		// is told the window changed, so any height derived from `self.window` is a frame
+		// stale on exactly the frames a resize is being watched. A literal cannot be stale.
+		// Compacting a window too short for this height is left to iced, whose own
+		// `Limits::height` clamps a `Fixed` to what is actually available — measured at
+		// layout time, so it is never a frame behind.
 		let body = column![
 			container(self.decks_view())
 				.style(container::bordered_box)
-				.height(decks_shown(self.window.1, self.decks_height)),
+				.height(self.decks_height),
 			self.divider(),
 			panes,
 		];
@@ -983,28 +990,23 @@ impl Clecta {
 	}
 }
 
-/// The tallest the players may be drawn in a window this tall, so the browser is always
-/// left at least `MIN_PANE` under the divider.
+/// Where a drag of the divider is allowed to leave the players, in a window this tall.
 ///
-/// The floor is applied here too: a window with no room for both minimums has to give one
-/// of them up, and it is the players', because the browser is the pane that scrolls.
-fn decks_ceiling(window_height: f32) -> f32 {
-	(window_height - CHROME - PANE_SPACING - MIN_PANE).max(MIN_PANE)
-}
-
-/// How tall the players are actually drawn: what was asked for, compacted only when the
-/// window is too short to grant it (PLAN §6).
+/// The **only** place the window's height is still used, and the one place it is safe to:
+/// a divider drag is not a window resize, so `self.window` is current rather than a frame
+/// behind. What it buys is that the divider cannot be dragged off the bottom of its own
+/// window — the browser keeps `MIN_PANE`, so there is always something left to grab.
 ///
-/// The wanted height is deliberately not written back when it is compacted — the caller
-/// keeps `decks_height` untouched — which is what lets a window squashed and then pulled
-/// open again come back to the panel the user chose rather than to whatever the squashed
-/// one happened to fit.
-fn decks_shown(window_height: f32, wanted: f32) -> f32 {
+/// `view` deliberately does *not* apply this. Re-clamping on every frame is what would put
+/// the stale window height back into the layout, and it is not needed: iced clamps a
+/// `Fixed` height to the room it actually has (`Limits::height`), so a window too short
+/// compacts the panel on its own and pulling it open again restores what the user chose.
+fn dragged_height(window_height: f32, wanted: f32) -> f32 {
 	// `max` and `min` rather than comparisons: they also flatten a `NaN`, since `f32::max`
 	// returns the other operand when one is not a number. A window height that is not a
-	// number therefore reads as the smallest usable one instead of propagating into a
-	// layout, and no separate guard is needed.
-	wanted.max(MIN_PANE).min(decks_ceiling(window_height))
+	// number therefore reads as the smallest usable one instead of being stored.
+	let ceiling = (window_height - CHROME - PANE_SPACING - MIN_PANE).max(MIN_PANE);
+	wanted.max(MIN_PANE).min(ceiling)
 }
 
 /// The pointer, for as long as the divider is held (PLAN §6).
@@ -1106,70 +1108,62 @@ fn scan_peaks(id: DeckId, path: PathBuf) -> Task<Message> {
 	})
 }
 
-/// The only testable thing in this module: the layout arithmetic above is pure, and it is
-/// what a window resize is judged by (PLAN §6). Everything else here needs a window.
+/// The only testable thing in this module: what a divider drag is allowed to store
+/// (PLAN §6). The *layout* is no longer arithmetic at all — the height goes to the widget
+/// as a literal — so there is nothing left there for a test to have an opinion about, which
+/// is the point of the rewrite rather than a gap in it.
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	/// The shortest window that can hold a panel this tall and still leave the browser its
-	/// minimum. Below it the answer is deliberately not the wanted height.
-	fn shortest_for(wanted: f32) -> f32 {
-		wanted + PANE_SPACING + MIN_PANE + CHROME
-	}
-
 	#[test]
-	fn the_players_keep_their_height_however_tall_the_window_gets() {
-		// Arrange: the panel the user chose, and every window height it fits in.
-		let wanted = 300.0;
+	fn a_drag_stores_the_height_the_pointer_asked_for() {
+		// Arrange: a window with room to spare, so nothing should be clamped.
+		let window = 1000.0;
 
-		// Act / Assert: exactly, not approximately. The height goes straight to the widget
-		// now, so there is no rounding between what is asked for and what is laid out.
-		for height in (shortest_for(wanted) as u32..=2000).step_by(37) {
-			let shown = decks_shown(height as f32, wanted);
-			assert_eq!(shown, wanted, "window {height} drew the panel at {shown}");
+		// Act / Assert: exactly, not approximately. A drag that is inside the bounds must
+		// survive untouched, or the panel would creep by a pixel every time it was grabbed.
+		for wanted in [MIN_PANE, 200.0, 300.0, 500.0, 780.0] {
+			let stored = dragged_height(window, wanted);
+			assert_eq!(stored, wanted, "a drag to {wanted} was stored as {stored}");
 		}
 	}
 
 	#[test]
-	fn a_window_too_short_compacts_the_panel_and_then_gives_it_back() {
-		// Arrange: a tall panel and a window with nowhere near the room for it.
-		let wanted = 600.0;
-		let short = MIN_PANE * 2.0 + PANE_SPACING + CHROME + 40.0;
+	fn a_drag_can_never_push_the_browser_off_the_bottom() {
+		// Arrange: every window worth having, dragged well past the bottom of each.
+		for window in (400..=2000).step_by(37) {
+			let window = window as f32;
 
-		// Act
-		let compacted = decks_shown(short, wanted);
+			// Act: the pointer is far below the window's own bottom edge.
+			let stored = dragged_height(window, window * 2.0);
 
-		// Assert: squashed, but never past the minimum, and the browser still has its own.
-		assert!(compacted < wanted, "still {compacted} in a {short} window");
-		assert!(compacted >= MIN_PANE, "compacted to {compacted}");
-		let browser = short - CHROME - compacted - PANE_SPACING;
-		assert!(browser >= MIN_PANE, "browser left with {browser}");
-
-		// Assert: the squash did not consume what was asked for — the same `wanted` in a
-		// window that has grown again comes back whole. This is the property the compaction
-		// exists for, and it holds because the clamp is here rather than in the field.
-		let restored = decks_shown(shortest_for(wanted), wanted);
-		assert_eq!(restored, wanted, "restored to {restored}");
+			// Assert: the browser keeps its minimum, so the divider stays on screen and
+			// stays grabbable — the whole reason this clamp exists.
+			let browser = window - CHROME - stored - PANE_SPACING;
+			assert!(
+				browser >= MIN_PANE,
+				"window {window}: a drag left the browser {browser}"
+			);
+		}
 	}
 
 	#[test]
-	fn a_window_too_short_for_either_minimum_still_leaves_the_browser_room() {
-		// Arrange / Act / Assert: below two minimums something has to give, and it is the
-		// players — the browser is the pane that scrolls, so a squashed one is still usable.
-		let tiny = CHROME + MIN_PANE;
-		assert_eq!(decks_shown(tiny, 600.0), MIN_PANE);
+	fn a_drag_above_the_top_still_leaves_a_usable_panel() {
+		// Arrange / Act / Assert: the pointer above the window's top edge is a negative
+		// height, which must read as the floor rather than as a panel of nothing.
+		assert_eq!(dragged_height(1000.0, -50.0), MIN_PANE);
 	}
 
 	#[test]
 	fn an_impossible_window_still_produces_a_usable_height() {
-		// Arrange / Act / Assert: a window shorter than its own chrome would give a negative
-		// ceiling, and a `NaN` one would put a `NaN` straight into a layout.
-		for height in [0.0, 1.0, CHROME, CHROME + 1.0, f32::NAN] {
-			let shown = decks_shown(height, 300.0);
+		// Arrange / Act / Assert: a window shorter than its own chrome gives a negative
+		// ceiling, and a `NaN` one would otherwise store a `NaN` as the panel's height.
+		for window in [0.0, 1.0, CHROME, CHROME + 1.0, f32::NAN] {
+			let stored = dragged_height(window, 300.0);
 			assert!(
-				shown.is_finite() && shown >= MIN_PANE,
-				"window {height} gave a height of {shown}"
+				stored.is_finite() && stored >= MIN_PANE,
+				"window {window} stored a height of {stored}"
 			);
 		}
 	}

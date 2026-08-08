@@ -58,12 +58,12 @@ cargo build --release --target x86_64-apple-darwin
   idle, or use **→ Player 1 / → Player 2**. **◧ hide tree** in the status bar folds the
   tree away and brings it back at the width it had (PLAN §6, §9).
 - **The players keep their height.** Drag the divider under them and that panel stays that
-  tall whatever the window does — a taller window makes the *file list* taller, since the
-  players' rows are all fixed-size and would only gain empty space. Squash the window and
-  the panel compacts; pull it open again and it comes back to the height you chose, because
-  the height you asked for is remembered separately from the height that fits. It holds
-  *still* during a live resize, which took two goes: the first version kept the panel at the
-  right height and visibly wobbled on the way, and PLAN §6 tells that story (PLAN §6).
+  tall whatever the window does — resizing the window moves the bottom of the *file list* and
+  nothing else, since the players' rows are all fixed-size and would only gain empty space.
+  Squash the window past the panel's own height and it compacts; pull it open again and it
+  comes back to the height you chose, because the height you asked for is remembered
+  separately from the height that fits. It holds *still* while you drag, which took three
+  goes — PLAN §6 tells that story, and it is the best one in the file (PLAN §6).
 - **Drag and drop, both ways in.** Drag a row from the files pane onto either player and
   it loads *there* — the pointer is the app's the whole way, so the drag is truly aimed.
   Drag a file in from Finder / Explorer and it lands on **the idle player**, because the
@@ -136,7 +136,7 @@ cargo build --release
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
-| `app.rs` | the players' section keeping its pixel height at every window height, compacting when the window is too short without forgetting what was asked for, giving up its own floor before the browser's when neither fits, and an impossible window still yielding a usable height |
+| `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
@@ -165,12 +165,14 @@ of the app's defects so far were found here and none of them by a passing test.
   and a paused one stays put, and the cursor turns into a hand over a loaded strip and not
   over an empty one. Confirmed, first try — the arithmetic had already been tested and the
   only question was the wiring (PLAN §14b).
-- **Dragging the divider, and then the window edge.** This is the one that failed. The
-  height itself had been measured twice with a probe widget and was exact both times, and
-  the panel still *wobbled* as the window's bottom edge moved: iced lays out at the new
-  window size a frame before the app hears about the resize, so a height derived from a
-  ratio is always one frame stale. Fixed by making the height a literal instead, and the
-  drag now holds still, compacts on a short window, and comes back (PLAN §6).
+- **Dragging the divider, and then the window edge.** This is the one that failed, twice.
+  The height had been measured with a probe widget and was exact every time, and the panel
+  still *wobbled* as the window's bottom edge moved: iced lays out at the new window size a
+  frame before the app hears about the resize, so any height worked out from the window is
+  one frame stale. The first fix removed most of those and left one — the ceiling that
+  decides when to compact — which binds precisely when the edge is being dragged, so the
+  wobble survived it. The height is now a literal that never consults the window at all, and
+  iced does the compacting (PLAN §6).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.
