@@ -205,6 +205,30 @@ impl Playlist {
 
 		true
 	}
+
+	/// Move a row to sit **above row `to`**, which is how a drag reads: the caret sits
+	/// *between* rows, and `to` names the row it is above — `len` meaning past the last one.
+	///
+	/// The whole reason this is a function and not two lines at the call site is the
+	/// off-by-one in the middle: once the row is lifted out, everything below it has already
+	/// shifted up, so a caret that was *below* the row lands one place earlier than its index
+	/// said. Dropping a row just above or just below itself is where it already is, and
+	/// returns `false` rather than performing a move that changes nothing.
+	///
+	/// The moved row ends up selected, which is not an extra rule — the press that started
+	/// the drag selected it, and it should still be the selected one when it lands.
+	pub fn relocate(&mut self, from: usize, to: usize) -> bool {
+		if from >= self.items.len() || to > self.items.len() || to == from || to == from + 1 {
+			return false;
+		}
+
+		let item = self.items.remove(from);
+		let to = if to > from { to - 1 } else { to };
+		self.items.insert(to, item);
+		self.selected = Some(to);
+
+		true
+	}
 }
 
 /// Where the track after this one comes from, when a player's track ends (PLAN §7a).
@@ -404,6 +428,83 @@ mod tests {
 		let mut list = list(&["a.mp3"]);
 		list.select(5);
 		assert_eq!(list.selected(), None);
+	}
+
+	#[test]
+	fn a_drag_downwards_lands_where_the_caret_was() {
+		// Arrange: the caret between `c` and `d` is index 3, and the row being dragged is
+		// above it — so lifting the row out shifts the caret up with everything else. This is
+		// the case that is wrong by one in every implementation that forgets it.
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
+
+		// Act: `a` to just above `d`.
+		assert!(list.relocate(0, 3));
+
+		// Assert: `a` sits between `c` and `d`, not after `d`.
+		assert_eq!(names(&list), ["b.mp3", "c.mp3", "a.mp3", "d.mp3"]);
+		assert_eq!(
+			list.selected(),
+			Some(2),
+			"the dragged row stays the selected one"
+		);
+	}
+
+	#[test]
+	fn a_drag_upwards_needs_no_adjustment() {
+		// Arrange / Act: the mirror of the case above — the caret is above the row, so
+		// nothing has shifted under it.
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
+		assert!(list.relocate(3, 1));
+
+		// Assert
+		assert_eq!(names(&list), ["a.mp3", "d.mp3", "b.mp3", "c.mp3"]);
+		assert_eq!(list.selected(), Some(1));
+	}
+
+	#[test]
+	fn a_drag_to_the_very_end_puts_the_row_last() {
+		// Arrange / Act: `len` is the caret past the last row, which is the one index that
+		// does not name a row at all.
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
+		assert!(list.relocate(0, 3));
+
+		// Assert
+		assert_eq!(names(&list), ["b.mp3", "c.mp3", "a.mp3"]);
+		assert_eq!(list.selected(), Some(2));
+	}
+
+	#[test]
+	fn a_drag_that_lands_where_it_started_changes_nothing() {
+		// Arrange: the two carets that touch a row — its own top edge, and its bottom one.
+		// Both mean "leave it alone", and both are easy to reach with a twitchy hand.
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
+
+		// Act / Assert
+		assert!(!list.relocate(1, 1), "the caret above itself");
+		assert!(!list.relocate(1, 2), "the caret below itself");
+		assert!(!list.relocate(9, 0), "a row that is not there");
+		assert!(!list.relocate(0, 9), "a caret past the end of the list");
+		assert_eq!(names(&list), ["a.mp3", "b.mp3", "c.mp3"], "nothing moved");
+	}
+
+	#[test]
+	fn every_drag_within_a_list_keeps_every_track() {
+		// Arrange: exhaustive, because a reorder that loses or duplicates a row is the one
+		// failure a queue cannot survive — and there are only 25 cases.
+		let original = ["a.mp3", "b.mp3", "c.mp3", "d.mp3"];
+
+		for from in 0..original.len() {
+			for to in 0..=original.len() {
+				// Act
+				let mut list = list(&original);
+				list.relocate(from, to);
+
+				// Assert: same set, same length, whatever the move did.
+				let mut got = names(&list);
+				got.sort_unstable();
+				assert_eq!(got, original, "relocate({from}, {to}) changed the contents");
+			}
+		}
 	}
 
 	#[test]

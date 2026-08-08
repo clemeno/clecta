@@ -569,6 +569,48 @@ Every button is **dead rather than absent** when it cannot act, and dead for a s
 reason each time: nothing selected, already at the top, already at the bottom, no neighbour in
 that direction, nothing addable selected in the browser.
 
+### Dragging
+
+A drag can now start in the files pane **or in any list**, and land on a player **or between
+two rows of any list**. Four gestures, one mechanism, and the mechanism is the one §10 already
+had — generalised in two places rather than duplicated.
+
+**What is carried** is `Drag { item, from }`, and `from` is the whole difference between a
+copy and a move: `None` means the files pane, so the folder keeps its file; `Some((list,
+index))` means a row, which leaves that list when it lands. Dropping a queued row onto a
+player therefore takes it out of the queue — it is jumping the queue, which is the same thing
+the queue would have done for it later.
+
+**Where it would land** is `DropTarget`: a player, or a list *and a row index*. The index names
+the caret **above** that row, `len` meaning past the last one — a caret sits between rows, not
+on them, which is what makes "drop at the end" expressible at all.
+
+Three things had to be got right, and each is a rule rather than a detail:
+
+- **Entering and leaving are different shapes.** A list has as many targets as it has rows,
+  but leaving it is one event, so `DragOut` carries a `Zone` — a player or a whole list — and
+  clears the hover *only if the hover is still in that zone*. Nothing orders an enter against
+  the leave it replaces, and a leave that cleared unconditionally would wipe a target the
+  pointer is genuinely over. The old code already had this guard for two players; it now has
+  to hold across three lists and dozens of rows, which is why the leave got its own type.
+- **The caret is reserved, not inserted.** Two pixels between every pair of rows, always
+  present and merely *coloured* when it is the target. A caret that appeared would move the
+  row under the pointer — changing the target as a side effect of showing it, which is a
+  feedback loop and not a hint.
+- **The end of a list is a real widget.** Empty space below the rows inside a `scrollable` is
+  not a widget and cannot be entered, so appending had nowhere to aim. There is a twelve-pixel
+  tail strip after the last caret whose whole job is to mean "append" — and it is also the
+  only target an *empty* list has.
+
+Exactly one indicator is ever lit: a drag headed for a list lights no player ring, because two
+indicators at once would each be half a lie.
+
+The one piece of arithmetic is `relocate(from, to)`, for a row dragged **within its own list**.
+Once the row is lifted out, everything below it has shifted up, so a caret that was below the
+row lands one place earlier than its index said. It is a function rather than two lines at the
+call site precisely so that off-by-one has somewhere to be tested — including exhaustively,
+because a reorder that loses or duplicates a row is the one failure a queue cannot survive.
+
 ### Layout, and what a divider drag now grows
 
 The three lists are a second row *inside* the fixed-height players panel (§6), each under its
@@ -992,6 +1034,23 @@ Everything else about the drop is shared, and is decided:
   what the testability actually rests on; the folder case is tested against
   `CARGO_MANIFEST_DIR`, a directory that is certain to exist, so no fixture is created.
 
+### What the queues did to this section
+
+§7a added three lists, and with them three more places a drag can start and a great many more
+places it can land. The mechanism above did not change shape: `drag` still arms on a press and
+disarms on the release `gestures` already takes, and the release still asks one question about
+where the pointer is. Two things grew:
+
+- **`drag` carries a `Drag`, not a `PathBuf`** — the item plus where it came from, which is
+  what tells a drop whether to copy (from the files pane) or move (from a list).
+- **`hover` is a `DropTarget`, not a `DeckId`**, and the leave message carries a `Zone`
+  instead. The old "only clear if it is still mine" guard was already the right idea for two
+  player panels; it is *load-bearing* now that the panels number three lists of rows.
+
+An **OS** drop is unchanged and still lands on the idle player. It carries no position, so it
+cannot aim at a list any more than it could aim at a player — the same upstream limitation,
+now with more targets it cannot reach.
+
 ---
 
 ## 11. Portability — a hard requirement (`paths.rs`)
@@ -1158,6 +1217,14 @@ otherwise pure; anything needing a device or a real folder is manual.
   player's own cue over the shared list. The remove test paid for itself on the first run: a
   `?` in a `match` arm was returning from `remove` itself, so the row was deleted, the
   function said nothing had been, and the selection pointed at a track that was gone.
+
+  `relocate` — a row dragged within its own list — gets four cases and then an exhaustive
+  one. The four are the off-by-one in both directions, the drop past the last row, and the two
+  carets that touch the dragged row itself (its own top and bottom edge, both meaning "leave
+  it alone", and both easy to reach with a twitchy hand). The exhaustive one runs every
+  `from` × `to` on a four-row list and asserts the *contents* are unchanged as a set: a
+  reorder that loses or duplicates a track is the one failure a queue cannot survive, and
+  twenty-five cases is cheaper to run than to reason about.
 - **`ui/browser.rs`** — `visible_rows(scroll, total)`, the virtualization's whole arithmetic
   (§9). A range wrong by one row leaves a blank strip where a row should be; wrong by a lot
   shows an empty pane over a full folder. So: a folder shorter than the cap is built whole,

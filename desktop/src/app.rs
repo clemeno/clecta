@@ -125,6 +125,50 @@ pub enum Section {
 	Tree,
 }
 
+/// Where a release would put what is being dragged (PLAN §10, §7a).
+///
+/// One type for both kinds of destination, so `hover` is one field and the rules about what
+/// beats what live in one `match` rather than in two flags that can both be set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropTarget {
+	/// Load it into this player, now.
+	Player(DeckId),
+	/// Put it in this list, **above** this row. `index == len` is past the last row, which is
+	/// the one index that names no row — the caret sits between rows, not on them.
+	Row(ListId, usize),
+}
+
+/// The panel a pointer can leave, which is coarser than what it can land on: a list has as
+/// many targets as it has rows, but leaving it is one event.
+///
+/// Leaving is separate from entering because the two arrive in an order nothing guarantees.
+/// A leave that only clears *its own* zone cannot wipe an enter that has already landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zone {
+	Player(DeckId),
+	List(ListId),
+}
+
+/// What an in-app drag is carrying, and where it came from.
+///
+/// `from` is the whole difference between a copy and a move: a drag out of the files pane
+/// leaves the file where it is, and a drag out of a list takes the row with it.
+impl DropTarget {
+	/// The panel this target sits in, which is what a pointer leaves.
+	fn zone(self) -> Zone {
+		match self {
+			DropTarget::Player(id) => Zone::Player(id),
+			DropTarget::Row(list, _) => Zone::List(list),
+		}
+	}
+}
+
+#[derive(Debug, Clone)]
+pub struct Drag {
+	item: playlist::Item,
+	from: Option<(ListId, usize)>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
 	/// The playhead poll.
@@ -208,8 +252,11 @@ pub enum Message {
 	FilesHovered(bool),
 	/// One file of an OS drop. A multi-file drop arrives as one of these per file.
 	FileDropped(PathBuf),
-	/// During an in-app drag, the pointer entered (`true`) or left (`false`) a player.
-	DragOver(DeckId, bool),
+	/// During an in-app drag, the pointer entered somewhere a release could land.
+	DragOver(DropTarget),
+	/// …and left a panel it could have landed in. Coarser than `DragOver` on purpose — see
+	/// `Zone`.
+	DragOut(Zone),
 	/// The left button came up, wherever it is. The end of any in-app drag.
 	DragReleased,
 }
@@ -239,12 +286,14 @@ pub struct Clecta {
 	tree_ratio: f32,
 	/// The window's current size, tracked so it can be restored next run (PLAN §11).
 	window: (f32, f32),
-	/// The file an in-app drag is carrying. Armed by a press on a media row, disarmed by
-	/// the release — so a plain click is a drag that landed on nothing (PLAN §10).
-	drag: Option<PathBuf>,
-	/// The player the pointer is over. Only ever set while a drag is in flight, because
+	/// What an in-app drag is carrying. Armed by a press on a media row — in the files pane
+	/// or in a queue — and disarmed by the release, so a plain click is a drag that landed on
+	/// nothing (PLAN §10, §7a).
+	drag: Option<Drag>,
+	/// Where the pointer is, of the places a release could land. Only ever set while a drag
+	/// is in flight, because
 	/// that is the only time the panels are drop targets at all.
-	hover: Option<DeckId>,
+	hover: Option<DropTarget>,
 	/// Whether files from outside are hovering the window right now.
 	os_hover: bool,
 	/// The one line of feedback the app gives: what loaded, what would not decode, what
@@ -470,7 +519,11 @@ impl Clecta {
 				// The press both selects the row and arms a drag with it. A release that
 				// is not over a player disarms it and nothing else happens — which is
 				// exactly what a plain click is (PLAN §10).
-				self.drag = browser::kind_of(&path).is_media().then(|| path.clone());
+				self.drag = browser::kind_of(&path).is_media().then(|| Drag {
+					item: playlist::Item::new(path.clone()),
+					// From the pane, so a drop *copies*: the file stays in the folder.
+					from: None,
+				});
 				self.browser.selected = Some(path);
 			}
 
@@ -497,7 +550,17 @@ impl Clecta {
 
 			Message::FolderTouched => self.stale = true,
 
-			Message::QueueSelected(id, index) => self.queues[id.index()].select(index),
+			Message::QueueSelected(id, index) => {
+				// The press both selects the row and arms a drag with it, exactly as a press
+				// in the files pane does (PLAN §10) — and for the same reason: there is no
+				// separate gesture to start a drag with, so the press has to do both jobs.
+				self.drag = self.queues[id.index()].items().get(index).map(|item| Drag {
+					item: item.clone(),
+					// From a list, so a drop *moves*: the row leaves here when it lands.
+					from: Some((id, index)),
+				});
+				self.queues[id.index()].select(index);
+			}
 
 			// Every arm below edits a queue, and every queue is persisted, so each ends in
 			// `queued` rather than repeating the `dirty` flag four times.
@@ -661,12 +724,13 @@ impl Clecta {
 				return self.accept_drop(target, path, first);
 			}
 
-			Message::DragOver(id, inside) => {
-				// Compared rather than merely cleared: both panels see the same cursor
-				// move, and the one being left is not always the one updated first.
-				if inside {
-					self.hover = Some(id);
-				} else if self.hover == Some(id) {
+			Message::DragOver(target) => self.hover = Some(target),
+
+			Message::DragOut(zone) => {
+				// Compared rather than merely cleared: every panel sees the same cursor move,
+				// and the one being left is not always the one updated first. A leave that
+				// only clears *its own* zone cannot wipe an enter that has already landed.
+				if self.hover.is_some_and(|target| target.zone() == zone) {
 					self.hover = None;
 				}
 			}
@@ -678,10 +742,28 @@ impl Clecta {
 				let target = self.hover.take();
 				// Disarmed on every release, whatever it was over, so nothing is left
 				// armed behind a drag the user thought better of.
-				if let Some(path) = self.drag.take()
-					&& let Some(id) = target
-				{
-					return self.accept_drop(id, path, true);
+				let Some(drag) = self.drag.take() else {
+					return Task::none();
+				};
+
+				match target {
+					// Onto a player: it plays now, jumping whatever queue it came from — so a
+					// row dragged out of a list leaves the list, exactly as it would have if
+					// the list had handed it over itself (PLAN §7a).
+					Some(DropTarget::Player(id)) => {
+						if let Some((list, index)) = drag.from {
+							self.queues[list.index()].remove(index);
+							self.queued();
+						}
+						return self.accept_drop(id, drag.item.path, true);
+					}
+					Some(DropTarget::Row(list, index)) => {
+						self.drop_into(list, index, drag);
+						self.queued();
+					}
+					// A drag that landed on nothing is a plain click, and a click has already
+					// done its work: the press selected the row.
+					None => {}
 				}
 			}
 
@@ -793,10 +875,32 @@ impl Clecta {
 		self.load(id, item.path)
 	}
 
-	/// A queue changed, so the settings file is out of date. One place, so the four editing
-	/// arms and `advance` cannot each remember it differently.
+	/// A queue changed, so the settings file is out of date. One place, so the editing arms,
+	/// `advance` and a drop cannot each remember it differently.
 	fn queued(&mut self) {
 		self.dirty = true;
+	}
+
+	/// Put what a drag was carrying into a list, above row `index` (PLAN §7a).
+	///
+	/// Three cases, and the first is the one worth separating: a row dragged **within its own
+	/// list** is a reorder, not a remove followed by an insert. Doing it as two steps would
+	/// need the caret index adjusting for the hole the row left behind, which is what
+	/// `relocate` exists to get right — so it is called rather than reimplemented here.
+	fn drop_into(&mut self, list: ListId, index: usize, drag: Drag) {
+		match drag.from {
+			Some((source, from)) if source == list => {
+				self.queues[list.index()].relocate(from, index);
+			}
+			// Across two lists: taken out of one and put into the other, in that order. The
+			// index is the caret in the *destination*, which the removal cannot have moved.
+			Some((source, from)) => {
+				self.queues[source.index()].remove(from);
+				self.queues[list.index()].insert(index, drag.item);
+			}
+			// From the files pane: a copy, so the folder keeps its file.
+			None => self.queues[list.index()].insert(index, drag.item),
+		}
 	}
 
 	/// Apply a transport event to both the model and the audio thread, in that order of
@@ -944,10 +1048,26 @@ impl Clecta {
 			// before the release rather than discovered after it (PLAN §10).
 			Some(deck::idle_target(&self.decks[0], &self.decks[1]))
 		} else if self.drag.is_some() {
-			// An in-app drag is truly aimed: the pointer is ours the whole way.
-			self.hover
+			// An in-app drag is truly aimed: the pointer is ours the whole way. A drag headed
+			// for a *list* lights no player — the caret in that list is showing where it goes,
+			// and two indicators at once would each be half a lie.
+			match self.hover {
+				Some(DropTarget::Player(id)) => Some(id),
+				_ => None,
+			}
 		} else {
 			None
+		}
+	}
+
+	/// Where a release would put the dragged row in this list, if that is where it is headed.
+	///
+	/// `None` at rest and for the two lists the pointer is not over, so exactly one caret is
+	/// ever drawn — the same "one indicator, and it tells the truth" rule as the drop ring.
+	fn insertion(&self, list: ListId) -> Option<usize> {
+		match self.hover {
+			Some(DropTarget::Row(id, index)) if id == list && self.drag.is_some() => Some(index),
+			_ => None,
 		}
 	}
 
@@ -1116,7 +1236,15 @@ impl Clecta {
 			.selection()
 			.is_some_and(|entry| entry.kind.is_media());
 
-		let queue = |id: ListId| ui::playlist::view(id, &self.queues[id.index()], addable);
+		let queue = |id: ListId| {
+			ui::playlist::view(
+				id,
+				&self.queues[id.index()],
+				addable,
+				self.drag.is_some(),
+				self.insertion(id),
+			)
+		};
 
 		row![
 			column![
@@ -1161,8 +1289,8 @@ impl Clecta {
 		}
 
 		mouse_area(panel)
-			.on_enter(Message::DragOver(id, true))
-			.on_exit(Message::DragOver(id, false))
+			.on_enter(Message::DragOver(DropTarget::Player(id)))
+			.on_exit(Message::DragOut(Zone::Player(id)))
 			.into()
 	}
 

@@ -56,6 +56,12 @@ cargo build --release --target x86_64-apple-darwin
   not neighbours, so a track crosses through the shared list rather than jumping. All three
   survive a restart, and a queued file that has been deleted or renamed since is dropped
   rather than left to fail at the moment it is due (PLAN §7a).
+- **Drag anything anywhere.** Drag a file from the browser into a list, drag a row up or down
+  inside its list, drag it across to another list, or drag it straight onto a player to play
+  it now — jumping the queue, and leaving the list as it goes. A **green caret** shows the
+  exact gap the row will land in, and the strip below the last row means "append", which is
+  also the only place to aim at in an empty list. Exactly one indicator is ever lit: a drag
+  headed for a list lights no player ring (PLAN §7a, §10).
 - **The mixer strip.** A volume fader per player and a crossfader, with a
   **Power / Linear** curve selector. The number beside each fader is the gain actually
   sent to that player, so the cubic taper and the crossfade are visible as they move.
@@ -118,10 +124,6 @@ cargo build --release --target x86_64-apple-darwin
   in clecta's own code. The upgrade path is upstream, and PLAN §10 spells it out.
 - **No video picture** — the audio track of an `.mp4` / `.mkv` plays, and that is v1
   (PLAN §14). No cue points, no tempo.
-- **No dragging into or within a queue.** The lists are built and reordered with their
-  buttons; a drag still only targets a player. Reordering by drag, dragging between lists,
-  dragging a file from the browser straight into a list, and dragging a queued row onto a
-  player are all designed and next up (PLAN §7a).
 
 ## Checks
 
@@ -164,13 +166,13 @@ cargo build --release
 | `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height; plus which key means refresh — F5 and ⌘R yes, a bare `r` no |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
 | `ui/waveform.rs` | the scrub's three rules: a press arms only over the strip, a move seeks only while the button is held and follows it outside the strip too, a release disarms wherever it happens |
-| `playlist.rs` | what every queue edit does to the selection — an insert above it carries it down, a remove above it pulls it up, removing the selected row lands on what slid into its place, a shift takes the highlight with the track — plus the arrows reaching a neighbour and only a neighbour, and the next track coming from a player's own cue before the shared list |
+| `playlist.rs` | what every queue edit does to the selection — an insert above it carries it down, a remove above it pulls it up, removing the selected row lands on what slid into its place, a shift takes the highlight with the track — plus the arrows reaching a neighbour and only a neighbour, the next track coming from a player's own cue before the shared list, and a drag within a list landing where the caret was: both directions, past the last row, the two carets that touch the row itself, and every from × to keeping the contents unchanged |
 | `ui/browser.rs` | which rows the pane builds: a short folder built whole, the window moving by whole rows as it scrolls, the end of a long list still filling the pane, and a negative or `NaN` scroll offset still naming real rows |
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Ten things the suite cannot reach, all of which need a window a person can look at. **Five
-of the ten pass on macOS, by hand**; the last five are new and unchecked. The last two
+Eleven things the suite cannot reach, all of which need a window a person can look at.
+**Five of the eleven pass on macOS, by hand**; the last six are new and unchecked. The last two
 rounds are why the list exists: three of the app's defects so far were found here and none
 of them by a passing test.
 
@@ -223,6 +225,12 @@ of them by a passing test.
   running app. What a script cannot do is click a folder in the tree, and that is the case
   worth an eye: the watcher is keyed on the path, so choosing another folder has to tear the
   old one down and start one on the new place, with no watcher left behind (PLAN §9).
+- **The four queue drags.** *Not checked yet.* The arithmetic of a reorder is tested
+  exhaustively, but the pointer bookkeeping around it is not, and it is the half that has
+  always broken here: that the caret lights in the gap the row will actually land in, that
+  moving between two rows never leaves both or neither lit, that leaving a list clears its
+  caret without clearing the ring of the player the pointer has moved onto, and that a drag
+  released over nothing leaves everything exactly as it was (PLAN §7a, §10).
 - **A queue handing over at the end of a track.** *Not checked yet*, and the one worth
   waiting for: every edit to a list is tested, but the handover itself is not — that a track
   running out really does load the next one, that it lands *stopped* rather than playing, that
