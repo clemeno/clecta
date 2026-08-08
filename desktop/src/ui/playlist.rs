@@ -5,7 +5,7 @@
 //! in which `ListId` they carry — so this is one function and not three, and a rule added
 //! here is added to all of them.
 
-use iced::widget::{Space, button, column, container, mouse_area, row, scrollable, text};
+use iced::widget::{Space, button, checkbox, column, container, mouse_area, row, scrollable, text};
 use iced::{Center, Element, Fill, Theme};
 
 use crate::app::{DropTarget, Message, Zone};
@@ -80,6 +80,7 @@ pub fn view<'a>(
 	let panel = container(
 		column![
 			edging(id, header(id, addable), true, held, edge == Some(true)),
+			switches(id, list),
 			scrollable(rows(id, list, held, insertion, scroll))
 				.id(scroll_id(id))
 				.on_scroll(move |viewport| Message::QueueScrolled(id, viewport.absolute_offset().y))
@@ -158,6 +159,33 @@ fn header(id: ListId, addable: bool) -> Element<'static, Message> {
 		add("⤓", false),
 	]
 	.spacing(4)
+	.align_y(Center)
+	.into()
+}
+
+/// What this list does when a player runs out of track (PLAN §7a).
+///
+/// A row of its own between the header and the rows, rather than two more controls in either
+/// of them: the header already carries the two add buttons and the footer five edit buttons,
+/// and three of these panels share the width two players had. Sitting on the list is what says
+/// *this* list, which is the whole point of the setting being per list.
+///
+/// **Auto-play** goes dead while **Auto-load** is off, because nothing is handed over for it to
+/// start — the same "dead rather than absent, and dead for a reason" rule the footer's buttons
+/// follow. Dead rather than silently ignored: a ticked box that does nothing is a lie about
+/// what the app will do at the end of the track.
+fn switches(id: ListId, list: &Playlist) -> Element<'static, Message> {
+	let auto_load = list.auto_load;
+
+	let switch =
+		|on: bool, label: &'static str| checkbox(on).label(label).text_size(11).size(12).spacing(4);
+
+	row![
+		switch(auto_load, "Auto-load").on_toggle(move |on| Message::QueueAutoLoad(id, on)),
+		switch(list.auto_play, "Auto-play")
+			.on_toggle_maybe(auto_load.then_some(move |on| Message::QueueAutoPlay(id, on))),
+	]
+	.spacing(10)
 	.align_y(Center)
 	.into()
 }

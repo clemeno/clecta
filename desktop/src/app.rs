@@ -238,6 +238,11 @@ pub enum Message {
 	QueueMove(ListId, bool),
 	/// Send the selected row to the neighbouring queue, right (`true`) or left (`false`).
 	QueueShift(ListId, bool),
+	/// A queue's **Auto-load** switch: whether it hands its top track to a player that has
+	/// just run out (PLAN §7a).
+	QueueAutoLoad(ListId, bool),
+	/// Its **Auto-play** switch: whether a track handed over that way then starts by itself.
+	QueueAutoPlay(ListId, bool),
 	/// A disclosure arrow in the tree.
 	FolderToggled(PathBuf),
 	/// The tree's fold button.
@@ -386,6 +391,24 @@ impl Clecta {
 			deck.fader = fader;
 		}
 
+		// The three lists, each with its own two switches (PLAN §7a). Built here rather than
+		// inside the struct below because a restored list is its paths *and* its switches, and
+		// the switches are stored in draw order while the paths are not — `cues` is per player
+		// and has no slot for the shared list.
+		let mut queues = [
+			Playlist::from_paths(settings.cues[0].clone()),
+			Playlist::from_paths(settings.common.clone()),
+			Playlist::from_paths(settings.cues[1].clone()),
+		];
+		for ((queue, auto_load), auto_play) in queues
+			.iter_mut()
+			.zip(settings.auto_load)
+			.zip(settings.auto_play)
+		{
+			queue.auto_load = auto_load;
+			queue.auto_play = auto_play;
+		}
+
 		let mut app = Self {
 			engine,
 			decks,
@@ -405,11 +428,7 @@ impl Clecta {
 			notice,
 			dirty: false,
 			stale: false,
-			queues: [
-				Playlist::from_paths(settings.cues[0].clone()),
-				Playlist::from_paths(settings.common.clone()),
-				Playlist::from_paths(settings.cues[1].clone()),
-			],
+			queues,
 			queue_scroll: [0.0; 3],
 			autoscroll: None,
 			measuring: HashSet::new(),
@@ -460,6 +479,10 @@ impl Clecta {
 				self.queues[ListId::Cue(DeckId::Two).index()].paths(),
 			],
 			common: self.queues[ListId::Common.index()].paths(),
+			// In draw order, which is the order the lists are stored in here — unlike `cues`
+			// above, which is per player.
+			auto_load: std::array::from_fn(|index| self.queues[index].auto_load),
+			auto_play: std::array::from_fn(|index| self.queues[index].auto_play),
 		}
 	}
 
@@ -768,6 +791,19 @@ impl Clecta {
 				}
 			}
 
+			// The two switches, which are settings rather than edits: `dirty` alone, without
+			// the measuring `queued` also does — nothing was added, so there is nothing new to
+			// look up.
+			Message::QueueAutoLoad(id, on) => {
+				self.queues[id.index()].auto_load = on;
+				self.dirty = true;
+			}
+
+			Message::QueueAutoPlay(id, on) => {
+				self.queues[id.index()].auto_play = on;
+				self.dirty = true;
+			}
+
 			// No `dirty`: where the pane is scrolled to is not something a restart should
 			// restore, and marking it would write `settings.json` every time a wheel turned.
 			Message::Scrolled(viewport) => self.browser.scroll = viewport.absolute_offset().y,
@@ -1021,10 +1057,16 @@ impl Clecta {
 	///
 	/// The track is *taken* rather than marked played: a queue is what is still to come, so
 	/// the row leaving the list as it reaches the player is what makes the list mean that.
+	///
+	/// Both switches belong to the **source list**, not to the player: the list that gave the
+	/// track is the list that says whether it plays, so Cue 1 can run the evening by itself
+	/// while the shared pool stays a shelf someone takes from by hand (PLAN §7a).
 	fn advance(&mut self, id: DeckId) -> Task<Message> {
 		let cue = &self.queues[ListId::Cue(id).index()];
 		let common = &self.queues[ListId::Common.index()];
 
+		// A list with **Auto-load** off offers nothing however full it is, so this is also
+		// where switching every list off leaves the player simply stopped.
 		let Some(source) = playlist::next_source(id, cue, common) else {
 			return Task::none();
 		};
@@ -1033,9 +1075,27 @@ impl Clecta {
 		};
 
 		// Lands on `Stopped`, like every other load (PLAN §7): the next track is ready at
-		// 0:00 and audible only when someone presses Play. On a mixer an unrequested fade-in
-		// is a mistake that cannot be taken back.
-		Task::batch([self.queued(), self.load(id, item.path)])
+		// 0:00 and audible only when someone presses Play — unless this list was told to
+		// start it. On a mixer an unrequested fade-in is a mistake that cannot be taken back,
+		// which is why that is a switch and not the default.
+		let auto_play = self.queues[source.index()].auto_play;
+		let path = item.path;
+		let loading = Task::batch([self.queued(), self.load(id, path.clone())]);
+
+		// Only if the file actually arrived. A load that failed leaves the *previous* track in
+		// the player and says so in the notice (PLAN §7), and pressing Play on that would be
+		// the app restarting a track nobody queued — the one way an automatic start could
+		// play the wrong thing.
+		if auto_play
+			&& self.decks[id.index()]
+				.track
+				.as_ref()
+				.is_some_and(|track| track.path == path)
+		{
+			self.transport(id, deck::Event::Play);
+		}
+
+		loading
 	}
 
 	/// May this track go into a queue — asking first if it is already in one (PLAN §7a).

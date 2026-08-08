@@ -63,6 +63,16 @@ cargo build --release --target x86_64-apple-darwin
   app asks rather than deciding. All three lists survive a restart, and a queued file that has
   been deleted or renamed since is dropped rather than left to fail at the moment it is due
   (PLAN §7a).
+- **Each list decides what it does at the end of a track.** Two checkboxes on every list:
+  **Auto-load**, on to begin with, hands its top track to a player that has just run out;
+  **Auto-play**, off to begin with, starts that track instead of leaving it stopped at 0:00.
+  They are per list, which is the point — Cue 1 can run the evening by itself while **Next up**
+  stays a shelf you take from by hand. A list with **Auto-load** off is skipped rather than
+  blocking, so switching a cue off still lets the shared list feed that player, and switching
+  every list off leaves the player stopped with full lists in front of it. **Auto-play** is
+  drawn dead while **Auto-load** is off, since nothing is handed over for it to start. Both
+  survive a restart, and a settings file written before they existed keeps the old behaviour
+  (PLAN §7a).
 - **Drag anything anywhere.** Drag a file from the browser into a list, drag a row up or down
   inside its list, drag it across to another list, or drag it straight onto a player to play
   it now — jumping the queue, and leaving the list as it goes. A **green caret** shows the
@@ -180,11 +190,11 @@ cargo build --release
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
 | `cache.rs` | the record encoding without a database — an exact round trip, a changed size or timestamp reading as a miss, another format byte read as a miss rather than as noise, a length told apart from the absence of one, and a payload that is not a whole number of columns thrown away rather than truncated — then one pass over a real database in a temporary folder: store and read back, rewrite the fixture and watch its entry go stale, delete another and watch pruning drop exactly its entry |
-| `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it, a queued track that no longer exists dropped without the rest of the queue |
+| `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default — named for the newest fields, so a file written before the queue switches existed still hands tracks over and never starts them — one bad value falling back without taking the good ones with it, a queued track that no longer exists dropped without the rest of the queue |
 | `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height; plus which key means refresh — F5 and ⌘R yes, a bare `r` no |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
 | `ui/waveform.rs` | the scrub's three rules — a press arms only over the strip, a move seeks only while the button is held and follows it outside the strip too, a release disarms wherever it happens — and the one they could not see: the four events macOS really sends for a single click, replayed in order, adding up to exactly one seek |
-| `playlist.rs` | what every queue edit does to the selection — an insert above it carries it down, a remove above it pulls it up, removing the selected row lands on what slid into its place, a shift takes the highlight with the track — plus the arrows reaching a neighbour and only a neighbour, the next track coming from a player's own cue before the shared list, a drag within a list landing where the caret was (both directions, past the last row, the two carets that touch the row itself, and every from × to keeping the contents unchanged), the running time (a measured row with no length keeps the total's `+` for ever, and one answer settles every row holding that track), the duplicate search (a track found in whichever list actually holds it rather than only the one being added to, and a row on its way out of a list not counting as its own duplicate), and which tracks get sent off to be measured: one entry per file rather than per row, nothing that is already being looked up, and nothing that has already answered — even when what it answered was "no length" |
+| `playlist.rs` | what every queue edit does to the selection — an insert above it carries it down, a remove above it pulls it up, removing the selected row lands on what slid into its place, a shift takes the highlight with the track — plus the arrows reaching a neighbour and only a neighbour, the next track coming from a player's own cue before the shared list, a list with **Auto-load** off being skipped rather than ending the handover (a cue switched off still lets the shared list feed that player) while both switched off stops the player with full lists in front of it, a drag within a list landing where the caret was (both directions, past the last row, the two carets that touch the row itself, and every from × to keeping the contents unchanged), the running time (a measured row with no length keeps the total's `+` for ever, and one answer settles every row holding that track), the duplicate search (a track found in whichever list actually holds it rather than only the one being added to, and a row on its way out of a list not counting as its own duplicate), and which tracks get sent off to be measured: one entry per file rather than per row, nothing that is already being looked up, and nothing that has already answered — even when what it answered was "no length" |
 | `ui/playlist.rs` | the footer's count and running time, and an empty list saying nothing at all rather than `0 · 0:00` |
 | `audio.rs` | the two things here that need no audio device — one scan of a real file (a generated WAV, silent for a second then loud for a second), and one measurement of another, plus a missing file answering "no length" rather than failing |
 | `ui/mod.rs` | which rows a pane builds: a short list built whole, the window moving by whole rows as it scrolls, the end of a long list still filling the pane, a negative or `NaN` offset still naming real rows, and the same offset naming a different row at the queues' 22-pixel pitch than at the files pane's 24 — plus eliding, sizes, the calendar (including a leap day), the clock |
@@ -263,6 +273,12 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   running out really does load the next one, that it lands *stopped* rather than playing, that
   the title and the waveform follow it, and that the shared list is reached only when that
   player's own cue is empty. It needs two short tracks and a minute of listening (PLAN §7a).
+
+  The two switches are checked in the same minute, and they are the half a pure test cannot
+  reach: that **Auto-load** off really leaves the player stopped with a full list under it,
+  that a cue switched off still lets **Next up** feed that player, that **Auto-play** starts
+  the handed-over track and *only* the handed-over one — a double-clicked row still lands
+  stopped — and that **Auto-play** greys out the moment **Auto-load** is unticked (PLAN §7a).
 - **Playing a queued row on demand.** *Not checked yet.* That a double click on a cue row
   loads it into the player it sits under and on a **Next up** row into whichever player is
   free; that the row leaves the list either way; and that the press which opened the double

@@ -94,18 +94,47 @@ impl Item {
 /// and deliberately so: a queue may hold the same track twice — playing something twice in a
 /// set is a thing people do — so a path does not name a row. The price is that every edit has
 /// to carry the selection with it, which is what most of this module is.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Playlist {
 	items: Vec<Item>,
 	selected: Option<usize>,
+	/// Whether this list hands its top track to a player that has just run out (PLAN §7a),
+	/// and whether that track then starts by itself.
+	///
+	/// Two switches rather than one three-way setting, because they answer two questions and
+	/// the middle position is the useful one: a list that loads without playing is the app's
+	/// own default, and it is neither of the extremes a single toggle would offer.
+	///
+	/// Per *list* rather than per player, which is what makes them worth having at all — Cue 1
+	/// can run the evening by itself while the shared pool sits there as a manual shelf, and
+	/// that is one setting each rather than a mode the whole app is in.
+	pub auto_load: bool,
+	pub auto_play: bool,
+}
+
+impl Default for Playlist {
+	fn default() -> Self {
+		Self {
+			items: Vec::new(),
+			selected: None,
+			// On: a queue is a list of what plays next, and one that had to be switched on
+			// before it did anything would be a list that quietly did nothing.
+			auto_load: true,
+			// Off, for the same reason every load lands on `Stopped` (PLAN §7): on a mixer,
+			// audio nobody asked for is a mistake that cannot be taken back. Someone who wants
+			// the evening to run itself says so once, per list.
+			auto_play: false,
+		}
+	}
 }
 
 impl Playlist {
-	/// Build from stored paths (PLAN §11). Nothing is selected on a fresh start.
+	/// Build from stored paths (PLAN §11). Nothing is selected on a fresh start, and the two
+	/// switches are the caller's business — `app` sets them from the settings file.
 	pub fn from_paths(paths: Vec<PathBuf>) -> Self {
 		Self {
 			items: paths.into_iter().map(Item::new).collect(),
-			selected: None,
+			..Self::default()
 		}
 	}
 
@@ -288,11 +317,6 @@ impl Playlist {
 	}
 }
 
-/// Where the track after this one comes from, when a player's track ends (PLAN §7a).
-///
-/// **Own cue first, the shared list second.** A track deliberately cued to Player 1 outranks
-/// the pool, which is what makes the pool "whatever is free" rather than a third queue with
-/// rules of its own. `None` when both are empty, and the player simply stops.
 /// Which tracks still need their length looked up, given what is already being looked up
 /// (PLAN §7a).
 ///
@@ -345,10 +369,20 @@ pub fn already_queued(
 	})
 }
 
+/// Where the track after this one comes from, when a player's track ends (PLAN §7a).
+///
+/// **Own cue first, the shared list second.** A track deliberately cued to Player 1 outranks
+/// the pool, which is what makes the pool "whatever is free" rather than a third queue with
+/// rules of its own. `None` when neither has anything to offer, and the player simply stops.
+///
+/// A list with `auto_load` off has nothing to offer however full it is: it is a shelf the user
+/// takes from by hand. It is *skipped*, not blocking — a cue switched off still lets the shared
+/// list feed the player, because the switch belongs to one list and says nothing about the
+/// other.
 pub fn next_source(id: DeckId, cue: &Playlist, common: &Playlist) -> Option<ListId> {
-	if !cue.is_empty() {
+	if cue.auto_load && !cue.is_empty() {
 		Some(ListId::Cue(id))
-	} else if !common.is_empty() {
+	} else if common.auto_load && !common.is_empty() {
 		Some(ListId::Common)
 	} else {
 		None
@@ -798,5 +832,34 @@ mod tests {
 
 		// …and two empty lists mean the player just stops.
 		assert_eq!(next_source(DeckId::One, &empty, &empty), None);
+	}
+
+	#[test]
+	fn a_list_with_auto_load_off_is_skipped_rather_than_blocking() {
+		// Arrange: both lists have a track, and the player's own cue is switched off.
+		let off = |names: &[&str]| Playlist {
+			auto_load: false,
+			..list(names)
+		};
+		let cue = off(&["mine.mp3"]);
+		let common = list(&["shared.mp3"]);
+
+		// Act / Assert: the cue is passed over — not treated as an empty list that stops the
+		// handover, which is the difference the word *skipped* is doing. The switch belongs to
+		// one list and says nothing about the other.
+		assert_eq!(
+			next_source(DeckId::One, &cue, &common),
+			Some(ListId::Common)
+		);
+
+		// The shared list switched off too: nothing is offered, and the player stops with two
+		// full lists in front of it — which is exactly what switching both off asks for.
+		let common = off(&["shared.mp3"]);
+		assert_eq!(next_source(DeckId::One, &cue, &common), None);
+
+		// And a fresh list hands over: the default is what the app did before there were
+		// switches at all.
+		assert!(Playlist::default().auto_load, "on unless it is turned off");
+		assert!(!Playlist::default().auto_play, "loading is not playing");
 	}
 }

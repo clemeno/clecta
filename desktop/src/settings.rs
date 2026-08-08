@@ -61,6 +61,19 @@ pub struct Settings {
 	/// else, so there is no state here that could go stale except the files themselves.
 	pub cues: [Vec<PathBuf>; 2],
 	pub common: Vec<PathBuf>,
+	/// Whether each list hands its top track to a player that has run out, and whether that
+	/// track then starts by itself (PLAN §7a).
+	///
+	/// Indexed by `ListId::index` — Cue 1, Next up, Cue 2 — which is deliberately **not** the
+	/// order `cues` above is in: that pair is per player and has no slot for the shared list.
+	/// Three of each, in the order the lists are drawn, so a hand-edited file reads left to
+	/// right.
+	///
+	/// Nothing sanitizes them, because a `bool` has no wrong value and serde has already
+	/// rejected anything that is not one. A file predating them reads as "load, do not play",
+	/// which is what the app did before the switches existed.
+	pub auto_load: [bool; 3],
+	pub auto_play: [bool; 3],
 }
 
 impl Default for Settings {
@@ -77,6 +90,8 @@ impl Default for Settings {
 			decks_height: 480.0,
 			cues: [Vec::new(), Vec::new()],
 			common: Vec::new(),
+			auto_load: [true; 3],
+			auto_play: [false; 3],
 		}
 	}
 }
@@ -211,6 +226,8 @@ mod tests {
 				vec![queued("clecta-cue-two.flac")],
 			],
 			common: vec![queued("clecta-common.wav")],
+			auto_load: [false, true, false],
+			auto_play: [true, false, true],
 		}
 	}
 
@@ -255,6 +272,12 @@ mod tests {
 		// not invalidate a file someone already has.
 		assert_eq!(settings.crossfader, 0.25);
 		assert_eq!(settings.faders, Settings::default().faders);
+
+		// The queue switches are the newest fields, and this is the case that matters for
+		// them: every file written before they existed is missing them, and must go on
+		// behaving exactly as it did — handing tracks over, never starting them (PLAN §7a).
+		assert_eq!(settings.auto_load, [true; 3], "a file that predates them");
+		assert_eq!(settings.auto_play, [false; 3]);
 	}
 
 	#[test]

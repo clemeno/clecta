@@ -213,14 +213,14 @@ clecta/
         ├── tree.rs      the folder tree's model: nodes, expansion, path arithmetic (§9)
         ├── fsio.rs      std::fs reads run off the GUI thread: list a dir, list its subfolders, the roots (§9)
         ├── paths.rs     clecta-data/ beside the app if writable, else the per-user dir; the .app walk-up (§11)
-        ├── playlist.rs  PURE queue arithmetic: three lists, their edits, and what each does to the selection (§7a)
+        ├── playlist.rs  PURE queue arithmetic: three lists, their edits, what each does to the selection, what each hands over (§7a)
         ├── settings.rs  load/save clecta-data/settings.json; a corrupt file reads as defaults (§11)
         ├── waveform.rs  PURE peak arithmetic: fold a file's samples to a bounded array, fit it to pixels (§14a)
         └── ui/
             ├── mod.rs       shared view helpers (elide_middle, the section splitters)
             ├── deck.rs      one player's panel: title, transport buttons, time, drop ring
             ├── mixer.rs     the two faders and the crossfader
-            ├── playlist.rs  one queue's panel: add, select, reorder, send to a neighbour (§7a)
+            ├── playlist.rs  one queue's panel: add, select, reorder, send to a neighbour, the two switches (§7a)
             ├── browser.rs   the files pane and its rows
             ├── tree.rs      the folder tree pane, its splitter and its fold button
             └── waveform.rs  the custom advanced::Widget: a bar per pixel column, the playhead, the scrub (§14a)
@@ -519,15 +519,53 @@ never causes a sound.
 When a player's track ends, `next_source` decides where the replacement comes from: **its own
 cue first, the shared list second.** A track deliberately cued to Player 1 outranks the pool,
 which is what makes the pool "whatever is free" rather than a third queue with rules of its
-own. Both empty, and the player just stops, as it always did.
+own. Both empty, and the player just stops, as it always did — and a list whose **Auto-load**
+is switched off counts as having nothing to offer, however full it is (below).
 
 The new track **lands on `Stopped`**, like every other load (§7). It is ready at 0:00 with its
 waveform scanning, and audible only when someone presses Play. On a mixer an unrequested
 fade-in is a mistake that cannot be taken back, and §7's "a successful load always lands on
-Stopped" did not need an exception carved into it.
+Stopped" did not need an exception carved into it — a list told to start its tracks presses
+Play *afterwards*, which is a second event and not a fourth kind of load.
 
 The track is *taken* out of the list rather than marked as played: a queue is what is still to
 come, so the row leaving as it reaches the player is what makes the list mean that.
+
+### The two switches, and why they are per list
+
+Both paragraphs above describe a policy, and a policy the whole app is in is a policy that is
+wrong for someone. So each list carries **Auto-load** and **Auto-play**: whether it hands its
+top track over when a player runs out, and whether that track then starts by itself. They ship
+on and off respectively, which is exactly what the app did before they existed.
+
+Two switches rather than one three-way setting, because they answer two questions and the
+**middle position is the useful one**: load without playing is the default above, and a single
+toggle would offer only the two ends of the range.
+
+Per *list* rather than per player, which is what makes them worth having. Cue 1 can run the
+evening by itself while **Next up** sits there as a shelf someone takes from by hand — one
+setting each, rather than a mode the whole app is in. It also means the switches that decide
+whether a track plays belong to **the list that gave it**, not to the player that received it,
+which is the rule `advance` reads them by.
+
+A list with **Auto-load** off is *skipped*, not blocking: `next_source` passes over it and asks
+the next one, so switching a cue off still lets the shared list feed that player. The switch
+belongs to one list and says nothing about the other. Switch every list off and the player
+simply stops with full lists in front of it, which is what switching every list off asks for.
+
+Two rules keep the automatic start honest:
+
+- **Auto-play goes dead while Auto-load is off**, because nothing is handed over for it to
+  start. Dead rather than silently ignored — the same "dead rather than absent, and dead for a
+  reason" rule the footer's buttons follow. A ticked box that does nothing is a lie about what
+  the app will do at the end of the track.
+- **Play is pressed only if the file actually arrived.** A load that fails leaves the previous
+  track in the player and says so in the notice (§7) — pressing Play on *that* would be the app
+  restarting a track nobody queued, which is the one way an automatic start could play the
+  wrong thing. `advance` checks that the loaded track is the one it just took.
+
+The switches are a settings change and not an edit: they mark the file dirty without going
+through `queued`, because nothing was added and there is nothing new to measure.
 
 ### The selection is the hard part
 
@@ -722,6 +760,13 @@ Stored as plain paths, and sanitized on the way in like every other field: a que
 has been deleted, renamed or unmounted is **dropped**, and so is one whose extension is not
 media. A queue is a promise about what plays next, and the worst possible moment to discover a
 broken row is when a track ends and the next one is due. One bad path does not empty the list.
+
+The two switches go in beside them, as `auto_load` and `auto_play`: three of each, in **draw
+order** — Cue 1, Next up, Cue 2 — which is deliberately not the order `cues` is in, since that
+pair is per player and has no slot for the shared list. Nothing sanitizes them, because a
+`bool` has no wrong value that serde would let through, and a file written before they existed
+reads as "hand over, do not start" — which is what the app did then, and is what §11's
+`#[serde(default)]` rule is for.
 
 ### How long the list runs for
 
@@ -1436,7 +1481,9 @@ otherwise pure; anything needing a device or a real folder is manual.
   types, not an object) reading as defaults rather than an error. Two more the
   implementation earned: a *missing* field keeps its default rather than failing the
   parse, so adding a field cannot invalidate a file someone already has; and an
-  out-of-range value falls back **alone**, with the good values around it kept.
+  out-of-range value falls back **alone**, with the good values around it kept. The
+  missing-field test names the newest fields specifically: a file written before the queue
+  switches existed must read as "hand over, do not start", which is what the app did then.
 - **`tree.rs`** — collapse takes the subtree and keeps the listings; `None` vs
   `Some(vec![])` survives a collapse/expand round trip. On what `expand` returns, the
   implementation split the case in two, and the split is the interesting part: **`expand`
@@ -1472,7 +1519,10 @@ otherwise pure; anything needing a device or a real folder is manual.
   the selected row lands on whatever slid into its place, removing the last row falls back to
   the new last, and a shift takes the highlight with the track it moved. Plus the two rules
   around them — the arrows reach a neighbour and only a neighbour, and `next_source` prefers a
-  player's own cue over the shared list. The remove test paid for itself on the first run: a
+  player's own cue over the shared list. A second `next_source` test pins the word *skipped* in
+  the switches' rule: a list with **Auto-load** off is passed over rather than treated as an
+  empty list that ends the handover, so a cue switched off still lets the shared list feed that
+  player. The remove test paid for itself on the first run: a
   `?` in a `match` arm was returning from `remove` itself, so the row was deleted, the
   function said nothing had been, and the selection pointed at a track that was gone.
 
@@ -2028,6 +2078,7 @@ not to make the widget cleverer.
 | Q23 | SQLite for the file cache | **No — `redb`, and the reason is a ban we wrote ourselves.** `rusqlite` pulls `libsqlite3-sys`, which compiles C on both shipped targets, and `deny.toml` bans `cc` because the no-C-toolchain property is what makes "copy it anywhere and run it" true (§11). §12 called that ban a tripwire for exactly this moment; this is the moment, and it worked. redb is the same shape without the compiler — pure Rust, ACID, one file, MIT OR Apache-2.0 already on the allow-list. What is given up is SQL, and the day something wants a `WHERE` clause is the day to revisit it | §11a, §12 |
 | Q24 | What makes a cached entry stale | **Size plus modified time — one `stat`, not a hash.** Hashing every byte costs about what the scan it avoids costs; hashing a sample buys the rename case for a read and a collision nobody can rule out. The two cases the stamp gets wrong cost exactly one re-scan each: an in-place edit inside FAT32's two-second granularity, and a rename. A cache that is occasionally cold is a cache; one that is occasionally *wrong* is a bug that looks like a corrupt file | §11a |
 | Q25 | Whether a gesture may act on the same place twice | **No — a fraction already published is not published again, and the memory dies with the gesture.** winit's macOS backend emits a `CursorMoved` before *every* `MouseInput`, so one click reaches a widget as four events and the phantom move before the release re-seeked to where the press had already gone: a tenth of a second of the track audibly replayed. The alternative — a movement threshold in pixels — is a number to tune that still fires on a stationary click; comparing the fraction is the quantity that actually matters, and it covers a hand held still mid-scrub for free. Clearing it on release keeps a second click on the same spot a second seek, which is deliberate | §14b |
+| Q26 | Where the handover's two switches belong | **On each list, as two checkboxes, and read from the list that gave the track.** Two rather than one three-way setting, because the middle position — load without playing — is the app's own default and a single toggle offers only the ends. Per list rather than per player, because that is what lets Cue 1 run the evening by itself while **Next up** stays a shelf; a per-player setting could not say that, and a global one would be a mode. A list switched off is *skipped* rather than blocking, so a cue that is off still lets the shared list feed that player. **Auto-play** is drawn dead while **Auto-load** is off, and `advance` presses Play only if the file it just took actually arrived — a load that failed leaves the *previous* track in the player, and starting that is the one way an automatic start could play the wrong thing | §7a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
