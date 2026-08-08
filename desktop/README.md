@@ -58,9 +58,15 @@ cargo build --release --target x86_64-apple-darwin
   splitter. Click a folder name in the tree to show it, the arrow to open it. Click a
   file row to select it, **double-click** a media row to load it into whichever player is
   idle, or use **→ Player 1 / → Player 2**. **◧ hide tree** in the status bar folds the
-  tree away and brings it back at the width it had. **Refresh** re-reads the folder, and so
-  do **F5** and **⌘R** — both, because F5 is the refresh key on Windows and is swallowed by
-  a Mac laptop's own function keys, while ⌘R is what a Mac reaches for (PLAN §6, §9, §14).
+  tree away and brings it back at the width it had (PLAN §6, §9).
+- **The folder keeps itself up to date.** Save a file into the folder you are looking at and
+  the row appears; delete one and it goes. The OS does the telling — FSEvents on macOS,
+  `ReadDirectoryChangesW` on Windows — so nothing polls and nothing runs while nothing
+  changes, and a burst of twenty files arriving is one re-listing rather than twenty.
+  **Refresh** and the keys **F5** / **⌘R** are still there, because a permission or a network
+  mount can take the watching away and the manual door has to work when it does. Two keys
+  because F5 is the refresh key on Windows and is swallowed by a Mac laptop's own function
+  keys, while ⌘R is what a Mac reaches for (PLAN §9).
 - **A folder of any size costs the same.** Only the rows on screen are built, so a
   20 000-file folder draws for what a 200-file one does. It was worth doing rather than
   assumed to be: 5 000 files cost **70 % of a core** at the playing tick before, and **9 %**
@@ -149,8 +155,8 @@ cargo build --release
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Eight things the suite cannot reach, all of which need a window a person can look at. **Five
-of the eight pass on macOS, by hand**; the last three are new and unchecked. The last two
+Nine things the suite cannot reach, all of which need a window a person can look at. **Five
+of the nine pass on macOS, by hand**; the last four are new and unchecked. The last two
 rounds are why the list exists: three of the app's defects so far were found here and none
 of them by a passing test.
 
@@ -197,7 +203,12 @@ of them by a passing test.
   the OS hands that key to the app is not, and it is exactly the doubt that made this two
   keys — F5 on a Mac laptop is the keyboard-brightness key unless the function-key
   preference is flipped, so ⌘R may be the only one of the pair that works here, and F5 the
-  only one that matters on Windows (PLAN §14).
+  only one that matters on Windows (PLAN §9).
+- **The watcher across a folder change.** Watching itself *is* confirmed from a script — a
+  file added, three added at once, one deleted, then an idle folder, all read back from the
+  running app. What a script cannot do is click a folder in the tree, and that is the case
+  worth an eye: the watcher is keyed on the path, so choosing another folder has to tear the
+  old one down and start one on the new place, with no watcher left behind (PLAN §9).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.

@@ -19,6 +19,11 @@ anyhow = "1.0.104"
 # toggle on crates already in the tree, not a new dependency: nothing is added to
 # Cargo.lock by turning it on, which is why the waveform costs no supply chain (PLAN §12).
 iced = { version = "0.14.0", features = ["smol", "advanced"] }
+# Watching the shown folder (PLAN §9). The OS tells us: FSEvents on macOS,
+# ReadDirectoryChangesW on Windows — no polling, so nothing runs while nothing changes.
+# Default features are the macOS backend; Windows needs none. Pure Rust on both, so the
+# no-C-toolchain property (PLAN §11) holds.
+notify = "8.2.0"
 # Native folder picker (PLAN §3). NSOpenPanel / Win32, same crate as cmote.
 rfd = "0.17.2"
 # Audio output, mixing and decoding (PLAN §7, §8). Wraps `cpal` for the device and its

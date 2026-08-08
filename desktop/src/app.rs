@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use iced::futures::Stream;
 use iced::futures::channel::oneshot;
 use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
@@ -17,7 +18,10 @@ use iced::widget::scrollable::AbsoluteOffset;
 use iced::widget::{
 	Space, button, column, container, mouse_area, operation, pane_grid, row, scrollable, text,
 };
-use iced::{Element, Fill, Size, Subscription, Task, Theme, event, keyboard, mouse, time, window};
+use iced::{
+	Element, Fill, Size, Subscription, Task, Theme, event, keyboard, mouse, stream, time, window,
+};
+use notify::{RecursiveMode, Watcher};
 
 use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
@@ -46,6 +50,14 @@ const SAVE_AFTER: Duration = Duration::from_secs(2);
 /// needed — here, while a scan is actually running.
 const SWEEP: Duration = Duration::from_millis(40);
 const SWEEP_STEPS: u32 = 30;
+
+/// How long the pane waits after the OS says the folder changed (PLAN §9).
+///
+/// Long enough that copying a hundred files in re-lists a handful of times instead of a
+/// hundred, short enough that dragging one file in feels like it appeared by itself. The
+/// same throttle shape as `SAVE_AFTER`, and for the same reason: the timer exists only
+/// while there is something waiting, so nothing ticks at rest.
+const WATCH_SETTLE: Duration = Duration::from_millis(500);
 
 /// Width of the files pane, as a fraction. The *height* of the top section is not a
 /// fraction at all — see `Clecta::view` (PLAN §6).
@@ -130,8 +142,12 @@ pub enum Message {
 	FolderSelected(PathBuf),
 	/// The **Open folder…** button.
 	OpenFolderPressed,
-	/// Re-read the folder currently shown, from the button or from the refresh key.
+	/// Re-read the folder currently shown — the button, the refresh key, or the watcher's
+	/// settle timer, which are three names for one thing.
 	RefreshPressed,
+	/// The OS says something in the shown folder changed. Not a re-list: it arms the settle
+	/// timer, because one dropped folder is a burst of these (PLAN §9).
+	FolderTouched,
 	/// The files pane was scrolled. Not a preference — the view needs it to know which rows
 	/// are worth building (PLAN §9).
 	Scrolled(scrollable::Viewport),
@@ -225,6 +241,10 @@ pub struct Clecta {
 	/// subscription, which exists only while this is true — and is what lets a successful
 	/// folder listing flush early without turning every refresh into a write.
 	dirty: bool,
+	/// The watcher saw the folder change and the listing has not caught up yet. Drives the
+	/// settle timer the same way `dirty` drives the autosave: it exists only while this is
+	/// true, so a folder nothing is happening in costs nothing (PLAN §9).
+	stale: bool,
 	/// The scanning animation's step counter. A plain integer rather than a timestamp, so
 	/// nothing in `view` has to read the clock — the phase is whatever the last `Sweep`
 	/// left behind.
@@ -274,6 +294,7 @@ impl Clecta {
 			os_hover: false,
 			notice,
 			dirty: false,
+			stale: false,
 			sweep: 0,
 		};
 		app.apply_gains();
@@ -360,11 +381,29 @@ impl Clecta {
 			Subscription::none()
 		};
 
+		// The folder the pane is showing, watched by the OS (PLAN §9). Keyed on the path, so
+		// choosing another folder tears this watcher down and builds one for the new place —
+		// which is the whole reason `run_with` takes something hashable.
+		let watcher = match &self.browser.folder {
+			Some(folder) => Subscription::run_with(folder.clone(), watch),
+			None => Subscription::none(),
+		};
+
+		// …and the timer that turns a burst of file events into one re-listing. Only while
+		// something is actually waiting, the same rule as every subscription above.
+		let settle = if self.stale {
+			time::every(WATCH_SETTLE).map(|_| Message::RefreshPressed)
+		} else {
+			Subscription::none()
+		};
+
 		Subscription::batch([
 			tick,
 			autosave,
 			sweep,
 			divider,
+			watcher,
+			settle,
 			refresh_key(),
 			window::resize_events().map(|(_, size)| Message::WindowResized(size)),
 			window::close_requests().map(|_| Message::CloseRequested),
@@ -421,10 +460,16 @@ impl Clecta {
 			}
 
 			Message::RefreshPressed => {
+				// Cleared here rather than only in the timer's own arm, so a *manual* refresh
+				// also satisfies a pending automatic one: the listing that is about to be
+				// read is the current one either way.
+				self.stale = false;
 				if let Some(folder) = self.browser.folder.clone() {
 					return list_files(folder);
 				}
 			}
+
+			Message::FolderTouched => self.stale = true,
 
 			// No `dirty`: where the pane is scrolled to is not something a restart should
 			// restore, and marking it would write `settings.json` every time a wheel turned.
@@ -1045,7 +1090,7 @@ fn divider_drag() -> Subscription<Message> {
 	})
 }
 
-/// The keyboard, for the one shortcut the app has (PLAN §14).
+/// The keyboard, for the one shortcut the app has (PLAN §9).
 ///
 /// Always on, unlike `divider_drag`: a key press is rare where a cursor move is constant,
 /// and this one publishes nothing at all unless the key was the refresh key.
@@ -1060,7 +1105,7 @@ fn refresh_key() -> Subscription<Message> {
 	})
 }
 
-/// Whether a key press means "list this folder again".
+/// Whether a key press means "list this folder again" (PLAN §9).
 ///
 /// Two keys, because neither of them travels: **F5** is *the* refresh key on Windows, and
 /// on a Mac laptop it is a system key the app is never sent unless the function-key
@@ -1097,6 +1142,61 @@ fn gestures() -> Subscription<Message> {
 			Some(Message::DragReleased)
 		}
 		_ => None,
+	})
+}
+
+/// Watch one folder, so a file appearing in it shows up without anyone pressing Refresh
+/// (PLAN §9).
+///
+/// The OS does the watching — FSEvents on macOS, `ReadDirectoryChangesW` on Windows — so
+/// nothing here polls and nothing runs while nothing changes. `NonRecursive`, because the
+/// pane shows one folder and the tree lists its own.
+///
+/// **What changed is deliberately not read.** Every event means the same thing: the listing
+/// might be out of date, and the answer is a whole re-list either way. That also makes the
+/// four-slot channel a feature rather than a limit — a burst of a hundred events fills it,
+/// the rest are dropped, and dropping them costs nothing because the re-list reads the
+/// folder as it is now rather than replaying a diff.
+///
+/// A watcher that cannot be created says so on stderr and gives up, like `settings.rs` does
+/// with a file it cannot write. The Refresh button and the refresh key still work, so the
+/// failure costs a convenience rather than a capability — and a status line about it on
+/// every folder change would be noise for something the user never asked for.
+///
+/// The `&PathBuf` is iced's, not a slip: `Subscription::run_with` takes a `fn(&D) -> S`, and
+/// `D` is the value it hashes to decide whether this is the same subscription as last frame.
+/// A `&Path` here would make `D = Path`, which is unsized. Hence the `allow` — clippy is
+/// right in general and wrong about this one signature.
+///
+/// `use<>` for the same kind of reason: in edition 2024 an `impl Trait` captures every
+/// lifetime in scope, which would tie the stream to the borrowed folder and stop it
+/// matching the `fn` pointer at all. Nothing is borrowed past the clone on the first line.
+#[allow(clippy::ptr_arg)]
+fn watch(folder: &PathBuf) -> impl Stream<Item = Message> + use<> {
+	let folder = folder.clone();
+
+	stream::channel(4, async move |sender| {
+		let handler = move |event: notify::Result<notify::Event>| {
+			if event.is_ok() {
+				// Cloned per event because the handler is `Fn` and `try_send` needs `&mut`.
+				// A clone of an `mpsc::Sender` is a refcount bump.
+				let _ = sender.clone().try_send(Message::FolderTouched);
+			}
+		};
+
+		let mut watcher = match notify::recommended_watcher(handler) {
+			Ok(watcher) => watcher,
+			Err(error) => return eprintln!("clecta: cannot watch folders: {error}"),
+		};
+
+		if let Err(error) = watcher.watch(&folder, RecursiveMode::NonRecursive) {
+			return eprintln!("clecta: cannot watch {}: {error}", folder.display());
+		}
+
+		// Park here for as long as the subscription lives, because the watcher has to live
+		// exactly that long: dropping it stops the watching, and it is dropped when this
+		// future is — when the folder changes, or when the app quits.
+		std::future::pending::<()>().await
 	})
 }
 
@@ -1190,7 +1290,7 @@ fn scan_peaks(id: DeckId, path: PathBuf) -> Task<Message> {
 }
 
 /// The two testable things in this module: what a divider drag is allowed to store
-/// (PLAN §6), and which key means refresh (PLAN §14). The *layout* is no longer arithmetic
+/// (PLAN §6), and which key means refresh (PLAN §9). The *layout* is no longer arithmetic
 /// at all — the height goes to the widget as a literal — so there is nothing left there for
 /// a test to have an opinion about, which is the point of the rewrite rather than a gap in
 /// it.

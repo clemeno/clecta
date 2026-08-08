@@ -46,7 +46,7 @@ type-checking is not running. §15 is the log.
 | Decoding | rodio's **symphonia** backend: flac / mp3 / mp4+aac / vorbis / wav by default, plus **`symphonia-mkv`**. Pure Rust, no C toolchain |
 | Crossfader | **Switchable curve** — constant-power (default) or linear, selectable in the mixer strip (§8) |
 | Async runtime | **None of ours.** cmote needed tokio for SSH; clecta has no network, and no `async fn` is written here. iced still needs *an* executor for its own `Task`s and timers, so it gets `smol` — see §3 |
-| Filesystem | **`std::fs`** — `read_dir`, `metadata`. No `walkdir`, no `notify`: nothing here walks recursively or watches |
+| Filesystem | **`std::fs`** — `read_dir`, `metadata`. No `walkdir`: nothing here walks recursively. **`notify`** was added later, once the pane earned it: the OS tells us the shown folder changed rather than the app polling or the user pressing Refresh (§9) |
 | File picker | **`rfd`** — native open-folder dialog, same crate cmote uses |
 | Errors | **`anyhow`** at the app boundary; typed `thiserror` enums deferred until a module becomes a real API (same call as cmote) |
 | Naming | **Idiomatic Rust** — `snake_case`, `SCREAMING_SNAKE` consts, no Hungarian prefixes. Same reasoning as cmote §15: the org's C-family rules fight `rustc`'s own lints. Tabs are honoured by `hard_tabs = true` in `rustfmt.toml` |
@@ -97,6 +97,7 @@ type-checking is not running. §15 is the log.
 | `cpal` | 0.17.3 (via rodio) | OS audio device + callback thread | Not a direct dependency; named here because it owns the real-time thread. Version confirmed by the spike, not guessed |
 | `symphonia` | 0.5.5 (via rodio) | Container demux + codec decode | Pure Rust. MPL-2.0 — permissive, file-level copyleft; fine to link, and `cargo deny`'s licence allow-list must include it |
 | `rfd` | 0.17.2 | Native folder-open dialog | `NSOpenPanel` / Win32. Same crate as cmote |
+| `notify` | 8.2.0 | Watching the shown folder (§9) | FSEvents / `ReadDirectoryChangesW` — the OS pushes, nothing polls. CC0-1.0, already on the allow-list, and no `cc` on either target. Added after v1, on the strength of the pane being cheap to redraw |
 | `serde` / `serde_json` | 1.0.229 / 1.0.151 | `clecta-data/settings.json` (§11) | `derive` on one small struct. A corrupt file is logged and treated as absent |
 | `anyhow` | 1.0.104 | App-level error handling | Context-rich errors, `?` everywhere |
 
@@ -600,6 +601,7 @@ does, which files are offered) unit-testable with no filesystem.
   case-insensitively, natural-numeric so `track2` precedes `track10`.
 - **Choosing a folder**: click it in the tree, or the **Open folder…** button (`rfd`).
   Both funnel through one `select_folder(path)`.
+- **The shown folder watches itself** — `notify`, and the subsection below.
 - **Virtualization, hand-rolled** — the ceiling this file used to carry a `ponytail:` note
   about, now measured and lifted. See the subsection below.
 
@@ -659,6 +661,66 @@ re-reading a folder should leave you where you were reading.
 
 Result, same measurement: **70.1 % → 9.3 %** against a 7.2 % baseline, and `view()` flat at
 0.5 ms for 500, 5 000 or 20 000 files. §16's framework question is no longer waiting on this.
+
+### The shown folder watches itself
+
+`notify` was the third thing §14 deferred and the first that came back cheaply, because the
+work of the last two rounds had already been done: re-listing a folder is a thread now (§4)
+and re-drawing one is flat (above), so "just re-list it" is an answer the app can afford to
+give often. Deferred features get cheaper when the things under them get fixed, and that is
+the argument for fixing the things under them.
+
+**One folder, non-recursively: the one the pane is showing.** The tree lists its own and is
+not watched — a ceiling, not an oversight, and the cost of lifting it is one watcher per
+expanded folder rather than one for the app.
+
+Three decisions worth the words:
+
+- **`Subscription::run_with(folder, watch)`, keyed on the path.** The subscription's identity
+  *is* the folder, so choosing another one tears the old watcher down and builds a new one
+  with no code that says so. This is the one place iced's "subscriptions are declarative"
+  claim pays a real dividend: the alternative is a watcher owned by the app struct and a
+  `Drop` dance in `select_folder`.
+- **What changed is deliberately not read.** Every event means "the listing might be stale",
+  and the answer is a whole re-list either way, so the event's paths and kinds are thrown
+  away unread. That makes the four-slot channel a *feature*: a burst of a hundred events
+  fills it, the rest are dropped, and dropping them costs nothing because a re-list reads the
+  folder as it is now rather than replaying a diff. A debouncer crate would have bought
+  ordering and coalescing that this design does not need.
+- **The settle timer is `RefreshPressed`.** A file event sets `stale`, and while `stale` a
+  500 ms timer fires the *same message the Refresh button sends*. So the watcher needed one
+  new message and no new path through `update` — and clearing `stale` in that arm means a
+  manual refresh also satisfies a pending automatic one, which is free and correct. Same
+  shape as the autosave throttle (§11): the timer exists only while there is something
+  waiting, so a folder nothing is happening in costs nothing.
+
+A watcher that cannot be created says so on stderr and gives up, like `settings.rs` with a
+file it cannot write. Refresh and the refresh key still work, so the failure costs a
+convenience rather than a capability — and a status line about it would be noise for
+something the user never asked for.
+
+### Refreshing by hand, which is still a feature
+
+Watching does not retire the **Refresh** button or the refresh key. A permission, a network
+mount or a watcher that would not start can all take the watching away, and the manual door
+has to work when they do.
+
+The key is **two** keys, and that is the whole decision: F5 is *the* refresh key on Windows,
+and on a Mac laptop it is a system key the app is never sent unless the function-key
+preference is flipped, so F5 alone would have shipped a shortcut that does not exist on the
+machine this is developed on. ⌘R is what a Mac reaches for and means nothing on Windows. One
+arm covers both, because `Modifiers::command()` is already Cmd on macOS and Ctrl everywhere
+else — the `cfg` is inside iced, not in clecta.
+
+`event::listen_with` rather than a widget, for the same reason the drop gestures use it: a
+key press belongs to the window, not to anything that has focus. It is always on and costs
+nothing at rest, unlike the divider's pointer listener — a key press is rare where a cursor
+move is constant, and this one publishes no message at all unless the key was the refresh
+key.
+
+Measured end to end, with a print in the listing arm: boot listed 1 entry, one file added
+gave 2, **three files added at once gave one re-list at 5** rather than three, one deleted
+gave 4, and three seconds of an idle folder gave nothing at all.
 
 ---
 
@@ -989,7 +1051,7 @@ otherwise pure; anything needing a device or a real folder is manual.
   a release disarms wherever it happens, and the events that pass through in quantity — the
   right button, the cursor leaving — do nothing even mid-scrub (§14b).
 - **`app.rs`** — what a *divider drag* is allowed to store (§6), and which key means
-  refresh (§14). Nothing else here is arithmetic any more: the players' height reaches the
+  refresh (§9). Nothing else here is arithmetic any more: the players' height reaches the
   widget as a literal and iced does the compacting. So the tests cover the one calculation
   left, and the one branch that came after it. That a
   drag inside the bounds is stored untouched — `assert_eq!`, not a tolerance, or the panel
@@ -1105,19 +1167,9 @@ path, so `/ponytail-debt` can harvest them later.
   the point at which the "one shared stream" decision in §4 has to be revisited.
 - **A queue / playlist per player.** rodio's `Player` is already a queue; v1 just never
   appends more than one source.
-- **File watching.** `notify` so the pane updates when a folder changes underneath it.
-  v1 has a Refresh button and a refresh key, which is what cmote learned to ship first.
-  The key is **two** keys, and that is the whole decision: F5 is *the* refresh key on
-  Windows, and on a Mac laptop it is a system key the app is never sent unless the
-  function-key preference is flipped, so F5 alone would have shipped a shortcut that does
-  not exist on the machine it is developed on. ⌘R is what a Mac reaches for and means
-  nothing on Windows. One arm covers both, because `Modifiers::command()` is already Cmd
-  on macOS and Ctrl everywhere else — the `cfg` is inside iced, not in clecta.
-  `event::listen_with` rather than a widget, for the same reason the drop gestures use it:
-  a key press belongs to the window, not to anything that has focus. It is always on and
-  costs nothing at rest, unlike the divider's pointer listener — a key press is rare where
-  a cursor move is constant, and this one publishes no message at all unless the key was
-  the refresh key.
+- **Watching the tree.** The files pane watches the folder it shows (§9); the tree does not
+  watch the folders it lists. One watcher per expanded folder against one for the app, for a
+  pane whose contents change far less often.
 - **Recursive / multi-file drops**, and drag-*out* to the desktop (iced cannot originate
   an OS drag at all — cmote §29 there).
 - **Positional OS drops** — blocked upstream in winit, not in clecta (§10). If winit ever
