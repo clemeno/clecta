@@ -183,16 +183,17 @@ cargo build --release
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it, a queued track that no longer exists dropped without the rest of the queue |
 | `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height; plus which key means refresh — F5 and ⌘R yes, a bare `r` no |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
-| `ui/waveform.rs` | the scrub's three rules: a press arms only over the strip, a move seeks only while the button is held and follows it outside the strip too, a release disarms wherever it happens |
+| `ui/waveform.rs` | the scrub's three rules — a press arms only over the strip, a move seeks only while the button is held and follows it outside the strip too, a release disarms wherever it happens — and the one they could not see: the four events macOS really sends for a single click, replayed in order, adding up to exactly one seek |
 | `playlist.rs` | what every queue edit does to the selection — an insert above it carries it down, a remove above it pulls it up, removing the selected row lands on what slid into its place, a shift takes the highlight with the track — plus the arrows reaching a neighbour and only a neighbour, the next track coming from a player's own cue before the shared list, a drag within a list landing where the caret was (both directions, past the last row, the two carets that touch the row itself, and every from × to keeping the contents unchanged), the running time (a measured row with no length keeps the total's `+` for ever, and one answer settles every row holding that track), the duplicate search (a track found in whichever list actually holds it rather than only the one being added to, and a row on its way out of a list not counting as its own duplicate), and which tracks get sent off to be measured: one entry per file rather than per row, nothing that is already being looked up, and nothing that has already answered — even when what it answered was "no length" |
 | `ui/playlist.rs` | the footer's count and running time, and an empty list saying nothing at all rather than `0 · 0:00` |
 | `audio.rs` | the two things here that need no audio device — one scan of a real file (a generated WAV, silent for a second then loud for a second), and one measurement of another, plus a missing file answering "no length" rather than failing |
 | `ui/mod.rs` | which rows a pane builds: a short list built whole, the window moving by whole rows as it scrolls, the end of a long list still filling the pane, a negative or `NaN` offset still naming real rows, and the same offset naming a different row at the queues' 22-pixel pitch than at the files pane's 24 — plus eliding, sizes, the calendar (including a leap day), the clock |
 
-Thirteen things the suite cannot reach, all of which need a window a person can look at.
-**Five of the thirteen pass on macOS, by hand**; the last eight are new and unchecked. The last
-two rounds are why the list exists: three of the app's defects so far were found here and none
-of them by a passing test.
+Thirteen things the suite cannot reach, all of which need a window a person can look at — or,
+once, listen to. **Five of the thirteen pass on macOS, by hand**; the last eight are new and
+unchecked. The last rounds are why the list exists: four of the app's defects so far were
+found here and none of them by a passing test. The fourth is the sharpest — an item already
+marked *confirmed* was confirmed by eye, and the defect was audible only.
 
 - **The close-button save.** ⌘Q *was* the open question here, and the answer was that it
   never reaches the app at all — so the settings are now written on a two-second throttle
@@ -212,8 +213,11 @@ of them by a passing test.
   wall as scripted clicking, so it takes an eye (PLAN §14a).
 - **The seek gesture.** The playhead lands where the pointer was, a playing track carries on
   and a paused one stays put, and the cursor turns into a hand over a loaded strip and not
-  over an empty one. Confirmed, first try — the arithmetic had already been tested and the
-  only question was the wiring (PLAN §14b).
+  over an empty one. Confirmed, first try — and still wrong, which is why this list exists.
+  Everything *visible* about it was right; what a look could not catch was that a click
+  seeked twice, replaying a tenth of a second of audio from the click target. It took an ear
+  on a playing track, and the cause was an event nobody knew the platform sent (PLAN §14b).
+  **Worth one more listen** now that a click publishes one seek.
 - **The scrub.** *Not checked yet.* Its rules are a tested pure function, so what is left is
   everything the rules assume: that a drag off the strip keeps sending moves, that the
   release still arrives when the button comes up outside the window, and that a seek per

@@ -1543,7 +1543,10 @@ otherwise pure; anything needing a device or a real folder is manual.
   without a window — a press arms only over the strip, a move seeks only while the button is
   held (and follows it *outside* the strip, which is what lets a drag run past either end),
   a release disarms wherever it happens, and the events that pass through in quantity — the
-  right button, the cursor leaving — do nothing even mid-scrub (§14b).
+  right button, the cursor leaving — do nothing even mid-scrub (§14b). Those four passed
+  while every click seeked twice, which is the lesson the fifth test pins: the four events
+  macOS really sends for one click, replayed **in order**, because each of them was already
+  handled correctly on its own and only the sequence was wrong (§14b).
 - **`app.rs`** — what a *divider drag* is allowed to store (§6), and which key means
   refresh (§9). Nothing else here is arithmetic any more: the players' height reaches the
   widget as a literal and iced does the compacting. So the tests cover the one calculation
@@ -1952,6 +1955,41 @@ each is wrong in a way only a window would show:
   window — a button let go is let go, and a strip left armed would scrub on the next stray
   move. This is the rule that cannot be tested by trying it once and it working.
 
+### Every click seeked twice
+
+Three correct rules and a fourth event nobody knew about. Clicking a strip while a track
+played replayed a tenth of a second from the click target — a short repeat, over the audio
+that was already right, which is the sound of a player being sent to the same place twice.
+
+The cause is not in this file at all. winit's macOS backend emits a `CursorMoved` *before*
+every `MouseInput`, on the down and on the up alike:
+
+```rust
+#[method(mouseUp:)]
+fn mouse_up(&self, event: &NSEvent) {
+    self.mouse_motion(event);              // ← a CursorMoved, every time
+    self.mouse_click(event, ElementState::Released);
+}
+```
+
+It has a reason — a window entered from another window used not to receive `mouseMoved:`, so
+the click carried the position instead (winit #1490) — and it means a single click arrives as
+**four** events, not two. The third is a move at the position the press already handled, and
+the strip was armed by then, so it followed: seek, hold the button for a tenth of a second,
+seek back to where the press had already gone. Every rule the gesture has was obeyed.
+
+The fix is a second thing to remember beside `scrubbing`: the fraction the gesture last
+published. A fraction it has already been to is not published again, so the phantom move
+before the release is silent, and so is a hand held still mid-scrub. The memory belongs to
+the **gesture**, not the widget — a release clears it — because clicking the same spot twice
+should seek twice, which is exactly what someone asking to hear that moment again wants.
+
+Two lessons, and the second is the one worth keeping. The first: a widget's event stream is
+the *platform's*, not the toolkit's idea of the gesture, and the platform sends more than a
+gesture needs. The second: this was invisible to every test in the file, because each of the
+four events is handled correctly on its own — the bug lived only in their order. The
+regression test replays all four, in that order, rather than adding a fifth rule to `scrub`.
+
 `ponytail:` one seek per pointer move, and `Engine::seek` blocks the GUI thread until the
 audio thread has performed it. Fine for a local file, where a seek is a format-level jump
 rather than a decode, and a stutter would be audible immediately rather than lurking. If a
@@ -1989,6 +2027,7 @@ not to make the widget cleverer.
 | Q22 | What to do about a track being queued twice | **Ask, across all three lists, with a native modal.** Refusing would be the app deciding something it cannot know — playing a track twice in a set is deliberate as often as it is a slip. The scope is the *set* rather than the destination list, because Cue 1 and Cue 2 each holding a track plays it twice just as surely as one list holding it twice. The modal is `rfd`, which the app already carries for **Load…**, against an in-app confirmation bar with its own state and two messages: the same trade §10 made, and reversible the day the question needs more than two answers | §7a |
 | Q23 | SQLite for the file cache | **No — `redb`, and the reason is a ban we wrote ourselves.** `rusqlite` pulls `libsqlite3-sys`, which compiles C on both shipped targets, and `deny.toml` bans `cc` because the no-C-toolchain property is what makes "copy it anywhere and run it" true (§11). §12 called that ban a tripwire for exactly this moment; this is the moment, and it worked. redb is the same shape without the compiler — pure Rust, ACID, one file, MIT OR Apache-2.0 already on the allow-list. What is given up is SQL, and the day something wants a `WHERE` clause is the day to revisit it | §11a, §12 |
 | Q24 | What makes a cached entry stale | **Size plus modified time — one `stat`, not a hash.** Hashing every byte costs about what the scan it avoids costs; hashing a sample buys the rename case for a read and a collision nobody can rule out. The two cases the stamp gets wrong cost exactly one re-scan each: an in-place edit inside FAT32's two-second granularity, and a rename. A cache that is occasionally cold is a cache; one that is occasionally *wrong* is a bug that looks like a corrupt file | §11a |
+| Q25 | Whether a gesture may act on the same place twice | **No — a fraction already published is not published again, and the memory dies with the gesture.** winit's macOS backend emits a `CursorMoved` before *every* `MouseInput`, so one click reaches a widget as four events and the phantom move before the release re-seeked to where the press had already gone: a tenth of a second of the track audibly replayed. The alternative — a movement threshold in pixels — is a number to tune that still fires on a stationary click; comparing the fraction is the quantity that actually matters, and it covers a hand held still mid-scrub for free. Clearing it on release keeps a second click on the same spot a second seek, which is deliberate | §14b |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

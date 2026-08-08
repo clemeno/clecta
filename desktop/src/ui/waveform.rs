@@ -64,12 +64,31 @@ struct Waveform<'a, Message> {
 	on_seek: Box<dyn Fn(f32) -> Message + 'a>,
 }
 
-/// The one thing the strip remembers, and the reason it has a `Tree` state at all: whether
-/// the pointer is dragging along it. A *click* needs no memory, which is why this widget had
-/// none until scrubbing was added (PLAN §14).
+/// What the strip remembers, and the reason it has a `Tree` state at all: whether the pointer
+/// is dragging along it, and where the gesture last sent the playhead. A *click* needs no
+/// memory, which is why this widget had none until scrubbing was added (PLAN §14).
 #[derive(Debug, Default)]
 struct State {
 	scrubbing: bool,
+	/// The fraction this gesture last published, so it cannot publish the same one twice.
+	seeked: Option<f32>,
+}
+
+impl State {
+	/// Record where the gesture is now, answering whether that is somewhere new.
+	///
+	/// The rule this exists for is a platform one: winit's macOS backend emits a
+	/// `CursorMoved` immediately *before* every `MouseInput`, so a release always arrives as
+	/// a move and then a release. Without this, every click seeked twice — once on the press
+	/// and once on the release's phantom move, at the same fraction. The second seek jumped
+	/// the playhead back by however long the button was held, which is audible while playing
+	/// as a repeat of the tenth of a second either side of the click.
+	///
+	/// A gesture, not a widget, remembers it: `Stop` clears this, so clicking the same spot
+	/// twice seeks twice — which is what someone asking to hear that moment again wants.
+	fn moved_to(&mut self, fraction: f32) -> bool {
+		self.seeked.replace(fraction) != Some(fraction)
+	}
 }
 
 /// What a mouse event does to a strip, given whether the pointer is over it and whether a
@@ -188,7 +207,7 @@ where
 		// for a fraction to be a fraction of. Disarming rather than merely returning covers
 		// the track being unloaded mid-drag.
 		if self.progress.is_none() {
-			state.scrubbing = false;
+			*state = State::default();
 			return;
 		}
 
@@ -196,7 +215,7 @@ where
 			Scrub::Start => state.scrubbing = true,
 			Scrub::Follow => {}
 			Scrub::Stop => {
-				state.scrubbing = false;
+				*state = State::default();
 				return;
 			}
 			Scrub::Ignore => return,
@@ -213,7 +232,11 @@ where
 		};
 
 		if let Some(fraction) = waveform::seek_fraction(bounds.width, position.x - bounds.x) {
-			shell.publish((self.on_seek)(fraction));
+			// Only when it is somewhere the gesture has not already been: a seek to where the
+			// playhead was already sent is not a no-op, it is a jump backwards to it.
+			if state.moved_to(fraction) {
+				shell.publish((self.on_seek)(fraction));
+			}
 			// Nothing under this strip handles a left press today — the panel's `mouse_area`
 			// exists only while a drag is armed and only watches enter/exit. This is the
 			// contract every built-in control keeps anyway: a widget that acted on a click
@@ -429,6 +452,66 @@ mod tests {
 		for over in [true, false] {
 			assert_eq!(scrub(&released(), over, true), Scrub::Stop, "over: {over}");
 		}
+	}
+
+	/// The regression: teleporting while playing replayed a tenth of a second from the click
+	/// target, because a click seeked twice.
+	///
+	/// winit's macOS backend calls `mouse_motion` before `mouse_click` on both the down and
+	/// the up, so a press-and-release reaches this widget as *four* events. Replayed here in
+	/// that order, because the bug is entirely in the order — every one of these events is
+	/// handled correctly on its own.
+	#[test]
+	fn one_click_is_one_seek() {
+		// Arrange: the four events macOS really sends for a single click, and the fraction
+		// the pointer is over for all of them.
+		let click = [moved(), pressed(), moved(), released()];
+		let fraction = 0.25;
+		let mut state = State::default();
+		let mut seeks = 0;
+
+		// Act: the same walk `update` does, minus the layout it needs a window for.
+		for event in &click {
+			match scrub(event, true, state.scrubbing) {
+				Scrub::Start => state.scrubbing = true,
+				Scrub::Follow => {}
+				Scrub::Stop => {
+					state = State::default();
+					continue;
+				}
+				Scrub::Ignore => continue,
+			}
+			if state.moved_to(fraction) {
+				seeks += 1;
+			}
+		}
+
+		// Assert: one. Two is the bug — the second lands on the target the press already
+		// reached, so the player jumps back by however long the button was held.
+		assert_eq!(seeks, 1);
+		assert!(!state.scrubbing, "the release still disarms");
+	}
+
+	#[test]
+	fn a_scrub_seeks_once_per_place_it_reaches() {
+		// Arrange: a drag that pauses — a hand held still still produces moves, and macOS
+		// adds one more before the release.
+		let mut state = State {
+			scrubbing: true,
+			..Default::default()
+		};
+
+		// Act / Assert: a fraction that has not changed is not a seek, and the same fraction
+		// arriving again after a real move is, because the playhead has left it since.
+		assert!(state.moved_to(0.4), "the first place it reaches");
+		assert!(!state.moved_to(0.4), "held still");
+		assert!(state.moved_to(0.7), "dragged on");
+		assert!(state.moved_to(0.4), "dragged back");
+
+		// And a fresh gesture starts with no memory, so clicking the same spot twice replays
+		// it twice — which is the point of clicking it again.
+		let mut next = State::default();
+		assert!(next.moved_to(0.4));
 	}
 
 	#[test]
