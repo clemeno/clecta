@@ -172,6 +172,21 @@ fn decoder(path: &Path) -> Result<Decoder<File>> {
 		.with_context(|| format!("cannot decode {}", path.display()))
 }
 
+/// How long a file is, without playing it and without decoding it (PLAN §7a).
+///
+/// This is the *same* question `load` answers, asked of a file nobody has loaded: the queues
+/// show a running time, and a track that has never been near a player still has a length.
+/// Building the decoder reads the container's header and stops there — it is an open and a
+/// parse, not a decode, which is what makes this cheap enough to do for a whole queue where
+/// `peaks` is a job per file.
+///
+/// One `Option` and no error: a file that will not open and a stream with no length are the
+/// same answer to the caller, which is "this row cannot be added up". The caller records it
+/// as a measurement that came back empty rather than retrying for ever.
+pub fn duration(path: &Path) -> Option<Duration> {
+	decoder(path).ok()?.total_duration()
+}
+
 /// Scan a whole file into the amplitude array the waveform draws (PLAN §14a).
 ///
 /// A second, independent decode of a file that is already loaded — the playing one cannot
@@ -229,6 +244,31 @@ mod tests {
 			quietest_loud > 0.9,
 			"the loud second reads as {quietest_loud}"
 		);
+	}
+
+	/// The other thing that needs no output device: asking a file how long it is (PLAN §7a).
+	/// The queues' running times are built entirely out of this answer, so a `None` from a
+	/// file that is perfectly readable would leave every total with a `+` on it and no way to
+	/// tell why.
+	#[test]
+	fn a_file_can_be_measured_without_being_played() {
+		// Arrange: three seconds of silence, which is a length nothing else could round to.
+		const RATE: u32 = 44_100;
+		let samples = vec![0i16; RATE as usize * 3];
+
+		let path = std::env::temp_dir().join("clecta-duration-test.wav");
+		std::fs::write(&path, wav(&samples, RATE)).expect("writing the fixture");
+
+		// Act
+		let measured = duration(&path);
+		let _ = std::fs::remove_file(&path);
+
+		// Assert: to the second, which is all the footer shows.
+		assert_eq!(measured.map(|length| length.as_secs()), Some(3));
+
+		// And a file that is not there answers rather than failing, because "no length" is
+		// what the caller stores either way.
+		assert_eq!(duration(&std::env::temp_dir().join("clecta-nothing")), None);
 	}
 
 	/// A mono sixteen-bit PCM file: the forty-four byte canonical header, then the samples.

@@ -7,7 +7,8 @@
 //! it**: a row that stays highlighted while a different track slides beneath it is worse
 //! than no highlight at all.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::deck::DeckId;
 
@@ -60,7 +61,7 @@ impl ListId {
 	}
 }
 
-/// One queued track: a path, and the name the view draws every frame.
+/// One queued track: a path, the name the view draws every frame, and how long it is.
 ///
 /// The name is cached for the same reason `deck::Track` caches it — `Path::file_name`
 /// returns an `OsStr` that would be re-converted on every row of every frame.
@@ -68,12 +69,21 @@ impl ListId {
 pub struct Item {
 	pub path: PathBuf,
 	pub name: String,
+	/// Two questions in one field, and both have to be asked: `None` means *not measured
+	/// yet*, and `Some(None)` means measured and the decoder could give no length — a
+	/// stream, or a file that no longer opens (PLAN §7a). Collapsing them into one `None`
+	/// would make the app re-open an unreadable file for ever.
+	pub duration: Option<Option<Duration>>,
 }
 
 impl Item {
 	pub fn new(path: PathBuf) -> Self {
 		let name = crate::fsio::name_of(&path);
-		Self { path, name }
+		Self {
+			path,
+			name,
+			duration: None,
+		}
 	}
 }
 
@@ -113,6 +123,46 @@ impl Playlist {
 
 	pub fn selected(&self) -> Option<usize> {
 		self.selected
+	}
+
+	/// How long everything in the list is, and whether that is the whole truth.
+	///
+	/// `false` means at least one row has no length — still being measured, or a file the
+	/// decoder could not answer for. The footer says so with a `+` rather than rounding the
+	/// missing rows to zero: a running time that silently leaves tracks out is worse than one
+	/// that admits it is still counting, because the number exists to be planned against.
+	pub fn total(&self) -> (Duration, bool) {
+		self.items
+			.iter()
+			.fold((Duration::ZERO, true), |(sum, whole), item| {
+				match item.duration {
+					Some(Some(length)) => (sum + length, whole),
+					_ => (sum, false),
+				}
+			})
+	}
+
+	/// The tracks whose length nobody has looked up yet.
+	pub fn unmeasured(&self) -> impl Iterator<Item = &Path> {
+		self.items
+			.iter()
+			.filter(|item| item.duration.is_none())
+			.map(|item| item.path.as_path())
+	}
+
+	/// Record a length against every row holding this path that is still waiting for one.
+	///
+	/// By path rather than by index, because the lists can be edited while the measuring runs
+	/// and an index would name a different track by the time the answer came back. A queue may
+	/// hold the same track twice, so one answer settles both rows.
+	pub fn measured(&mut self, path: &Path, length: Option<Duration>) {
+		for item in self
+			.items
+			.iter_mut()
+			.filter(|item| item.duration.is_none() && item.path == path)
+		{
+			item.duration = Some(length);
+		}
 	}
 
 	/// Select a row, or clear the selection if the index is not one.
@@ -505,6 +555,69 @@ mod tests {
 				assert_eq!(got, original, "relocate({from}, {to}) changed the contents");
 			}
 		}
+	}
+
+	#[test]
+	fn a_running_time_admits_what_it_has_not_counted() {
+		// Arrange: three tracks, none of them measured yet.
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
+		assert_eq!(
+			list.total(),
+			(Duration::ZERO, false),
+			"nothing measured is not a list of length zero"
+		);
+
+		// Act: two answers arrive, and one of them is "this file has no length".
+		list.measured(&PathBuf::from("/m/a.mp3"), Some(Duration::from_secs(90)));
+		list.measured(&PathBuf::from("/m/b.mp3"), None);
+
+		// Assert: the known lengths add up, and the total still says it is not the whole
+		// story — which is what the `+` in the footer is.
+		assert_eq!(list.total(), (Duration::from_secs(90), false));
+
+		// Act / Assert: everything has now been *asked*, and the answer is still not whole —
+		// a row nobody can measure keeps the `+` for ever, which is the honest outcome. The
+		// two states differ in what the app does next, not in what the footer says: one is
+		// waiting for a thread and the other has stopped asking.
+		list.measured(&PathBuf::from("/m/c.mp3"), Some(Duration::from_secs(30)));
+		assert_eq!(list.total(), (Duration::from_secs(120), false));
+		assert_eq!(list.unmeasured().count(), 0, "nothing left to ask about");
+
+		// A list with no unknowns in it is exact, and so is an empty one.
+		list.remove(1);
+		assert_eq!(list.total(), (Duration::from_secs(120), true));
+		assert_eq!(Playlist::default().total(), (Duration::ZERO, true));
+	}
+
+	#[test]
+	fn one_answer_settles_every_row_holding_that_track() {
+		// Arrange: the same track queued twice, which is the reason `measured` works by path
+		// and the reason a row is selected by index.
+		let mut list = list(&["a.mp3", "b.mp3", "a.mp3"]);
+
+		// Act
+		list.measured(&PathBuf::from("/m/a.mp3"), Some(Duration::from_secs(60)));
+
+		// Assert: both copies, and nothing else.
+		assert_eq!(
+			list.items()[0].duration,
+			Some(Some(Duration::from_secs(60)))
+		);
+		assert_eq!(
+			list.items()[2].duration,
+			Some(Some(Duration::from_secs(60)))
+		);
+		assert_eq!(list.items()[1].duration, None, "a different track");
+
+		// And an answer that failed is remembered as an answer, or the app would re-open an
+		// unreadable file every time anything else was added.
+		list.measured(&PathBuf::from("/m/b.mp3"), None);
+		assert_eq!(list.items()[1].duration, Some(None));
+		assert_eq!(
+			list.unmeasured().count(),
+			0,
+			"nothing is still waiting to be measured"
+		);
 	}
 
 	#[test]

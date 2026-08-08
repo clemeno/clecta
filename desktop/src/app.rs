@@ -60,6 +60,15 @@ const SWEEP_STEPS: u32 = 30;
 /// while there is something waiting, so nothing ticks at rest.
 const WATCH_SETTLE: Duration = Duration::from_millis(500);
 
+/// How a queue scrolls itself while a drag hovers one of its edges (PLAN §7a).
+///
+/// 30 ms is 33 fps, smooth for something the eye is tracking a target through, and eight
+/// pixels a step is a little under four rows a second — slow enough to stop on the row you
+/// meant, which is the whole reason the gesture exists. Like every other timer here, the
+/// subscription exists only while an edge is armed.
+const AUTOSCROLL: Duration = Duration::from_millis(30);
+const AUTOSCROLL_STEP: f32 = 8.0;
+
 /// Width of the files pane, as a fraction. The *height* of the top section is not a
 /// fraction at all — see `Clecta::view` (PLAN §6).
 const TREE_RATIO: f32 = 0.68;
@@ -199,6 +208,19 @@ pub enum Message {
 	/// A queue row was clicked. The index, not the path: a queue may hold the same track
 	/// twice (PLAN §7a).
 	QueueSelected(ListId, usize),
+	/// A queue row was double-clicked: play it now, out of turn.
+	QueueLoad(ListId, usize),
+	/// A queue was scrolled, to this absolute offset. Not a preference — the view needs it to
+	/// know which rows are worth building, exactly as the files pane does (PLAN §9).
+	QueueScrolled(ListId, f32),
+	/// A drag entered (`true`) or left (`false`) one of a list's scroll edges: its header,
+	/// which scrolls up, or its footer, which scrolls down (PLAN §7a).
+	ScrollEdge(ListId, bool, bool),
+	/// One step of that scroll. Sent only while an edge is armed.
+	ScrollStep,
+	/// Track lengths, looked up off the GUI thread. A batch rather than one message per file,
+	/// because they are asked for as a batch and none of them is interesting alone.
+	Measured(Vec<(PathBuf, Option<Duration>)>),
 	/// Add the browser's selection to a queue — at the top when `true`, at the end when
 	/// `false`.
 	QueueAdd(ListId, bool),
@@ -310,6 +332,12 @@ pub struct Clecta {
 	/// The three queues, indexed by `ListId::index` (PLAN §7a): one in front of each player,
 	/// and the shared one between them.
 	queues: [Playlist; 3],
+	/// How far down each of them is scrolled, in the same order. Not persisted, for the same
+	/// reason the files pane's offset is not: where a list is scrolled to is not a setting.
+	queue_scroll: [f32; 3],
+	/// The list whose edge a drag is resting on, and which way it is scrolling. `None` at
+	/// rest, which is what gates the timer that does the scrolling.
+	autoscroll: Option<(ListId, bool)>,
 	/// The scanning animation's step counter. A plain integer rather than a timestamp, so
 	/// nothing in `view` has to read the clock — the phase is whatever the last `Sweep`
 	/// left behind.
@@ -365,6 +393,8 @@ impl Clecta {
 				Playlist::from_paths(settings.common.clone()),
 				Playlist::from_paths(settings.cues[1].clone()),
 			],
+			queue_scroll: [0.0; 3],
+			autoscroll: None,
 			sweep: 0,
 		};
 		app.apply_gains();
@@ -372,7 +402,14 @@ impl Clecta {
 		// Open where the last run left off, or on the home folder — so the first thing on
 		// screen is a real listing rather than an empty pane with a button in it. The
 		// folder is known to exist: `Settings` drops one that does not.
-		let task = app.select_folder(settings.folder.unwrap_or_else(fsio::home));
+		//
+		// The restored queues have paths and no lengths, so the running times are measured
+		// alongside the first listing rather than after it: both are file reads on threads of
+		// their own, and neither is in the other's way.
+		let task = Task::batch([
+			app.select_folder(settings.folder.unwrap_or_else(fsio::home)),
+			app.measure_queues(),
+		]);
 		// Restoring is not a change. Without this, every launch would write the file back
 		// two seconds later having altered nothing.
 		app.dirty = false;
@@ -472,6 +509,14 @@ impl Clecta {
 			Subscription::none()
 		};
 
+		// The queue scroll a drag is holding an edge down for. Same rule again: it exists
+		// only while a pointer is actually resting on an edge.
+		let scrolling = if self.autoscroll.is_some() {
+			time::every(AUTOSCROLL).map(|_| Message::ScrollStep)
+		} else {
+			Subscription::none()
+		};
+
 		Subscription::batch([
 			tick,
 			autosave,
@@ -479,6 +524,7 @@ impl Clecta {
 			divider,
 			watcher,
 			settle,
+			scrolling,
 			refresh_key(),
 			window::resize_events().map(|(_, size)| Message::WindowResized(size)),
 			window::close_requests().map(|_| Message::CloseRequested),
@@ -562,6 +608,74 @@ impl Clecta {
 				self.queues[id.index()].select(index);
 			}
 
+			// A double click plays a queued row now, out of turn — the one way from a list to
+			// a player that is neither a drag nor waiting for a track to end (PLAN §7a). It
+			// takes the row with it, exactly as a drag onto a player does and as the handover
+			// itself does: the queue is what is still to come.
+			Message::QueueLoad(list, index) => {
+				// A cue plays on the player it belongs to; the shared list has no player of its
+				// own, so it uses the same "whichever is free" rule an unaimed drop does.
+				let id = match list {
+					ListId::Cue(id) => id,
+					ListId::Common => deck::idle_target(&self.decks[0], &self.decks[1]),
+				};
+
+				let Some(item) = self.queues[list.index()].remove(index) else {
+					return Task::none();
+				};
+				// The press that opened this double click armed a drag, and the row it was
+				// carrying has just left the list. Disarmed here rather than left to the
+				// release, which would otherwise drop a row that no longer exists.
+				self.drag = None;
+
+				return Task::batch([self.queued(), self.load(id, item.path)]);
+			}
+
+			// Not persisted and deliberately not `dirty`, exactly like the files pane's own
+			// offset: where a list is scrolled to is not a setting.
+			Message::QueueScrolled(id, offset) => self.queue_scroll[id.index()] = offset,
+
+			Message::ScrollEdge(id, up, entering) => {
+				// The same shape as `DragOut`, and for the same reason: entering one edge and
+				// leaving another arrive in an order nothing guarantees, so a leave clears only
+				// the edge it is actually about.
+				if entering {
+					self.autoscroll = Some((id, up));
+				} else if self.autoscroll == Some((id, up)) {
+					self.autoscroll = None;
+				}
+			}
+
+			Message::ScrollStep => {
+				if let Some((id, up)) = self.autoscroll {
+					// `scroll_by` rather than a computed offset: it clamps against the pane's
+					// real bounds, which the app does not know and would have to guess at. The
+					// stored offset catches up on the next frame — the `scrollable` republishes
+					// its viewport on every redraw where it has moved, which is what keeps the
+					// virtualized rows following a scroll nobody asked the pointer for.
+					let step = if up {
+						-AUTOSCROLL_STEP
+					} else {
+						AUTOSCROLL_STEP
+					};
+					return operation::scroll_by(
+						ui::playlist::scroll_id(id),
+						AbsoluteOffset { x: 0.0, y: step },
+					);
+				}
+			}
+
+			Message::Measured(lengths) => {
+				// Applied to all three lists, because a track can be moved between them while
+				// the lengths are being looked up — and by path, so one answer settles every
+				// row holding that file.
+				for (path, length) in lengths {
+					for queue in &mut self.queues {
+						queue.measured(&path, length);
+					}
+				}
+			}
+
 			// Every arm below edits a queue, and every queue is persisted, so each ends in
 			// `queued` rather than repeating the `dirty` flag four times.
 			Message::QueueAdd(id, prepend) => {
@@ -581,14 +695,14 @@ impl Clecta {
 					} else {
 						queue.append(item);
 					}
-					self.queued();
+					return self.queued();
 				}
 			}
 
 			Message::QueueRemove(id) => {
 				if let Some(index) = self.queues[id.index()].selected() {
 					self.queues[id.index()].remove(index);
-					self.queued();
+					return self.queued();
 				}
 			}
 
@@ -596,7 +710,7 @@ impl Clecta {
 				if let Some(index) = self.queues[id.index()].selected()
 					&& self.queues[id.index()].shift(index, up)
 				{
-					self.queued();
+					return self.queued();
 				}
 			}
 
@@ -607,7 +721,7 @@ impl Clecta {
 					&& let Some(item) = self.queues[id.index()].take_selected()
 				{
 					self.queues[target.index()].append(item);
-					self.queued();
+					return self.queued();
 				}
 			}
 
@@ -739,6 +853,11 @@ impl Clecta {
 				// One release ends both drags, because a release is a release: the divider
 				// needs no listener of its own, and `gestures` already takes every one.
 				self.decks_drag = false;
+				// Cleared here rather than left to a leave: the edges are only `mouse_area`s
+				// while a drag is in flight, so releasing *on* one destroys the widget that
+				// would have reported the pointer leaving it, and the list would scroll for
+				// ever (PLAN §7a).
+				self.autoscroll = None;
 				let target = self.hover.take();
 				// Disarmed on every release, whatever it was over, so nothing is left
 				// armed behind a drag the user thought better of.
@@ -751,15 +870,17 @@ impl Clecta {
 					// row dragged out of a list leaves the list, exactly as it would have if
 					// the list had handed it over itself (PLAN §7a).
 					Some(DropTarget::Player(id)) => {
+						let mut tasks = Vec::new();
 						if let Some((list, index)) = drag.from {
 							self.queues[list.index()].remove(index);
-							self.queued();
+							tasks.push(self.queued());
 						}
-						return self.accept_drop(id, drag.item.path, true);
+						tasks.push(self.accept_drop(id, drag.item.path, true));
+						return Task::batch(tasks);
 					}
 					Some(DropTarget::Row(list, index)) => {
 						self.drop_into(list, index, drag);
-						self.queued();
+						return self.queued();
 					}
 					// A drag that landed on nothing is a plain click, and a click has already
 					// done its work: the press selected the row.
@@ -868,17 +989,62 @@ impl Clecta {
 			return Task::none();
 		};
 
-		self.queued();
 		// Lands on `Stopped`, like every other load (PLAN §7): the next track is ready at
 		// 0:00 and audible only when someone presses Play. On a mixer an unrequested fade-in
 		// is a mistake that cannot be taken back.
-		self.load(id, item.path)
+		Task::batch([self.queued(), self.load(id, item.path)])
 	}
 
-	/// A queue changed, so the settings file is out of date. One place, so the editing arms,
-	/// `advance` and a drop cannot each remember it differently.
-	fn queued(&mut self) {
+	/// A queue changed: the settings file is out of date, and something in it may not have
+	/// been measured yet. One place, so the editing arms, `advance` and a drop cannot each
+	/// remember half of it.
+	fn queued(&mut self) -> Task<Message> {
 		self.dirty = true;
+		self.measure_queues()
+	}
+
+	/// Look up the length of every queued track nobody has measured yet (PLAN §7a).
+	///
+	/// One job for the whole batch rather than one per file: they are wanted together, and a
+	/// thread each would be dozens of threads for a restored queue. Off the GUI thread because
+	/// it opens files, which is the rule `off_thread` exists to keep — a queue on a network
+	/// mount would otherwise freeze the app for as long as the mount took to answer.
+	///
+	/// Empty when there is nothing to measure, which is the usual case: every call that edits
+	/// a queue comes through here, and only the ones that *added* something have work to do.
+	///
+	/// `ponytail:` two edits in quick succession start two jobs that overlap on the same
+	/// files. Harmless — the answer is the same and `measured` only fills in a row that is
+	/// still empty — and the fix, a flag saying one is already running, costs more state than
+	/// the duplicate reads cost time.
+	fn measure_queues(&self) -> Task<Message> {
+		// Deduplicated with a `Vec`, not a `HashSet`: a queue is tens of rows, and this runs
+		// once per edit.
+		let mut paths: Vec<PathBuf> = Vec::new();
+		for path in self.queues.iter().flat_map(Playlist::unmeasured) {
+			if !paths.iter().any(|seen| seen == path) {
+				paths.push(path.to_path_buf());
+			}
+		}
+
+		if paths.is_empty() {
+			return Task::none();
+		}
+
+		off_thread(
+			move || {
+				paths
+					.into_iter()
+					.map(|path| {
+						let length = audio::duration(&path);
+						(path, length)
+					})
+					.collect::<Vec<_>>()
+			},
+			// A job that died leaves the rows unmeasured, which the footer already has a way
+			// of saying: the running time keeps its `+`.
+			|measured| Message::Measured(measured.unwrap_or_default()),
+		)
 	}
 
 	/// Put what a drag was carrying into a list, above row `index` (PLAN §7a).
@@ -1241,8 +1407,15 @@ impl Clecta {
 				id,
 				&self.queues[id.index()],
 				addable,
-				self.drag.is_some(),
-				self.insertion(id),
+				self.queue_scroll[id.index()],
+				// One value rather than three arguments, and `None` at rest: everything a
+				// list does differently during a drag arrives together.
+				self.drag.is_some().then(|| ui::playlist::Dragging {
+					insertion: self.insertion(id),
+					edge: self
+						.autoscroll
+						.and_then(|(list, up)| (list == id).then_some(up)),
+				}),
 			)
 		};
 

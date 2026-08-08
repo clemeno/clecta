@@ -569,6 +569,27 @@ Every button is **dead rather than absent** when it cannot act, and dead for a s
 reason each time: nothing selected, already at the top, already at the bottom, no neighbour in
 that direction, nothing addable selected in the browser.
 
+### Playing a queued track now
+
+A **double click** on a queued row loads it into a player immediately, taking it out of the
+list as it goes. It is the third way a track leaves a queue, and the three agree: a drag onto
+a player, a double click, and the handover at the end of a track all *take* the row, because a
+queue is what is still to come and a track that has reached a player is no longer that.
+
+Which player is the only decision in it, and it is already made elsewhere: a **cue** plays on
+the player it sits under, because that is what a cue means. The **shared** list has no player
+of its own, so it uses `deck::idle_target` — the same "whichever is free" rule an unaimed OS
+drop uses (§10), and the same rule the automatic handover would have applied a minute later.
+
+Double click rather than a fifth button in the footer, for two reasons and neither is space:
+the files pane already loads on a double click (§9), so the gesture is the one the app has
+already taught; and a footer button would need the same five-way disabled logic as the rest,
+where a double click on an empty list is a double click on nothing.
+
+The press that opens a double click has already armed a drag (§10), and the row it is carrying
+is about to be removed — so the load **disarms it explicitly** rather than letting the release
+find a row that is no longer there.
+
 ### Dragging
 
 A drag can now start in the files pane **or in any list**, and land on a player **or between
@@ -611,6 +632,38 @@ row lands one place earlier than its index said. It is a function rather than tw
 call site precisely so that off-by-one has somewhere to be tested — including exhaustively,
 because a reorder that loses or duplicates a row is the one failure a queue cannot survive.
 
+### Scrolling while dragging
+
+A drag can only land on a row that is on screen, and a hand holding a mouse button cannot
+reach for a wheel. So resting the pointer on a list's **header scrolls it up** and on its
+**footer scrolls it down**, eight pixels every thirty milliseconds, for as long as the pointer
+stays there.
+
+The header and the footer *are* the edges — that is the whole trick, and it is what makes this
+cost no layout at all. The obvious design is two strips that appear when a drag begins, and it
+is wrong twice over: a strip that appears would push every row down the moment the drag
+started, which is the same feedback loop the reserved caret exists to avoid and worse, because
+it moves the rows before the user has aimed at anything; and a strip reserved for ever would
+spend twenty pixels of every list on something useful for a second at a time. The header and
+the footer are already exactly the top and bottom of the rows, and during a drag they have
+nothing else to do — the buttons on them cannot be pressed by a button that is already held.
+They are wrapped in their container *whether or not* a drag is in flight, so arming an edge
+changes its colour and nothing else.
+
+Arming follows the same rule as the drop target and for the same reason: entering one edge and
+leaving another arrive in an order nothing guarantees, so a leave clears only the edge it is
+actually about. And the release clears it **unconditionally**, because the edges are only
+`mouse_area`s while a drag is in flight: letting go *on* one destroys the widget that would
+have reported the pointer leaving it, and a list that kept scrolling after the drag ended would
+be a bug with no way out but another drag.
+
+The scroll itself is `operation::scroll_by` rather than an offset the app works out. iced
+clamps it against the pane's real bounds, which the app does not know — the panel's height is
+whatever is left after the players took theirs, and any number derived from `self.window` is a
+frame stale (§6). What the app *does* know is where the pane ended up, because a `scrollable`
+republishes its viewport on the next redraw whenever it has moved, `on_scroll` included. That
+is what keeps the virtualized rows following a scroll the pointer never asked for.
+
 ### Layout, and what a divider drag now grows
 
 The three lists are a second row *inside* the fixed-height players panel (§6), each under its
@@ -633,6 +686,34 @@ Stored as plain paths, and sanitized on the way in like every other field: a que
 has been deleted, renamed or unmounted is **dropped**, and so is one whose extension is not
 media. A queue is a promise about what plays next, and the worst possible moment to discover a
 broken row is when a track ends and the next one is due. One bad path does not empty the list.
+
+### How long the list runs for
+
+Each footer shows `4 · 18:22`, and the number is what a queue is *for*: a list of names says
+what is coming, a running time says whether it fits.
+
+Getting it needs the one thing a path does not carry. `audio::duration` asks the same question
+`load` answers — build the decoder, read `total_duration()` — of a file nobody has loaded.
+Building the decoder parses the container's header and stops; it is an open and a parse, not a
+decode, which is what makes this affordable for a whole queue where a waveform scan is seconds
+per file (§14a).
+
+It still touches the disk, so it obeys §4's rule without needing to be argued about: **if it
+blocks, it gets a thread.** One `off_thread` job for the whole batch rather than one per file
+— they are wanted together, and a restored queue would otherwise be dozens of threads — and
+the answers come back as one message.
+
+`Item::duration` is an `Option<Option<Duration>>`, and both layers earn their place. The outer
+one is *has anyone asked*, the inner one is *did the file answer*. Collapsing them would make
+the app re-open an unreadable file every time anything else was added, for ever. Measurements
+are applied **by path across all three lists**, not by index into one, because the lists can be
+edited while the lookup runs — and a queue may hold the same track twice, so one answer settles
+both rows.
+
+`Playlist::total` returns the sum **and whether it is the whole truth**, and the footer prints
+a `+` when it is not. A row still being measured and a row nothing can measure both leave the
+`+` on. The alternative is arithmetic that quietly counts a missing track as zero, and a number
+that exists to be planned against must not do that.
 
 ---
 
@@ -818,6 +899,17 @@ re-reading a folder should leave you where you were reading.
 
 Result, same measurement: **70.1 % → 9.3 %** against a 7.2 % baseline, and `view()` flat at
 0.5 ms for 500, 5 000 or 20 000 files. §16's framework question is no longer waiting on this.
+
+The three queues use the same arithmetic, from the same function — `visible_rows` moved to
+`ui/mod.rs` and took a **row pitch** as an argument when the second caller arrived. That
+parameter is the whole difference between the two: a queue reserves a two-pixel caret above
+every row (§7a), so its rows are 22 pixels apart where the files pane's are 24. A shared
+helper with a hard-coded constant would have been the same code being quietly wrong in one of
+its two homes, which is worse than two copies.
+
+A queue is normally tens of rows where a folder is thousands, so this buys nothing today. It
+is here because "normally" is not a bound and the arithmetic was already written and already
+tested — the honest reason to reuse something rather than the flattering one.
 
 ### The shown folder watches itself
 
@@ -1225,13 +1317,32 @@ otherwise pure; anything needing a device or a real folder is manual.
   `from` × `to` on a four-row list and asserts the *contents* are unchanged as a set: a
   reorder that loses or duplicates a track is the one failure a queue cannot survive, and
   twenty-five cases is cheaper to run than to reason about.
-- **`ui/browser.rs`** — `visible_rows(scroll, total)`, the virtualization's whole arithmetic
-  (§9). A range wrong by one row leaves a blank strip where a row should be; wrong by a lot
-  shows an empty pane over a full folder. So: a folder shorter than the cap is built whole,
-  scrolling moves the window by whole rows and a partly visible row counts as visible, the
-  end of a long list still fills the pane rather than running off it, and an impossible
-  offset — negative, `NaN`, infinite — still names real rows, which is the `as usize`
-  saturation this leans on being pinned rather than assumed.
+
+  The running time gets two more (§7a). One walks a list from nothing measured to fully
+  measured and checks the *flag* at every step, including the state that is easy to get wrong:
+  a row that has been measured and has no length keeps the `+` on for ever, because "asked and
+  answered nothing" is not "counted". The other queues the same track twice and confirms one
+  answer settles both rows and nothing else — which is the reason `measured` works by path
+  where everything above it works by index.
+- **`ui/mod.rs`** — `visible_rows(scroll, total, row_height, built)`, the virtualization's
+  whole arithmetic, shared by the files pane and the three queues (§9). A range wrong by one
+  row leaves a blank strip where a row should be; wrong by a lot shows an empty pane over a
+  full folder. So: a list shorter than the cap is built whole, scrolling moves the window by
+  whole rows and a partly visible row counts as visible, the end of a long list still fills
+  the pane rather than running off it, and an impossible offset — negative, `NaN`, infinite —
+  still names real rows, which is the `as usize` saturation this leans on being pinned rather
+  than assumed. One case exists only because the function is shared: the same offset names a
+  different row at a pitch of 22 than at 24, which is what a hard-coded constant in a shared
+  helper would have got quietly wrong.
+- **`ui/playlist.rs`** — `running_time`, which is the only thing in that file that is not
+  widgets: how many tracks, how long they run, and the `+` that says the total is a floor
+  rather than a figure. An empty list says *nothing at all* rather than `0 · 0:00`, because
+  three empty panels each announcing their emptiness is furniture.
+- **`audio.rs`** — a second test that needs no output device, beside the scan (§14a): a
+  generated three-second WAV is measured through `duration`, and a path that does not exist
+  answers `None` rather than failing. The queues' whole running time is built out of that one
+  answer, so a `None` from a perfectly readable file would leave every total with a `+` on it
+  and nothing to say why.
 - **`ui/waveform.rs`** — the other test under `ui/`, and the pair of them show the rule:
   everything else in that folder is composition, but these two files hold arithmetic and a
   *gesture*, and both have rules. `scrub(event, over, scrubbing)` is pure, so all three are
@@ -1673,6 +1784,8 @@ not to make the widget cleverer.
 
 | Q18 | Whether a deferred ceiling is really where the note says it is | **Measure before believing your own `ponytail:` note.** Two of them claimed a local disk and a music-sized folder made the cost irrelevant. Measured: a 5 000-file folder cost **70 % of a core** at the playing tick and **25 ms** of frozen executor to read. Both notes were written by the same hand that wrote the code they excused, which is why neither had a number in it | §4, §9 |
 | Q19 | `widget::lazy` or hand-rolled virtualization | **Hand-rolled, skipping the upgrade order §9 had written down.** `lazy` caches building, and building was only a third of the cost — iced lays out the whole tree every frame whether the elements were cached or not. It also wanted a dependency and a version counter that is silently wrong the day someone forgets to bump it. Hand-rolled wanted one `f32`, and it needed the row height to be *pinned* rather than measured, which is the same answer Q16 reached from the other end | §9 |
+| Q20 | Where a queue's scroll edges live, for a drag that has to reach an off-screen row | **The header and the footer *are* the edges.** Two strips that appeared with the drag would push every row down as it began — the caret's feedback loop, arriving before the user has aimed at anything — and two reserved for ever would spend twenty pixels of every list on something useful for a second at a time. The header and footer are already the top and bottom of the rows, and a button that is already held cannot press the buttons on them | §7a |
+| Q21 | Whether the app can work out where a queue is scrolled to | **No, and it does not have to.** The pane's height is whatever the players left over, and any number derived from `self.window` is a frame stale (Q16). So the scroll is `scroll_by`, which iced clamps against the real bounds, and the app learns the result rather than deciding it: a `scrollable` republishes its viewport on the next redraw whenever it has moved. That is also what keeps the virtualized rows following a scroll no pointer asked for | §7a, §9 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
@@ -1686,7 +1799,7 @@ size were the easy part.
 Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
 the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
 one use of the window's height that was enough to keep the defect alive. Both were settled
-the same way, by looking at a running window. That is now four of the nineteen (Q7, Q10,
+the same way, by looking at a running window. That is now four of the twenty-one (Q7, Q10,
 Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
 and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
 

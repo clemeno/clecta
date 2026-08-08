@@ -13,7 +13,40 @@ pub mod playlist;
 pub mod tree;
 pub mod waveform;
 
+use std::ops::Range;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// How many rows a scrolling list builds per frame, however long it is (PLAN §9).
+///
+/// A window is clamped to 4096 points tall (`settings.rs`), so no pane can show more than
+/// 171 rows of the files pane's 24 pixels or 187 of a queue's 22; 200 covers both with room
+/// to spare for a scroll offset that is a frame stale. A fixed count rather than a measured
+/// pane height is what keeps this to *one* number of state — and the margin is nearly free,
+/// since the whole point is that 200 rows cost the same whether the list holds 300 or 30 000.
+pub const ROWS_BUILT: usize = 200;
+
+/// Which rows are worth building, for a list scrolled this far down (PLAN §9).
+///
+/// The rest of the list is two blank blocks of exactly the right height, so the scrollbar is
+/// the size it would have been and every row is where it would have been. `row_height` is the
+/// pitch from one row to the next, which is not always the row itself: a queue reserves an
+/// insertion caret above each of its rows, and the pair moves as one.
+///
+/// Shared by the files pane and the three queues, because a range that is wrong by one row
+/// leaves a blank strip where a row should be and being wrong in two places is worse than
+/// being wrong in one.
+pub fn visible_rows(scroll: f32, total: usize, row_height: f32, built: usize) -> Range<usize> {
+	// The last window that still fills the pane. Clamping to it means a scroll offset left
+	// over from a longer listing shows the *end* of the new one rather than a blank pane,
+	// which is exactly what the `scrollable` itself does when its content shrinks.
+	let last = total.saturating_sub(built);
+
+	// `as usize` saturates rather than wrapping: a negative offset lands on 0, and so does a
+	// `NaN`. Worth relying on here, because this number indexes a list.
+	let start = ((scroll / row_height) as usize).min(last);
+
+	start..(start + built).min(total)
+}
 
 /// Shorten a string to fit, cutting the middle rather than the end.
 ///
@@ -136,6 +169,82 @@ pub fn format_transport(position: Duration, duration: Option<Duration>) -> Strin
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The files pane's row pitch, which is what these cases are written in. The queues use
+	/// 22 and the arithmetic does not care, which is the point of the parameter.
+	const ROW: f32 = 24.0;
+
+	#[test]
+	fn a_short_list_is_built_whole() {
+		// Arrange / Act / Assert: the ordinary case — fewer rows than the cap, so nothing is
+		// virtualized at all and the pane behaves exactly as it did before.
+		let rows = |scroll, total| visible_rows(scroll, total, ROW, ROWS_BUILT);
+
+		assert_eq!(rows(0.0, 0), 0..0, "an empty folder");
+		assert_eq!(rows(0.0, 40), 0..40, "a music folder");
+		assert_eq!(rows(0.0, ROWS_BUILT), 0..ROWS_BUILT, "exactly the cap");
+	}
+
+	#[test]
+	fn scrolling_moves_the_window_by_whole_rows() {
+		// Arrange: a list long enough that the window can move freely inside it.
+		let total = 5_000;
+		let rows = |scroll| visible_rows(scroll, total, ROW, ROWS_BUILT);
+
+		// Act / Assert: the row under the top edge is the first one built, and it is built
+		// even when only its bottom pixel shows — a partly visible row is a visible row.
+		assert_eq!(rows(0.0).start, 0);
+		assert_eq!(rows(ROW - 1.0).start, 0, "part way");
+		assert_eq!(rows(ROW).start, 1, "exactly one down");
+		assert_eq!(rows(100.0 * ROW).start, 100);
+
+		// And the count is the cap wherever it sits.
+		for row in [0, 1, 100, 4_000] {
+			assert_eq!(rows(row as f32 * ROW).len(), ROWS_BUILT, "at row {row}");
+		}
+	}
+
+	#[test]
+	fn a_shorter_row_pitch_moves_the_window_sooner() {
+		// Arrange / Act / Assert: a queue's rows are 22 pixels apart, not 24, and the same
+		// offset therefore names a different row. The one thing the parameter buys, and the
+		// one thing a shared helper could get wrong by using the wrong constant.
+		assert_eq!(visible_rows(22.0, 5_000, 22.0, ROWS_BUILT).start, 1);
+		assert_eq!(visible_rows(22.0, 5_000, 24.0, ROWS_BUILT).start, 0);
+	}
+
+	#[test]
+	fn the_end_of_a_list_still_fills_the_pane() {
+		// Arrange: scrolled to the very bottom, and then past it — which is what a stale
+		// offset from a longer listing looks like.
+		let total = 5_000;
+
+		// Act / Assert: the window stops at the last full pane instead of running off the
+		// end, so the bottom of a list is never a blank pane.
+		let bottom = visible_rows(total as f32 * ROW, total, ROW, ROWS_BUILT);
+		assert_eq!(bottom, (total - ROWS_BUILT)..total, "scrolled to the end");
+
+		let past = visible_rows(1_000_000.0, total, ROW, ROWS_BUILT);
+		assert_eq!(past, bottom, "an offset left over from a longer list");
+	}
+
+	#[test]
+	fn an_impossible_offset_still_names_real_rows() {
+		// Arrange / Act / Assert: `as usize` saturates rather than wrapping, which is what
+		// this leans on — a negative or a `NaN` offset must land on the top of the list and
+		// not on an index that would panic the `skip`/`take` below it.
+		for scroll in [-1.0, -1_000_000.0, f32::NAN, f32::NEG_INFINITY] {
+			let range = visible_rows(scroll, 5_000, ROW, ROWS_BUILT);
+			assert_eq!(range.start, 0, "scroll {scroll}");
+		}
+
+		// The other end: an infinite offset is just a very stale one.
+		assert_eq!(
+			visible_rows(f32::INFINITY, 300, ROW, ROWS_BUILT),
+			100..300,
+			"an infinite offset"
+		);
+	}
 
 	#[test]
 	fn eliding_keeps_both_ends_of_a_name() {
