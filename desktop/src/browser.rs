@@ -111,6 +111,13 @@ pub struct Browser {
 	/// (PLAN §9).
 	pub show_hidden: bool,
 	pub error: Option<String>,
+	/// How far the pane is scrolled, in pixels, as the `scrollable` last reported it.
+	///
+	/// Not a preference and not persisted: it is here because the *view* needs it to decide
+	/// which rows are worth building at all (PLAN §9). Reset when a new folder is chosen,
+	/// and deliberately **not** reset by a refresh — re-reading a folder should leave you
+	/// where you were reading.
+	pub scroll: f32,
 }
 
 impl Browser {

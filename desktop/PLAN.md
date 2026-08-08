@@ -169,21 +169,23 @@ Three places code runs. Only two of them are ours.
 - **The tick only runs while something plays.** `Subscription::none()` when both players
   are stopped or paused, otherwise `time::every(50ms)`. A UI that redraws 20×/s while
   idle is a laptop-battery bug, and iced makes the fix one `if`.
-- **Directory reads go on the executor. Waveform scans do not.** `read_dir` on a cold
-  network mount can take seconds, so it goes through `Task::perform`, and the pane shows
-  its previous contents until the new listing lands (cmote's "never flash empty" rule, §18
-  there). A scan is much longer and gets a **thread of its own**, because iced's smol
-  executor is *one thread* by default — blocking it stops every subscription in the app,
-  the playhead tick included. §14a has the measurement.
+- **Nothing that blocks goes on the executor. Not one thing.** Every blocking job — both
+  directory reads and the waveform scan — goes through one `off_thread(job, delivered)`
+  helper: a `std::thread` for the work, a `oneshot` for the executor to wait on. iced's smol
+  executor is *one thread* by default, so blocking it stops every subscription in the app,
+  the playhead tick included. §14a has the measurement that found this.
 
-  `ponytail:` the directory reads are left on the executor, and now that the blast radius
-  is known that is a *measured* bet rather than an assumed one: a local `read_dir` is
-  milliseconds, so it costs at most one dropped frame. The bet loses on a cold network
-  mount, where §9 already admits `read_dir` can take seconds — and seconds on that thread
-  now means a frozen clock, not a late listing. The fix is the one `scan_peaks` already
-  uses, applied to `list_files` and `list_folders`; it is not applied today because no
-  network mount has been measured, and guessing is what produced this bug in the first
-  place.
+  The reads were the last holdout, and the note that kept them there said the bet was a
+  measured one: a local `read_dir` is milliseconds. It was measured properly in the end and
+  it is not — **25 ms for 5 000 files, 95 ms for 20 000**, which is half a tick and two
+  ticks, on a *local* disk. The network mount the old note was waiting for never had to be
+  found; the local case was already over budget. Applying the pattern the scan already used
+  cost fewer lines than the note explaining why it had not been applied, which is usually
+  the sign that a deferral has gone stale.
+
+  The pane still shows its previous contents until a new listing lands — cmote's "never
+  flash empty" rule (§18 there) is about *what is drawn*, and is untouched by where the
+  reading happens.
 
 ---
 
@@ -598,13 +600,65 @@ does, which files are offered) unit-testable with no filesystem.
   case-insensitively, natural-numeric so `track2` precedes `track10`.
 - **Choosing a folder**: click it in the tree, or the **Open folder…** button (`rfd`).
   Both funnel through one `select_folder(path)`.
-- `ponytail:` **no list virtualization, and iced has none to offer** (§16). A
-  `scrollable` builds every row on every `view()`, so a 5 000-entry folder builds 5 000
-  widgets per frame — and at the 20 Hz playing tick (§4) that is 100 000 widgets a second
-  for rows nobody can see. A music folder is normally tens to hundreds of files, so this
-  is a real ceiling in the right place. Upgrade paths in order of cost: `widget::lazy` to
-  cache the built rows between changes; then hand-rolled virtualization (measure the
-  scrollable, build only the visible slice); then §16's framework question.
+- **Virtualization, hand-rolled** — the ceiling this file used to carry a `ponytail:` note
+  about, now measured and lifted. See the subsection below.
+
+### Only the visible rows are built
+
+This started as a `ponytail:` note: a `scrollable` builds every row on every `view()`, so a
+5 000-entry folder builds 5 000 widgets per frame, and at the 20 Hz playing tick (§4) that
+is 100 000 widgets a second for rows nobody can see. The note said a music folder is tens to
+hundreds of files, so the ceiling was in the right place. **Then it was measured, and it was
+not.**
+
+A release build, forced to redraw at the playing tick, on a folder of 5 000 files:
+
+| | 50 files | 5 000 files |
+|---|---|---|
+| whole process, at 20 Hz | 7.3 % of a core | **70.1 %** |
+| `view()` alone, per frame | 0.13 ms | **16.7 ms** |
+
+Sixty per cent of a core to draw a hundred rows and skip four thousand nine hundred. A
+20 000-file folder spent **77 ms** per frame in `view()` alone, against a 50 ms frame budget.
+
+The note's own upgrade order was `widget::lazy` first, then hand-rolled. That order was
+**skipped, on the numbers**. `lazy` caches the built element between changes, so it would
+have removed the 16.7 ms of *building* — but the process cost 63 % over baseline and building
+is only 33 % of it. The rest is iced laying out five thousand rows every frame, which `lazy`
+does not touch, because `UserInterface::build` lays out the whole tree each frame whether the
+elements were cached or not. It would also have cost a dependency (`ouroboros`, and a
+licence line in `deny.toml`) and a version counter to hash cheaply — state that is silently
+wrong the day someone forgets to bump it. Hand-rolled costs one `f32`.
+
+So: **`browser.scroll` is the only new state, and one number of it.** The view builds a
+fixed `ROWS_BUILT = 200` rows starting at the row under the top edge, and puts the rest
+above and below as two `Space`s of exactly the height they would have taken. The scrollbar
+is therefore the size it would have been, and every row is where it would have been.
+
+Three things make that honest rather than approximate:
+
+- **The row height is pinned, not measured.** `container(...).height(ROW_HEIGHT)` with the
+  contents centred. Virtualization has to know where a row *would* be without laying it out,
+  and iced offers no way to ask a widget how tall it turned out (§6 met the same wall from
+  the other side). Choosing the number instead of measuring it makes the arithmetic exact by
+  construction rather than exact if the font co-operates.
+- **A fixed count, not the pane's measured height.** A window is clamped to 4096 points
+  (`settings.rs`), so a pane can never show more than 171 rows of 24; 200 covers that with
+  room for a scroll offset that is a frame stale. Measuring the pane would mean tracking a
+  second number, and being wrong about it on the first frame — before any scroll event has
+  ever arrived — which is exactly when the pane must not be blank.
+- **The window stops at the last full pane.** `visible_rows` clamps its start to
+  `total - ROWS_BUILT`, so an offset left over from a longer listing shows the *end* of the
+  new one rather than nothing, which is what the `scrollable` itself does when its content
+  shrinks under it.
+
+Choosing a folder resets both halves — the field *and* the widget, via a `scroll_to`
+operation, because the `scrollable` keeps its own offset and would otherwise open the new
+folder scrolled to wherever the old one was left. A **refresh** deliberately resets neither:
+re-reading a folder should leave you where you were reading.
+
+Result, same measurement: **70.1 % → 9.3 %** against a 7.2 % baseline, and `view()` flat at
+0.5 ms for 500, 5 000 or 20 000 files. §16's framework question is no longer waiting on this.
 
 ---
 
@@ -919,9 +973,17 @@ otherwise pure; anything needing a device or a real folder is manual.
   immediately**: it caught that `f32::clamp` passes a `NaN` through unchanged, so the
   first version's clamp was decoration and a mis-measured strip would have panicked
   `Duration::mul_f32` on the click (§14b).
-- **`ui/waveform.rs`** — the only test under `ui/`, and the exception that shows the rule:
-  everything else in that folder is composition, but this file holds a *gesture*, and a
-  gesture has rules. `scrub(event, over, scrubbing)` is pure, so all three are checked
+- **`ui/browser.rs`** — `visible_rows(scroll, total)`, the virtualization's whole arithmetic
+  (§9). A range wrong by one row leaves a blank strip where a row should be; wrong by a lot
+  shows an empty pane over a full folder. So: a folder shorter than the cap is built whole,
+  scrolling moves the window by whole rows and a partly visible row counts as visible, the
+  end of a long list still fills the pane rather than running off it, and an impossible
+  offset — negative, `NaN`, infinite — still names real rows, which is the `as usize`
+  saturation this leans on being pinned rather than assumed.
+- **`ui/waveform.rs`** — the other test under `ui/`, and the pair of them show the rule:
+  everything else in that folder is composition, but these two files hold arithmetic and a
+  *gesture*, and both have rules. `scrub(event, over, scrubbing)` is pure, so all three are
+  checked
   without a window — a press arms only over the strip, a move seeks only while the button is
   held (and follows it *outside* the strip, which is what lets a drag run past either end),
   a release disarms wherever it happens, and the events that pass through in quantity — the
@@ -1139,6 +1201,12 @@ as the scan that spawned it.
 The general lesson is not "smol is bad" — it is that **`Task::perform` is for `await`, not
 for work.** Anything that occupies a CPU belongs on a thread, and an async runtime with one
 worker turns "this is a bit slow" into "the app is frozen".
+
+That lesson was applied by halves at first: the scan moved, and the two directory reads
+stayed behind under a `ponytail:` note betting they were short enough. They were not — 25 ms
+for a 5 000-file folder, 95 ms for 20 000 — so the pattern is now a shared `off_thread` in
+`app.rs` and all three jobs use it. The rule is easier to keep than the bet was: **if it
+blocks, it gets a thread**, and there is no per-call judgement left to get wrong.
 
 ### Saying that a scan is running
 
@@ -1363,6 +1431,9 @@ not to make the widget cleverer.
 | Q16 | Which widget holds that height | **Not `pane_grid` — a plain column and a 6 px hand-written divider.** Converting pixels to `pane_grid`'s ratio was arithmetically exact and visibly wrong: iced redraws at the new window size a frame *before* the resize message reaches `update`, so the panel scaled and snapped back on every frame of a live drag. A literal height cannot be stale. Partially reverses Q5, which still stands for the tree | §6 |
 | Q17 | Who compacts a panel too tall for its window | **iced does.** Keeping the window's height for the compaction ceiling alone was still enough to wobble, because the ceiling binds exactly when the edge is being dragged. `Limits::height` clamps a `Fixed` to the room the layout actually has, measured on the frame that uses it, so the app hands over a literal and reads the window's height nowhere in `view`. The price is that a window shorter than the panel takes it out of the browser rather than the players | §6 |
 
+| Q18 | Whether a deferred ceiling is really where the note says it is | **Measure before believing your own `ponytail:` note.** Two of them claimed a local disk and a music-sized folder made the cost irrelevant. Measured: a 5 000-file folder cost **70 % of a core** at the playing tick and **25 ms** of frozen executor to read. Both notes were written by the same hand that wrote the code they excused, which is why neither had a number in it | §4, §9 |
+| Q19 | `widget::lazy` or hand-rolled virtualization | **Hand-rolled, skipping the upgrade order §9 had written down.** `lazy` caches building, and building was only a third of the cost — iced lays out the whole tree every frame whether the elements were cached or not. It also wanted a dependency and a version counter that is silently wrong the day someone forgets to bump it. Hand-rolled wanted one `f32`, and it needed the row height to be *pinned* rather than measured, which is the same answer Q16 reached from the other end | §9 |
+
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
 lives in `app.rs` and `ui/browser.rs`, and the reasoning is in §6 and §9. **Q7 is the one
@@ -1375,9 +1446,16 @@ size were the easy part.
 Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
 the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
 one use of the window's height that was enough to keep the defect alive. Both were settled
-the same way, by looking at a running window. That is now four of the seventeen (Q7, Q10,
+the same way, by looking at a running window. That is now four of the nineteen (Q7, Q10,
 Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
 and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
+
+**Q18 is a fifth kind of wrong, and the most uncomfortable one.** Q7, Q16 and Q17 were
+mistakes; Q18 was a pair of *excuses*, written in the file, in the voice of someone who had
+thought about it. Both said the ceiling was in the right place and neither carried a number.
+Measuring took twenty minutes and moved one of them by a factor of thirty. The rule that
+falls out is narrow enough to be useful: a `ponytail:` note that names a cost is a promise to
+measure it, and the note is only honest once it quotes what the measurement said.
 
 ---
 

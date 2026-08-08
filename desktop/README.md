@@ -61,6 +61,13 @@ cargo build --release --target x86_64-apple-darwin
   tree away and brings it back at the width it had. **Refresh** re-reads the folder, and so
   do **F5** and **⌘R** — both, because F5 is the refresh key on Windows and is swallowed by
   a Mac laptop's own function keys, while ⌘R is what a Mac reaches for (PLAN §6, §9, §14).
+- **A folder of any size costs the same.** Only the rows on screen are built, so a
+  20 000-file folder draws for what a 200-file one does. It was worth doing rather than
+  assumed to be: 5 000 files cost **70 % of a core** at the playing tick before, and **9 %**
+  after. Choosing a folder opens it at the top; a refresh leaves you where you were reading.
+  The reading itself now happens on a thread of its own, like the waveform scan — 5 000
+  files take 25 ms to list and 20 000 take 95 ms, and on the executor that is a frozen
+  playhead rather than a late listing (PLAN §4, §9).
 - **The players keep their height.** Drag the divider under them and that panel stays that
   tall whatever the window does — resizing the window moves the bottom of the *file list* and
   nothing else, since the players' rows are all fixed-size and would only gain empty space.
@@ -96,8 +103,6 @@ cargo build --release --target x86_64-apple-darwin
   in clecta's own code. The upgrade path is upstream, and PLAN §10 spells it out.
 - **No video picture** — the audio track of an `.mp4` / `.mkv` plays, and that is v1
   (PLAN §14). No cue points, no tempo.
-- **No list virtualization.** A folder of five thousand files builds five thousand
-  widgets per frame. Fine for a music folder; the upgrade path is in PLAN §9.
 
 ## Checks
 
@@ -140,11 +145,12 @@ cargo build --release
 | `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height; plus which key means refresh — F5 and ⌘R yes, a bare `r` no |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
 | `ui/waveform.rs` | the scrub's three rules: a press arms only over the strip, a move seeks only while the button is held and follows it outside the strip too, a release disarms wherever it happens |
+| `ui/browser.rs` | which rows the pane builds: a short folder built whole, the window moving by whole rows as it scrolls, the end of a long list still filling the pane, and a negative or `NaN` scroll offset still naming real rows |
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Seven things the suite cannot reach, all of which need a window a person can look at. **Five
-of the seven pass on macOS, by hand**; the last two are new and unchecked. The last two
+Eight things the suite cannot reach, all of which need a window a person can look at. **Five
+of the eight pass on macOS, by hand**; the last three are new and unchecked. The last two
 rounds are why the list exists: three of the app's defects so far were found here and none
 of them by a passing test.
 
@@ -173,6 +179,12 @@ of them by a passing test.
   release still arrives when the button comes up outside the window, and that a seek per
   pointer move does not make a playing track stutter — the one `ponytail:` note this feature
   left behind (PLAN §14b).
+- **A long folder, scrolled.** *Not checked yet.* The arithmetic is tested and the CPU is
+  measured, but neither can see the pane: that the scrollbar is the length the folder
+  deserves, that rows do not jump or blank out while the wheel turns, that the row under the
+  pointer is the row that gets selected, and that choosing a folder opens it at the top while
+  a refresh does not move. `/tmp/clecta-bench-5000`-style folders are made with a one-line
+  Python loop (PLAN §9).
 - **Dragging the divider, and then the window edge.** This is the one that failed, twice.
   The height had been measured with a probe widget and was exact every time, and the panel
   still *wobbled* as the window's bottom edge moved: iced lays out at the new window size a

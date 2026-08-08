@@ -13,7 +13,10 @@ use iced::futures::channel::oneshot;
 use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::pane_grid::Axis;
-use iced::widget::{Space, button, column, container, mouse_area, pane_grid, row, text};
+use iced::widget::scrollable::AbsoluteOffset;
+use iced::widget::{
+	Space, button, column, container, mouse_area, operation, pane_grid, row, scrollable, text,
+};
 use iced::{Element, Fill, Size, Subscription, Task, Theme, event, keyboard, mouse, time, window};
 
 use crate::audio::{self, Engine};
@@ -129,6 +132,9 @@ pub enum Message {
 	OpenFolderPressed,
 	/// Re-read the folder currently shown, from the button or from the refresh key.
 	RefreshPressed,
+	/// The files pane was scrolled. Not a preference — the view needs it to know which rows
+	/// are worth building (PLAN §9).
+	Scrolled(scrollable::Viewport),
 	/// A disclosure arrow in the tree.
 	FolderToggled(PathBuf),
 	/// The tree's fold button.
@@ -419,6 +425,10 @@ impl Clecta {
 					return list_files(folder);
 				}
 			}
+
+			// No `dirty`: where the pane is scrolled to is not something a restart should
+			// restore, and marking it would write `settings.json` every time a wheel turned.
+			Message::Scrolled(viewport) => self.browser.scroll = viewport.absolute_offset().y,
 
 			Message::FolderToggled(path) => {
 				let needed = self.tree.toggle(&path);
@@ -782,11 +792,20 @@ impl Clecta {
 		// flight and the stale-listing guard above has something to compare against.
 		self.browser.folder = Some(folder.clone());
 		self.browser.selected = None;
+		// A new folder is read from the top. Both halves are needed and neither is enough:
+		// the field is what `view` builds rows from, and the `scroll_to` is what moves the
+		// `scrollable` itself, which otherwise keeps the offset it had and would show the
+		// new listing scrolled to wherever the old one was left. A *refresh* deliberately
+		// does neither (PLAN §9).
+		self.browser.scroll = 0.0;
 		// Set here rather than at the two call sites, so a third one cannot forget. `boot`
 		// clears it again, because restoring the last folder is not a change.
 		self.dirty = true;
 
-		let mut tasks = vec![list_files(folder.clone())];
+		let mut tasks = vec![
+			operation::scroll_to(ui::browser::scroll_id(), AbsoluteOffset { x: 0.0, y: 0.0 }),
+			list_files(folder.clone()),
+		];
 		tasks.extend(self.tree.reveal(&folder).into_iter().map(list_folders));
 		Task::batch(tasks)
 	}
@@ -1081,67 +1100,93 @@ fn gestures() -> Subscription<Message> {
 	})
 }
 
-/// List one folder's files, off the GUI thread (PLAN §4).
+/// Run one blocking job on a thread of its own, and hand the executor a `oneshot` to wait
+/// on — the one thing an executor is actually good at (PLAN §4).
 ///
-/// `ponytail:` the blocking `read_dir` runs inside the async block, so it occupies an
-/// executor thread rather than a dedicated blocking pool. One directory read is short
-/// enough for that; a recursive walk would not be, and there is not one.
+/// This exists because iced's smol executor runs on **one** thread unless `SMOL_THREADS`
+/// says otherwise, so anything blocking inside a `Task::perform` async block does not merely
+/// queue the next job: it stops every subscription in the app, the 20 Hz playhead tick
+/// included. That was found the hard way by the waveform scan, and measuring the directory
+/// reads afterwards said they were the same bug with a smaller number — a folder of 5 000
+/// files takes 25 ms to read and one of 20 000 takes 95 ms, which is half a tick and two
+/// ticks. A network mount has no upper bound at all.
+///
+/// `None` means the thread ended without answering, which it can only do by panicking. Each
+/// caller says what that means in its own words rather than swallowing it, because a pane
+/// that never fills in with nothing in the status bar is worse than a slow one.
+fn off_thread<T, M>(
+	job: impl FnOnce() -> T + Send + 'static,
+	delivered: impl Fn(Option<T>) -> M + Send + 'static,
+) -> Task<M>
+where
+	T: Send + 'static,
+	M: Send + 'static,
+{
+	let (sender, receiver) = oneshot::channel();
+
+	std::thread::spawn(move || {
+		// The receiver is gone if the app quit mid-job, and there is nothing to do about
+		// that but let this thread end.
+		let _ = sender.send(job());
+	});
+
+	Task::perform(receiver, move |result| delivered(result.ok()))
+}
+
+/// List one folder's files, off both the GUI thread and the executor's (PLAN §4, §9).
 fn list_files(folder: PathBuf) -> Task<Message> {
-	Task::perform(
-		async move {
-			let result = fsio::list_files(&folder);
-			(folder, result)
+	let read = folder.clone();
+
+	off_thread(
+		move || fsio::list_files(&read),
+		move |result| {
+			let result = result
+				.unwrap_or_else(|| Err("the folder listing stopped unexpectedly".to_string()));
+			Message::FilesListed(folder.clone(), result)
 		},
-		|(folder, result)| Message::FilesListed(folder, result),
 	)
 }
 
 /// The same, for the tree's subfolders.
 fn list_folders(folder: PathBuf) -> Task<Message> {
-	Task::perform(
-		async move {
-			let result = fsio::list_folders(&folder);
-			(folder, result)
+	let read = folder.clone();
+
+	off_thread(
+		move || fsio::list_folders(&read),
+		move |result| {
+			let result = result
+				.unwrap_or_else(|| Err("the folder listing stopped unexpectedly".to_string()));
+			Message::FoldersListed(folder.clone(), result)
 		},
-		|(folder, result)| Message::FoldersListed(folder, result),
 	)
 }
 
 /// Scan a track's waveform on a thread of its own (PLAN §4, §14a).
 ///
-/// **Not** the pattern the two directory reads above use, and the difference is the whole
-/// point. iced's smol executor runs on **one** thread unless `SMOL_THREADS` says otherwise,
-/// so a scan sitting inside an async block did not merely queue the next directory listing
-/// — it stopped every subscription in the app, the 20 Hz playhead tick included. Measured
-/// both ways from the moment a scan starts: **641 ms with no tick at all**, then a dozen
+/// This is the job that found the rule `off_thread` now keeps for everything. Measured both
+/// ways from the moment a scan starts: **641 ms with no tick at all**, then a dozen
 /// delivered in the same millisecond, against a steady **49–51 ms** once the decode moved
 /// off the executor. Pressing Play during a scan gave audio and a frozen clock, which is
 /// how this was found.
 ///
-/// So the decode gets a real thread and the executor gets a `oneshot` to await, which is
-/// the one thing it is good at. Two threads at most, one per player, each living exactly as
-/// long as the scan it was spawned for.
+/// Two threads at most, one per player, each living exactly as long as the scan it was
+/// spawned for.
 ///
 /// The error is flattened to a `String` here because a `Message` has to be `Clone` and an
 /// `anyhow::Error` is not — the same reason `fsio` returns one (PLAN §9).
 fn scan_peaks(id: DeckId, path: PathBuf) -> Task<Message> {
-	let (sender, receiver) = oneshot::channel();
 	let scanned = path.clone();
 
-	std::thread::spawn(move || {
-		// The receiver is gone if the app quit mid-scan, and there is nothing to do about
-		// that but let this thread end.
-		let _ = sender.send(audio::peaks(&scanned).map_err(|error| format!("{error:#}")));
-	});
-
-	Task::perform(receiver, move |delivered| {
-		// `Err` means the thread ended without answering, which it can only do by panicking.
-		// Reported rather than swallowed: a strip that stays flat for ever with no line in
-		// the status bar is the one outcome worse than a slow scan.
-		let result =
-			delivered.unwrap_or_else(|_| Err("the waveform scan stopped unexpectedly".to_string()));
-		Message::PeaksScanned(id, path, result)
-	})
+	off_thread(
+		move || audio::peaks(&scanned).map_err(|error| format!("{error:#}")),
+		move |result| {
+			// Reported rather than swallowed: a strip that stays flat for ever with no line
+			// in the status bar is the one outcome worse than a slow scan.
+			let result =
+				result.unwrap_or_else(|| Err("the waveform scan stopped unexpectedly".to_string()));
+			Message::PeaksScanned(id, path.clone(), result)
+		},
+	)
 }
 
 /// The two testable things in this module: what a divider drag is allowed to store
