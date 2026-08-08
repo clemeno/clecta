@@ -56,7 +56,9 @@ cargo build --release --target x86_64-apple-darwin
   splitter. Click a folder name in the tree to show it, the arrow to open it. Click a
   file row to select it, **double-click** a media row to load it into whichever player is
   idle, or use **→ Player 1 / → Player 2**. **◧ hide tree** in the status bar folds the
-  tree away and brings it back at the width it had (PLAN §6, §9).
+  tree away and brings it back at the width it had. **Refresh** re-reads the folder, and so
+  do **F5** and **⌘R** — both, because F5 is the refresh key on Windows and is swallowed by
+  a Mac laptop's own function keys, while ⌘R is what a Mac reaches for (PLAN §6, §9, §14).
 - **The players keep their height.** Drag the divider under them and that panel stays that
   tall whatever the window does — resizing the window moves the bottom of the *file list* and
   nothing else, since the players' rows are all fixed-size and would only gain empty space.
@@ -136,13 +138,13 @@ cargo build --release
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
-| `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height |
+| `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height; plus which key means refresh — F5 and ⌘R yes, a bare `r` no |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Five things the suite cannot reach, all of which need a window a person can look at. **All
-five now pass on macOS, by hand** — and the last two rounds are why the list exists: three
+Six things the suite cannot reach, all of which need a window a person can look at. **Five
+of the six pass on macOS, by hand**, and the last two rounds are why the list exists: three
 of the app's defects so far were found here and none of them by a passing test.
 
 - **The close-button save.** ⌘Q *was* the open question here, and the answer was that it
@@ -173,6 +175,11 @@ of the app's defects so far were found here and none of them by a passing test.
   decides when to compact — which binds precisely when the edge is being dragged, so the
   wobble survived it. The height is now a literal that never consults the window at all, and
   iced does the compacting (PLAN §6).
+- **The refresh key.** *Not checked yet.* Which key is refresh is a tested branch; whether
+  the OS hands that key to the app is not, and it is exactly the doubt that made this two
+  keys — F5 on a Mac laptop is the keyboard-brightness key unless the function-key
+  preference is flipped, so ⌘R may be the only one of the pair that works here, and F5 the
+  only one that matters on Windows (PLAN §14).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.

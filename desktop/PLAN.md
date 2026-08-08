@@ -919,15 +919,20 @@ otherwise pure; anything needing a device or a real folder is manual.
   immediately**: it caught that `f32::clamp` passes a `NaN` through unchanged, so the
   first version's clamp was decoration and a mis-measured strip would have panicked
   `Duration::mul_f32` on the click (§14b).
-- **`app.rs`** — what a *divider drag* is allowed to store (§6), and nothing else, because
-  nothing else here is arithmetic any more: the players' height reaches the widget as a
-  literal and iced does the compacting. So the tests cover the one calculation left. That a
+- **`app.rs`** — what a *divider drag* is allowed to store (§6), and which key means
+  refresh (§14). Nothing else here is arithmetic any more: the players' height reaches the
+  widget as a literal and iced does the compacting. So the tests cover the one calculation
+  left, and the one branch that came after it. That a
   drag inside the bounds is stored untouched — `assert_eq!`, not a tolerance, or the panel
   would creep a pixel every time it was grabbed; that a drag far below the window still
   leaves the browser `MIN_PANE`, at every window height from 400 to 2000, which is what
   keeps the divider on screen and grabbable; that a drag above the window's top reads as the
   floor rather than as a panel of nothing; and that an impossible window — zero, shorter than
-  its own chrome, or `NaN` — stores a finite height instead of a `NaN`.
+  its own chrome, or `NaN` — stores a finite height instead of a `NaN`. The refresh key
+  gets a table: **F5** with and without modifiers, **⌘R**, and the near-misses that must
+  *not* fire — a bare `r` above all, since a plain letter that re-listed the folder would
+  go off on any stray key press. The table is written in `Modifiers::COMMAND` rather than
+  in `LOGO` or `CTRL`, so the same test asserts Cmd on macOS and Ctrl on Windows.
 - **`audio.rs`** — one test, and the only one this module can have: everything else here
   needs an output device. A *scan* does not, so the decode path is checked for real, from a
   file on disk to the array the widget draws. The fixture is generated rather than
@@ -1036,7 +1041,18 @@ path, so `/ponytail-debt` can harvest them later.
 - **A queue / playlist per player.** rodio's `Player` is already a queue; v1 just never
   appends more than one source.
 - **File watching.** `notify` so the pane updates when a folder changes underneath it.
-  v1 has a Refresh button and F5, which is what cmote learned to ship first.
+  v1 has a Refresh button and a refresh key, which is what cmote learned to ship first.
+  The key is **two** keys, and that is the whole decision: F5 is *the* refresh key on
+  Windows, and on a Mac laptop it is a system key the app is never sent unless the
+  function-key preference is flipped, so F5 alone would have shipped a shortcut that does
+  not exist on the machine it is developed on. ⌘R is what a Mac reaches for and means
+  nothing on Windows. One arm covers both, because `Modifiers::command()` is already Cmd
+  on macOS and Ctrl everywhere else — the `cfg` is inside iced, not in clecta.
+  `event::listen_with` rather than a widget, for the same reason the drop gestures use it:
+  a key press belongs to the window, not to anything that has focus. It is always on and
+  costs nothing at rest, unlike the divider's pointer listener — a key press is rare where
+  a cursor move is constant, and this one publishes no message at all unless the key was
+  the refresh key.
 - **Recursive / multi-file drops**, and drag-*out* to the desktop (iced cannot originate
   an OS drag at all — cmote §29 there).
 - **Positional OS drops** — blocked upstream in winit, not in clecta (§10). If winit ever

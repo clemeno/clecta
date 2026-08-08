@@ -10,9 +10,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::futures::channel::oneshot;
+use iced::keyboard::key::Named;
+use iced::keyboard::{Key, Modifiers};
 use iced::widget::pane_grid::Axis;
 use iced::widget::{Space, button, column, container, mouse_area, pane_grid, row, text};
-use iced::{Element, Fill, Size, Subscription, Task, Theme, event, mouse, time, window};
+use iced::{Element, Fill, Size, Subscription, Task, Theme, event, keyboard, mouse, time, window};
 
 use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
@@ -125,7 +127,7 @@ pub enum Message {
 	FolderSelected(PathBuf),
 	/// The **Open folder…** button.
 	OpenFolderPressed,
-	/// Re-read the folder currently shown.
+	/// Re-read the folder currently shown, from the button or from the refresh key.
 	RefreshPressed,
 	/// A disclosure arrow in the tree.
 	FolderToggled(PathBuf),
@@ -357,6 +359,7 @@ impl Clecta {
 			autosave,
 			sweep,
 			divider,
+			refresh_key(),
 			window::resize_events().map(|(_, size)| Message::WindowResized(size)),
 			window::close_requests().map(|_| Message::CloseRequested),
 			gestures(),
@@ -1023,6 +1026,39 @@ fn divider_drag() -> Subscription<Message> {
 	})
 }
 
+/// The keyboard, for the one shortcut the app has (PLAN §14).
+///
+/// Always on, unlike `divider_drag`: a key press is rare where a cursor move is constant,
+/// and this one publishes nothing at all unless the key was the refresh key.
+fn refresh_key() -> Subscription<Message> {
+	event::listen_with(|event, _status, _window| match event {
+		iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+			if is_refresh(&key, modifiers) =>
+		{
+			Some(Message::RefreshPressed)
+		}
+		_ => None,
+	})
+}
+
+/// Whether a key press means "list this folder again".
+///
+/// Two keys, because neither of them travels: **F5** is *the* refresh key on Windows, and
+/// on a Mac laptop it is a system key the app is never sent unless the function-key
+/// preference is flipped; **⌘R** is what a Mac reaches for and means nothing on Windows.
+/// One arm covers both, since `Modifiers::command` is already Cmd on macOS and Ctrl
+/// everywhere else.
+///
+/// Split out from the subscription because a `Key` can be built in a test and a real key
+/// press cannot.
+fn is_refresh(key: &Key, modifiers: Modifiers) -> bool {
+	match key.as_ref() {
+		Key::Named(Named::F5) => true,
+		Key::Character("r") => modifiers.command(),
+		_ => false,
+	}
+}
+
 /// The two drop gestures, both of which need raw events rather than a widget (PLAN §10).
 ///
 /// The status is ignored on purpose. A left release over a button is *captured*, and
@@ -1108,10 +1144,11 @@ fn scan_peaks(id: DeckId, path: PathBuf) -> Task<Message> {
 	})
 }
 
-/// The only testable thing in this module: what a divider drag is allowed to store
-/// (PLAN §6). The *layout* is no longer arithmetic at all — the height goes to the widget
-/// as a literal — so there is nothing left there for a test to have an opinion about, which
-/// is the point of the rewrite rather than a gap in it.
+/// The two testable things in this module: what a divider drag is allowed to store
+/// (PLAN §6), and which key means refresh (PLAN §14). The *layout* is no longer arithmetic
+/// at all — the height goes to the widget as a literal — so there is nothing left there for
+/// a test to have an opinion about, which is the point of the rewrite rather than a gap in
+/// it.
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1164,6 +1201,31 @@ mod tests {
 			assert!(
 				stored.is_finite() && stored >= MIN_PANE,
 				"window {window} stored a height of {stored}"
+			);
+		}
+	}
+
+	#[test]
+	fn the_refresh_key_is_f5_or_the_platform_command_and_r() {
+		// Arrange: the two keys that must work, and the near-misses that must not — an
+		// unmodified `r` above all, since a bare letter that re-listed the folder would fire
+		// on any stray key press.
+		let command = Modifiers::COMMAND;
+		let cases = [
+			(Key::Named(Named::F5), Modifiers::empty(), true),
+			(Key::Named(Named::F5), command, true),
+			(Key::Character("r".into()), command, true),
+			(Key::Character("r".into()), Modifiers::empty(), false),
+			(Key::Character("t".into()), command, false),
+			(Key::Named(Named::F4), Modifiers::empty(), false),
+		];
+
+		// Act / Assert
+		for (key, modifiers, expected) in cases {
+			assert_eq!(
+				is_refresh(&key, modifiers),
+				expected,
+				"{key:?} with {modifiers:?}"
 			);
 		}
 	}
