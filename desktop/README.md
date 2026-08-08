@@ -279,6 +279,10 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   that a cue switched off still lets **Next up** feed that player, that **Auto-play** starts
   the handed-over track and *only* the handed-over one — a double-clicked row still lands
   stopped — and that **Auto-play** greys out the moment **Auto-load** is unticked (PLAN §7a).
+
+  And the end of the *last* track, which is the same minute again: a track that runs out with
+  nothing queued behind it must still be playable, because rodio consumes the source it
+  finishes and the app has to put the file back before **Play** means anything (PLAN §7).
 - **Playing a queued row on demand.** *Not checked yet.* That a double click on a cue row
   loads it into the player it sits under and on a **Next up** row into whichever player is
   free; that the row leaves the list either way; and that the press which opened the double

@@ -461,6 +461,14 @@ here is written twice yet, so nothing is abstracted.
   loaded track to show an error.
 - **End of track** is `player.empty()` going true on the tick — transition to `Stopped`.
   There is no callback for this; polling is the mechanism (§4).
+- **A finished track has to be put back.** `empty()` means rodio has *consumed* the source,
+  not that it is sitting at the end of it: `play()` afterwards is silence, and `try_seek`
+  has nothing to rewind. Measured — after the last sample, `empty()` is `true` and a bare
+  `play()` leaves it `true` with the playhead frozen at the end. So `Stopped` after a track
+  ends is only half true until the app re-appends the file, which it does on the same tick,
+  before the handover (§7a) has a chance to replace it. Without that, a track that ends with
+  nothing queued behind it leaves a player that looks ready at 0:00 and cannot be started —
+  which is exactly how the bug showed up.
 - **The playhead is `get_pos()`**, read on the same tick. It is the *decoder's* position,
   which leads the speaker by the device buffer. Measured in the spike: a seek to `30s`
   read back as `30.155s` immediately after. Irrelevant for a readout; it would matter for

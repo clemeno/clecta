@@ -1034,6 +1034,24 @@ impl Clecta {
 			if engine.finished(id) {
 				// There is no end-of-track callback in rodio; `empty()` going true on the
 				// tick is the signal (PLAN §7).
+				//
+				// `empty()` also means the source has been *consumed*: rodio has dropped it
+				// and there is nothing left in the player to start. The app is about to show
+				// that track stopped at 0:00 with a live Play button, so the file has to go
+				// back in, or that button is a lie — `play()` on an empty player is silence
+				// (PLAN §7).
+				//
+				// `ponytail:` this re-opens the file even when the handover below replaces it
+				// a moment later, which costs one header parse and one `clear()` per track.
+				// Cheap, and it is the one place where the model and rodio can disagree —
+				// worth splitting only if a handover ever feels like it hitches.
+				if let Some(track) = &self.decks[id.index()].track {
+					let path = track.path.clone();
+					if let Err(error) = engine.load(id, &path) {
+						self.notice = format!("{}: {error:#}", id.label());
+					}
+				}
+
 				let deck = &mut self.decks[id.index()];
 				deck.transport = deck::transition(deck.transport, deck::Event::Ended);
 				deck.position = Duration::ZERO;
