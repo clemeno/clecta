@@ -688,8 +688,11 @@ impl Clecta {
 					.filter(|entry| entry.kind.is_media())
 				{
 					let item = playlist::Item::new(entry.path.clone());
-					let queue = &mut self.queues[id.index()];
+					if !self.admits(&item, None) {
+						return Task::none();
+					}
 
+					let queue = &mut self.queues[id.index()];
 					if prepend {
 						queue.prepend(item);
 					} else {
@@ -716,10 +719,15 @@ impl Clecta {
 
 			Message::QueueShift(id, right) => {
 				// Both halves or neither: a track taken out of one list and not put into
-				// another is a track the user just lost.
+				// another is a track the user just lost. Which is also why the row is *looked
+				// at* before it is taken — a warning the user cancels must leave it where it
+				// was, and putting it back afterwards would have to rebuild the selection too.
 				if let Some(target) = id.neighbour(right)
-					&& let Some(item) = self.queues[id.index()].take_selected()
+					&& let Some(index) = self.queues[id.index()].selected()
+					&& let Some(item) = self.queues[id.index()].selected_item().cloned()
+					&& self.admits(&item, Some((id, index)))
 				{
+					self.queues[id.index()].take_selected();
 					self.queues[target.index()].append(item);
 					return self.queued();
 				}
@@ -995,6 +1003,38 @@ impl Clecta {
 		Task::batch([self.queued(), self.load(id, item.path)])
 	}
 
+	/// May this track go into a queue — asking first if it is already in one (PLAN §7a).
+	///
+	/// `true` when it is not queued anywhere, which is the ordinary case and costs a scan of
+	/// three short lists. Otherwise the app **asks**, because queueing a track twice is
+	/// sometimes exactly what someone means and sometimes a mistake, and nothing in the app
+	/// can tell those apart. A silent refusal would be the app deciding; a silent accept is
+	/// what left the mistake possible.
+	///
+	/// `moving` is the row on its way out of a list, so a cross-list move does not warn about
+	/// the track colliding with itself — see `playlist::already_queued`.
+	///
+	/// `ponytail:` a native modal, which blocks the GUI thread while it is open — the playhead
+	/// stops with it, exactly as it does for the **Load…** dialog. That is what a modal *is*,
+	/// and the alternative is an in-app confirmation bar with its own state and its own two
+	/// messages. Worth building the day this needs to say more than yes or no.
+	fn admits(&self, item: &playlist::Item, moving: Option<(ListId, usize)>) -> bool {
+		let Some(list) = playlist::already_queued(&self.queues, &item.path, moving) else {
+			return true;
+		};
+
+		rfd::MessageDialog::new()
+			.set_level(rfd::MessageLevel::Warning)
+			.set_title("Already queued")
+			.set_description(format!(
+				"{} is already in {}.\n\nQueue it again?",
+				item.name,
+				list.label()
+			))
+			.set_buttons(rfd::MessageButtons::OkCancel)
+			.show() == rfd::MessageDialogResult::Ok
+	}
+
 	/// A queue changed: the settings file is out of date, and something in it may not have
 	/// been measured yet. One place, so the editing arms, `advance` and a drop cannot each
 	/// remember half of it.
@@ -1054,6 +1094,14 @@ impl Clecta {
 	/// need the caret index adjusting for the hole the row left behind, which is what
 	/// `relocate` exists to get right — so it is called rather than reimplemented here.
 	fn drop_into(&mut self, list: ListId, index: usize, drag: Drag) {
+		// A reorder is the one drop that cannot produce a duplicate: the row is already
+		// somewhere in this list and is only moving inside it. Asked before anything is
+		// touched, because a cancelled drop must leave every list exactly as it was.
+		let reorder = matches!(drag.from, Some((source, _)) if source == list);
+		if !reorder && !self.admits(&drag.item, drag.from) {
+			return;
+		}
+
 		match drag.from {
 			Some((source, from)) if source == list => {
 				self.queues[list.index()].relocate(from, index);

@@ -125,6 +125,12 @@ impl Playlist {
 		self.selected
 	}
 
+	/// The selected row itself, for a caller that has to look at a track before deciding
+	/// whether to move it.
+	pub fn selected_item(&self) -> Option<&Item> {
+		self.items.get(self.selected?)
+	}
+
 	/// How long everything in the list is, and whether that is the whole truth.
 	///
 	/// `false` means at least one row has no length — still being measured, or a file the
@@ -286,6 +292,33 @@ impl Playlist {
 /// **Own cue first, the shared list second.** A track deliberately cued to Player 1 outranks
 /// the pool, which is what makes the pool "whatever is free" rather than a third queue with
 /// rules of its own. `None` when both are empty, and the player simply stops.
+/// Where this track is already queued, if it is, so the app can ask before queueing it twice
+/// (PLAN §7a).
+///
+/// **All three lists, not just the one being added to.** The mistake worth catching is a track
+/// that plays twice in an evening, and Cue 1 and Cue 2 each holding it does that exactly as
+/// surely as one list holding it twice — the duplicate is in the *set*, not in a list.
+///
+/// `moving` is the row that is on its way out of a list, and it is the reason this takes a
+/// parameter at all: dragging a row from one list to another, or sending it with `←` / `→`,
+/// finds the row in its old home and would warn about the track colliding with itself.
+///
+/// Searched in draw order, so the list named is the leftmost one — an arbitrary rule, but a
+/// stable one, and the message names a list rather than counting them.
+pub fn already_queued(
+	queues: &[Playlist; 3],
+	path: &Path,
+	moving: Option<(ListId, usize)>,
+) -> Option<ListId> {
+	ListId::ALL.into_iter().find(|list| {
+		queues[list.index()]
+			.items
+			.iter()
+			.enumerate()
+			.any(|(index, item)| item.path == path && moving != Some((*list, index)))
+	})
+}
+
 pub fn next_source(id: DeckId, cue: &Playlist, common: &Playlist) -> Option<ListId> {
 	if !cue.is_empty() {
 		Some(ListId::Cue(id))
@@ -617,6 +650,60 @@ mod tests {
 			list.unmeasured().count(),
 			0,
 			"nothing is still waiting to be measured"
+		);
+	}
+
+	#[test]
+	fn a_track_is_found_wherever_it_is_already_queued() {
+		// Arrange: one track in Cue 2 and nowhere else, in the app's own `[Playlist; 3]`
+		// order — Cue 1, Next up, Cue 2.
+		let queues = [
+			list(&["a.mp3"]),
+			Playlist::default(),
+			list(&["b.mp3", "c.mp3"]),
+		];
+		let path = |name: &str| PathBuf::from("/m").join(name);
+
+		// Act / Assert: found in the list it is actually in, not merely in the one being
+		// added to — a track in both cues plays twice, which is the mistake worth catching.
+		assert_eq!(
+			already_queued(&queues, &path("c.mp3"), None),
+			Some(ListId::Cue(DeckId::Two))
+		);
+		assert_eq!(
+			already_queued(&queues, &path("a.mp3"), None),
+			Some(ListId::Cue(DeckId::One))
+		);
+		assert_eq!(
+			already_queued(&queues, &path("new.mp3"), None),
+			None,
+			"a track nothing holds"
+		);
+	}
+
+	#[test]
+	fn a_row_on_its_way_out_is_not_its_own_duplicate() {
+		// Arrange: the row being dragged from Cue 1 into Next up. Without the exception it
+		// would find itself in Cue 1 and warn about colliding with itself, which would make
+		// every single cross-list move ask a question with one honest answer.
+		let queues = [list(&["a.mp3", "b.mp3"]), Playlist::default(), list(&[])];
+		let moving = Some((ListId::Cue(DeckId::One), 1));
+
+		// Act / Assert
+		assert_eq!(
+			already_queued(&queues, &PathBuf::from("/m/b.mp3"), moving),
+			None
+		);
+
+		// The exception is the *row*, not the track: a second copy elsewhere still counts.
+		let queues = [
+			list(&["a.mp3", "b.mp3"]),
+			list(&["b.mp3"]),
+			Playlist::default(),
+		];
+		assert_eq!(
+			already_queued(&queues, &PathBuf::from("/m/b.mp3"), moving),
+			Some(ListId::Common)
 		);
 	}
 

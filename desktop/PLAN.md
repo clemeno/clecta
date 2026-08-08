@@ -569,6 +569,41 @@ Every button is **dead rather than absent** when it cannot act, and dead for a s
 reason each time: nothing selected, already at the top, already at the bottom, no neighbour in
 that direction, nothing addable selected in the browser.
 
+### Queueing a track that is already queued
+
+Adding a track that is already in a list **asks**, with a native OK / Cancel dialog naming
+where it already is. Not a refusal: playing something twice in a set is a thing people do, and
+so is adding it twice by accident, and nothing in the app can tell those apart. A silent
+refusal would be the app deciding on the user's behalf; the silent accept it replaces is what
+left the mistake possible in the first place. Asking is the only honest option, and it costs
+one click in the case that was already deliberate.
+
+**All three lists are searched, not just the one being added to.** The mistake worth catching
+is a track that plays twice in an evening, and Cue 1 and Cue 2 each holding it does that
+exactly as surely as one list holding it twice — the duplicate is in the *set*, not in a list.
+That is also why the message names where it already is rather than only saying that it is.
+
+Four ways in are checked and two are not, and the two say what the rule is: `⤒` / `⤓`, a drop
+from the files pane, a drop from another list, and `← →` all put a track somewhere it was not.
+A **reorder** inside one list and a **drag onto a player** cannot produce a duplicate, so
+neither asks.
+
+Two details are load-bearing:
+
+- **A row on its way out is not its own duplicate.** A cross-list move — dragged, or sent with
+  `← →` — finds the row in the list it is leaving. `already_queued` takes the row being moved
+  and skips it, or every single cross-list move would ask a question with one honest answer.
+  The exception is the *row*, not the track: a second copy somewhere else still counts.
+- **Nothing is touched before the answer.** `← →` used to take the row out and then append it;
+  it now looks at the selected row, asks, and only then takes it, because a cancelled warning
+  has to leave the list exactly as it was — and putting a row back afterwards would mean
+  rebuilding the selection that came out with it.
+
+`ponytail:` a native modal blocks the GUI thread while it is open, so the playhead stops with
+it — exactly as it does for the **Load…** dialog (§10), and exactly what a modal *is*. An
+in-app confirmation bar would cost its own state and its own two messages, and is worth
+building the day this has to say more than yes or no.
+
 ### Playing a queued track now
 
 A **double click** on a queued row loads it into a player immediately, taking it out of the
@@ -1324,6 +1359,14 @@ otherwise pure; anything needing a device or a real folder is manual.
   answered nothing" is not "counted". The other queues the same track twice and confirms one
   answer settles both rows and nothing else — which is the reason `measured` works by path
   where everything above it works by index.
+
+  `already_queued` gets two more, and the second is the one that matters (§7a). The first is
+  the ordinary search: a track is found in whichever of the three lists actually holds it, not
+  merely in the one being added to, and a track nothing holds is found nowhere. The second is
+  the exception — a row on its way out of a list must not warn about colliding with *itself*,
+  or every cross-list move would ask a question with one honest answer — and it also pins that
+  the exception is the **row** and not the track, by leaving a second copy elsewhere in place
+  and checking it is still found.
 - **`ui/mod.rs`** — `visible_rows(scroll, total, row_height, built)`, the virtualization's
   whole arithmetic, shared by the files pane and the three queues (§9). A range wrong by one
   row leaves a blank strip where a row should be; wrong by a lot shows an empty pane over a
@@ -1786,6 +1829,7 @@ not to make the widget cleverer.
 | Q19 | `widget::lazy` or hand-rolled virtualization | **Hand-rolled, skipping the upgrade order §9 had written down.** `lazy` caches building, and building was only a third of the cost — iced lays out the whole tree every frame whether the elements were cached or not. It also wanted a dependency and a version counter that is silently wrong the day someone forgets to bump it. Hand-rolled wanted one `f32`, and it needed the row height to be *pinned* rather than measured, which is the same answer Q16 reached from the other end | §9 |
 | Q20 | Where a queue's scroll edges live, for a drag that has to reach an off-screen row | **The header and the footer *are* the edges.** Two strips that appeared with the drag would push every row down as it began — the caret's feedback loop, arriving before the user has aimed at anything — and two reserved for ever would spend twenty pixels of every list on something useful for a second at a time. The header and footer are already the top and bottom of the rows, and a button that is already held cannot press the buttons on them | §7a |
 | Q21 | Whether the app can work out where a queue is scrolled to | **No, and it does not have to.** The pane's height is whatever the players left over, and any number derived from `self.window` is a frame stale (Q16). So the scroll is `scroll_by`, which iced clamps against the real bounds, and the app learns the result rather than deciding it: a `scrollable` republishes its viewport on the next redraw whenever it has moved. That is also what keeps the virtualized rows following a scroll no pointer asked for | §7a, §9 |
+| Q22 | What to do about a track being queued twice | **Ask, across all three lists, with a native modal.** Refusing would be the app deciding something it cannot know — playing a track twice in a set is deliberate as often as it is a slip. The scope is the *set* rather than the destination list, because Cue 1 and Cue 2 each holding a track plays it twice just as surely as one list holding it twice. The modal is `rfd`, which the app already carries for **Load…**, against an in-app confirmation bar with its own state and two messages: the same trade §10 made, and reversible the day the question needs more than two answers | §7a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
@@ -1799,7 +1843,7 @@ size were the easy part.
 Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
 the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
 one use of the window's height that was enough to keep the defect alive. Both were settled
-the same way, by looking at a running window. That is now four of the twenty-one (Q7, Q10,
+the same way, by looking at a running window. That is now four of the twenty-two (Q7, Q10,
 Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
 and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
 

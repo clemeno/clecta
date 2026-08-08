@@ -58,8 +58,11 @@ cargo build --release --target x86_64-apple-darwin
   the shared list to whichever player is free — and the row leaves the list, exactly as it
   would have when its turn came. Each footer shows how many tracks and **how long they run
   for**, with a `+` while something in the list is still being measured or has no length the
-  decoder can give. All three lists survive a restart, and a queued file that has been deleted
-  or renamed since is dropped rather than left to fail at the moment it is due (PLAN §7a).
+  decoder can give. Queueing a track that is **already in one of the three lists** asks first,
+  naming where it is — playing something twice is deliberate as often as it is a slip, so the
+  app asks rather than deciding. All three lists survive a restart, and a queued file that has
+  been deleted or renamed since is dropped rather than left to fail at the moment it is due
+  (PLAN §7a).
 - **Drag anything anywhere.** Drag a file from the browser into a list, drag a row up or down
   inside its list, drag it across to another list, or drag it straight onto a player to play
   it now — jumping the queue, and leaving the list as it goes. A **green caret** shows the
@@ -171,13 +174,13 @@ cargo build --release
 | `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height; plus which key means refresh — F5 and ⌘R yes, a bare `r` no |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
 | `ui/waveform.rs` | the scrub's three rules: a press arms only over the strip, a move seeks only while the button is held and follows it outside the strip too, a release disarms wherever it happens |
-| `playlist.rs` | what every queue edit does to the selection — an insert above it carries it down, a remove above it pulls it up, removing the selected row lands on what slid into its place, a shift takes the highlight with the track — plus the arrows reaching a neighbour and only a neighbour, the next track coming from a player's own cue before the shared list, a drag within a list landing where the caret was (both directions, past the last row, the two carets that touch the row itself, and every from × to keeping the contents unchanged), and the running time: a measured row with no length keeps the total's `+` for ever, and one answer settles every row holding that track |
+| `playlist.rs` | what every queue edit does to the selection — an insert above it carries it down, a remove above it pulls it up, removing the selected row lands on what slid into its place, a shift takes the highlight with the track — plus the arrows reaching a neighbour and only a neighbour, the next track coming from a player's own cue before the shared list, a drag within a list landing where the caret was (both directions, past the last row, the two carets that touch the row itself, and every from × to keeping the contents unchanged), the running time (a measured row with no length keeps the total's `+` for ever, and one answer settles every row holding that track), and the duplicate search: a track found in whichever list actually holds it rather than only the one being added to, and a row on its way out of a list not counting as its own duplicate |
 | `ui/playlist.rs` | the footer's count and running time, and an empty list saying nothing at all rather than `0 · 0:00` |
 | `audio.rs` | the two things here that need no audio device — one scan of a real file (a generated WAV, silent for a second then loud for a second), and one measurement of another, plus a missing file answering "no length" rather than failing |
 | `ui/mod.rs` | which rows a pane builds: a short list built whole, the window moving by whole rows as it scrolls, the end of a long list still filling the pane, a negative or `NaN` offset still naming real rows, and the same offset naming a different row at the queues' 22-pixel pitch than at the files pane's 24 — plus eliding, sizes, the calendar (including a leap day), the clock |
 
-Twelve things the suite cannot reach, all of which need a window a person can look at.
-**Five of the twelve pass on macOS, by hand**; the last seven are new and unchecked. The last
+Thirteen things the suite cannot reach, all of which need a window a person can look at.
+**Five of the thirteen pass on macOS, by hand**; the last eight are new and unchecked. The last
 two rounds are why the list exists: three of the app's defects so far were found here and none
 of them by a passing test.
 
@@ -251,6 +254,12 @@ of them by a passing test.
   free; that the row leaves the list either way; and that the press which opened the double
   click has not left a drag armed behind it — the release lands after the row is gone
   (PLAN §7a).
+- **The duplicate warning.** *Not checked yet*, and it is the search that is tested rather
+  than the dialog: that the box actually appears on all four ways in — **⤒ ⤓**, a drop from
+  the files pane, a drop from another list, **← →** — that **Cancel** leaves every list
+  exactly as it was, that a plain reorder and a drag onto a player never ask, and the one
+  worth watching for, that a modal opened on a mouse *release* mid-drop leaves nothing armed
+  behind it (PLAN §7a).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.
