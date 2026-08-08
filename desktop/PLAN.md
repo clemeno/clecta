@@ -24,9 +24,10 @@ both drop gestures, `bundle-macos.sh` (§11) and the CI workflow with its supply
 quit, and the window ceiling in `settings.rs` was **above what wgpu can render**, so a
 hand-edited file crashed the app at launch. Both are fixed, and §11 records what each
 cost. On top of that sits the **waveform** (§14a), which is where the plan promised the
-app would need its own `Widget`. What is left is the **manual smoke test** (§12), which
-needs a window a person can click; everything on that list reachable without one has
-been checked. §15 is the log.
+app would need its own `Widget`. The **manual smoke test** (§12) is now clean on macOS,
+including the three things no automation here can reach. What is left before a v0.1 tag is
+**one run on Windows**, which is the shipped target that has never been executed: CI
+type-checks it every push, and type-checking is not running. §15 is the log.
 
 ---
 
@@ -791,7 +792,9 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   resize it, and the app writes `2005×1227` along with the faders and the curve **while
   still running**; killing rather than closing it proves only the throttle can have
   written that. Asking for 15000×15000 instead is how the wgpu ceiling in §11 was found.
-  What is left needing a person is the close *button* path and the drop gestures.
+  The close *button* path and the drop gestures needed a person, and a person has now run
+  them on macOS: the button writes, the ring lights one player and never both, a drag let
+  go over nothing disarms, and a release over a button does not leave it armed.
   **The waveform came off this list the way ⌘Q did — by failing.** Its numbers were checked
   three ways before anyone looked: the unit tests above, the generated-WAV decode, and a
   scratch build that auto-loaded a file with a known envelope and printed what the running
@@ -801,7 +804,15 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   `screencapture` from a script returns a black frame, the same permission wall as the
   scripted-click attempt above, so there was no way to close that gap without a person.
   Two attempts is what it cost, and it is the second time on this list that the thing the
-  automation could not reach is the thing that was broken.
+  automation could not reach is the thing that was broken. It is also the shape of the whole
+  list: everything a script could check was right, and both defects that shipped were in the
+  part only an eye could see.
+
+  **Every macOS item on this list now passes.** What no macOS run can say anything about is
+  **Windows** — the first-class target of §1, type-checked by CI on every push and never
+  once executed. Three sites exist only for it: the `windows_subsystem` attribute in
+  `main.rs`, `paths::per_user()`, and the drive-letter walk in `fsio::roots()`. A compiler
+  that accepts them is not a machine that has run them.
 
 **CI** mirrors cmote's `.github/workflows/ci.yml` — four jobs: `rustfmt` on Linux,
 clippy + test on Windows natively, clippy against **`x86_64-apple-darwin`** plus a native

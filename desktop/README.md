@@ -127,15 +127,16 @@ real folder is manual (PLAN §12):
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Three things the suite cannot reach, all of which need a window a person can look at:
+Three things the suite cannot reach, all of which need a window a person can look at.
+**All three now pass on macOS, by hand:**
 
 - **The close-button save.** ⌘Q *was* the open question here, and the answer was that it
   never reaches the app at all — so the settings are now written on a two-second throttle
   as well, which is what a kill, a crash or a ⌘Q relies on (PLAN §11). Both halves of the
   portability check are confirmed on macOS without a click: a bare binary and a bundled
   `Clecta.app` each create `clecta-data/` beside themselves with nothing in `~/Library`,
-  and a run started with an oversized window writes the resized value while still
-  running. What is unverified is the close *button* specifically.
+  and a run started with an oversized window writes the resized value while still running.
+  The close *button* is confirmed with one.
 - **The drop gestures themselves.** The policy and the targeting are pure and tested; the
   pointer bookkeeping around them — the ring lighting on one player, the drag disarming
   when it is let go over nothing, a release over a button not leaving it armed — is
@@ -145,3 +146,6 @@ Three things the suite cannot reach, all of which need a window a person can loo
   because the bars were painted thirteen levels of grey away from the panel behind them.
   Numbers cannot catch that; screen capture from a script is blocked by the same permission
   wall as scripted clicking, so it takes an eye (PLAN §14a).
+
+None of that says anything about **Windows**, which is the shipped target no one has ever
+run. CI type-checks it on every push, and type-checking is not running.
