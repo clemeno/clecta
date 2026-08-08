@@ -738,6 +738,22 @@ blocks, it gets a thread.** One `off_thread` job for the whole batch rather than
 — they are wanted together, and a restored queue would otherwise be dozens of threads — and
 the answers come back as one message.
 
+**Nothing is asked about twice**, and the reason that needs saying is the timing: a row counts
+as unmeasured until its answer *lands*, which is long after the job that will produce it
+started. So a second edit arriving a few milliseconds later would find every file the first
+job is holding still looking unmeasured and send them all off again — twenty quick edits would
+open the first file twenty times, an O(n²) that nothing in the code looks like. `measuring` is
+what a job takes with it on the way out and gives back on the way in, and `to_measure`
+subtracts it. One invariant makes the giving-back safe: **the arm is handed exactly the batch
+that was asked about**, whatever happened to the job, so a path cannot be stranded in the set
+and leave a file nothing will ever look at again.
+
+A job can only fail to answer by panicking, and its batch is then recorded as
+measured-and-no-length rather than left alone. That is the safer of the two wrongs: forgetting
+it strands the files, and re-queueing them retries a panic that is probably deterministic —
+on every edit, for the rest of the run. The footer already has a way of saying what this looks
+like, which is that the running time keeps its `+`.
+
 `Item::duration` is an `Option<Option<Duration>>`, and both layers earn their place. The outer
 one is *has anyone asked*, the inner one is *did the file answer*. Collapsing them would make
 the app re-open an unreadable file every time anything else was added, for ever. Measurements
@@ -1367,6 +1383,13 @@ otherwise pure; anything needing a device or a real folder is manual.
   or every cross-list move would ask a question with one honest answer — and it also pins that
   the exception is the **row** and not the track, by leaving a second copy elsewhere in place
   and checking it is still found.
+
+  `to_measure` gets two, and they are the two halves of "ask about each file once": that a
+  track sitting in two lists produces one entry rather than two, and that a file already being
+  looked up produces none — the subtraction that turns a burst of edits from an O(n²) pile of
+  duplicate reads into one read per file. The second checks that a row *measured and answered
+  nothing* is never asked about again either, which is the other thing the two-layer
+  `Option<Option<Duration>>` is for.
 - **`ui/mod.rs`** — `visible_rows(scroll, total, row_height, built)`, the virtualization's
   whole arithmetic, shared by the files pane and the three queues (§9). A range wrong by one
   row leaves a blank strip where a row should be; wrong by a lot shows an empty pane over a

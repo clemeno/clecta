@@ -7,6 +7,7 @@
 //! it**: a row that stays highlighted while a different track slides beneath it is worse
 //! than no highlight at all.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -292,6 +293,31 @@ impl Playlist {
 /// **Own cue first, the shared list second.** A track deliberately cued to Player 1 outranks
 /// the pool, which is what makes the pool "whatever is free" rather than a third queue with
 /// rules of its own. `None` when both are empty, and the player simply stops.
+/// Which tracks still need their length looked up, given what is already being looked up
+/// (PLAN §7a).
+///
+/// `in_flight` is the whole point. A row counts as unmeasured until its answer *lands*, and
+/// the answer lands long after the job that will produce it started — so without this, two
+/// edits in quick succession would send the same file to be opened and parsed twice, and
+/// twenty would send it twenty times. Subtracting what is already on its way makes each file
+/// asked about exactly once.
+///
+/// Deduplicated across the three lists as well, because the same track may sit in two of them
+/// and one answer settles both rows. Returned in draw order, which is arbitrary but stable.
+pub fn to_measure(queues: &[Playlist; 3], in_flight: &HashSet<PathBuf>) -> Vec<PathBuf> {
+	let mut wanted: Vec<PathBuf> = Vec::new();
+
+	for path in queues.iter().flat_map(Playlist::unmeasured) {
+		// A `Vec` for the batch, against the `HashSet` for what is in flight: this one is
+		// built once per edit and is tens of entries, and the linear scan keeps the order.
+		if !in_flight.contains(path) && !wanted.iter().any(|seen| seen == path) {
+			wanted.push(path.to_path_buf());
+		}
+	}
+
+	wanted
+}
+
 /// Where this track is already queued, if it is, so the app can ask before queueing it twice
 /// (PLAN §7a).
 ///
@@ -651,6 +677,50 @@ mod tests {
 			0,
 			"nothing is still waiting to be measured"
 		);
+	}
+
+	#[test]
+	fn nothing_is_sent_to_be_measured_twice() {
+		// Arrange: the same track in two lists, plus one of its own, and nothing measured.
+		let queues = [
+			list(&["a.mp3", "b.mp3"]),
+			list(&["a.mp3"]),
+			Playlist::default(),
+		];
+		let path = |name: &str| PathBuf::from("/m").join(name);
+
+		// Act / Assert: one entry per *file*, not per row — one answer settles every row
+		// holding it, so asking twice would be opening the file twice for one number.
+		assert_eq!(
+			to_measure(&queues, &HashSet::new()),
+			vec![path("a.mp3"), path("b.mp3")]
+		);
+
+		// Act / Assert: and nothing already on its way. This is the whole reason the set
+		// exists: a row stays unmeasured until its answer lands, so a second edit arriving
+		// mid-flight would otherwise send the same file off to be parsed all over again.
+		let in_flight = HashSet::from([path("a.mp3")]);
+		assert_eq!(to_measure(&queues, &in_flight), vec![path("b.mp3")]);
+
+		let both = HashSet::from([path("a.mp3"), path("b.mp3")]);
+		assert!(
+			to_measure(&queues, &both).is_empty(),
+			"everything is already being measured"
+		);
+	}
+
+	#[test]
+	fn a_measured_track_is_never_asked_about_again() {
+		// Arrange: one row answered, one answered with *nothing* — a stream, or a file that
+		// would not open.
+		let mut queue = list(&["a.mp3", "b.mp3"]);
+		queue.measured(&PathBuf::from("/m/a.mp3"), Some(Duration::from_secs(10)));
+		queue.measured(&PathBuf::from("/m/b.mp3"), None);
+		let queues = [queue, Playlist::default(), Playlist::default()];
+
+		// Act / Assert: neither is asked about again, which is what stops the app re-opening
+		// an unreadable file on every edit for the rest of the run.
+		assert!(to_measure(&queues, &HashSet::new()).is_empty());
 	}
 
 	#[test]

@@ -6,6 +6,7 @@
 //! three sections are arranged. That is deliberate — an `update` that is only ever a
 //! dispatch table stays readable as the app grows.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -338,6 +339,10 @@ pub struct Clecta {
 	/// The list whose edge a drag is resting on, and which way it is scrolling. `None` at
 	/// rest, which is what gates the timer that does the scrolling.
 	autoscroll: Option<(ListId, bool)>,
+	/// The tracks whose length is being looked up right now. A row stays *unmeasured* until
+	/// its answer lands, so without this a second edit arriving mid-lookup would send the same
+	/// file off to be opened and parsed all over again (PLAN §7a).
+	measuring: HashSet<PathBuf>,
 	/// The scanning animation's step counter. A plain integer rather than a timestamp, so
 	/// nothing in `view` has to read the clock — the phase is whatever the last `Sweep`
 	/// left behind.
@@ -395,6 +400,7 @@ impl Clecta {
 			],
 			queue_scroll: [0.0; 3],
 			autoscroll: None,
+			measuring: HashSet::new(),
 			sweep: 0,
 		};
 		app.apply_gains();
@@ -668,8 +674,13 @@ impl Clecta {
 			Message::Measured(lengths) => {
 				// Applied to all three lists, because a track can be moved between them while
 				// the lengths are being looked up — and by path, so one answer settles every
-				// row holding that file.
+				// row holding that file. A row that has been removed in the meantime simply
+				// matches nothing.
 				for (path, length) in lengths {
+					// Let go of it first: this batch is done with the file whatever the lists
+					// have done with it, and a path left behind here would never be looked up
+					// again. Every path that went out comes back, so the set empties.
+					self.measuring.remove(&path);
 					for queue in &mut self.queues {
 						queue.measured(&path, length);
 					}
@@ -1053,23 +1064,24 @@ impl Clecta {
 	/// Empty when there is nothing to measure, which is the usual case: every call that edits
 	/// a queue comes through here, and only the ones that *added* something have work to do.
 	///
-	/// `ponytail:` two edits in quick succession start two jobs that overlap on the same
-	/// files. Harmless — the answer is the same and `measured` only fills in a row that is
-	/// still empty — and the fix, a flag saying one is already running, costs more state than
-	/// the duplicate reads cost time.
-	fn measure_queues(&self) -> Task<Message> {
-		// Deduplicated with a `Vec`, not a `HashSet`: a queue is tens of rows, and this runs
-		// once per edit.
-		let mut paths: Vec<PathBuf> = Vec::new();
-		for path in self.queues.iter().flat_map(Playlist::unmeasured) {
-			if !paths.iter().any(|seen| seen == path) {
-				paths.push(path.to_path_buf());
-			}
-		}
-
+	/// Nothing is ever asked about twice, because a row counts as unmeasured until its answer
+	/// *lands* — long after the job that will produce it started. `measuring` is what a job
+	/// takes with it on the way out and gives back on the way in, and `to_measure` subtracts
+	/// it. Without that, two edits a few milliseconds apart would send the same file to be
+	/// opened and parsed twice, and twenty edits would send the first one twenty times.
+	///
+	/// The invariant that makes the giving-back safe: **the arm is handed exactly the batch
+	/// that was asked about**, whatever happened to the job — so a batch cannot be lost from
+	/// the set and leave a file nothing will ever look at again.
+	fn measure_queues(&mut self) -> Task<Message> {
+		let paths = playlist::to_measure(&self.queues, &self.measuring);
 		if paths.is_empty() {
 			return Task::none();
 		}
+		self.measuring.extend(paths.iter().cloned());
+
+		// The batch survives the job, because the arm needs it whether or not the job answers.
+		let asked = paths.clone();
 
 		off_thread(
 			move || {
@@ -1081,9 +1093,18 @@ impl Clecta {
 					})
 					.collect::<Vec<_>>()
 			},
-			// A job that died leaves the rows unmeasured, which the footer already has a way
-			// of saying: the running time keeps its `+`.
-			|measured| Message::Measured(measured.unwrap_or_default()),
+			// A job can only fail to answer by panicking. Its batch is then reported as
+			// measured-and-no-length rather than left alone, which is the safer of the two
+			// wrongs: forgetting it would strand those files in `measuring` for the rest of
+			// the run, and re-queueing them would retry a panic that is probably deterministic
+			// on every edit for ever. The footer already says what this looks like — the
+			// running time keeps its `+`.
+			move |measured| {
+				Message::Measured(
+					measured
+						.unwrap_or_else(|| asked.iter().map(|path| (path.clone(), None)).collect()),
+				)
+			},
 		)
 	}
 
