@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::MIN_PANE;
 use crate::mixer::Curve;
 use crate::paths;
 
@@ -28,7 +29,7 @@ const MIN_WINDOW: f32 = 480.0;
 const MAX_WINDOW: f32 = 4096.0;
 
 /// What survives a restart. Deliberately small: the mixer's settings, where the browser
-/// was, and how big the window was.
+/// was, how big the window was, and how the window's height is shared out.
 ///
 /// `#[serde(default)]` fills in anything a older or hand-edited file is missing, so
 /// adding a field later cannot invalidate an existing file.
@@ -44,6 +45,10 @@ pub struct Settings {
 	/// Window size as `(width, height)`. Not the position: a window restored onto a
 	/// monitor that is no longer attached is worse than a centred one.
 	pub window: (f32, f32),
+	/// How tall the players and the mixer are, in pixels. A height and not a fraction,
+	/// because that panel's rows are fixed-size and a taller window should give the extra
+	/// space to the browser (PLAN §6).
+	pub decks_height: f32,
 }
 
 impl Default for Settings {
@@ -54,6 +59,9 @@ impl Default for Settings {
 			crossfader: 0.5,
 			folder: None,
 			window: (1180.0, 760.0),
+			// Enough for the two panels' four rows and the mixer's controls, and leaving the
+			// rest of a default window to the browser.
+			decks_height: 300.0,
 		}
 	}
 }
@@ -131,6 +139,12 @@ impl Settings {
 		if !(MIN_WINDOW..=MAX_WINDOW).contains(&self.window.1) {
 			self.window.1 = default.window.1;
 		}
+		// Smaller than a pane is allowed to be, or taller than any window: the app compacts
+		// the panel to whatever the window can spare anyway, so this only has to reject what
+		// the splitter could never have produced.
+		if !(MIN_PANE..=MAX_WINDOW).contains(&self.decks_height) {
+			self.decks_height = default.decks_height;
+		}
 		// A folder that has been deleted, renamed or unmounted since the last run: fall
 		// back to the home folder rather than opening on an error message.
 		if !self.folder.as_deref().is_some_and(Path::is_dir) {
@@ -155,6 +169,7 @@ mod tests {
 			// An existing folder, because `sanitized` drops one that is not there.
 			folder: Some(std::env::temp_dir()),
 			window: (900.0, 600.0),
+			decks_height: 260.0,
 		}
 	}
 
@@ -206,7 +221,8 @@ mod tests {
 		// Arrange: a hand-edited file, with the crossfader still perfectly good. The window
 		// height is the value that really crashed wgpu at launch, not a made-up huge
 		// number — this is the regression, pinned.
-		let text = r#"{"faders": [1.5, -0.2], "crossfader": 0.4, "window": [10.0, 15000.0]}"#;
+		let text = r#"{"faders": [1.5, -0.2], "crossfader": 0.4, "window": [10.0, 15000.0],
+			"decks_height": 12.0}"#;
 
 		// Act
 		let settings = Settings::from_json(text);
@@ -217,6 +233,10 @@ mod tests {
 		assert_eq!(settings.faders, default.faders, "both out of range");
 		assert_eq!(settings.crossfader, 0.4, "in range, so kept");
 		assert_eq!(settings.window, default.window, "too small and too large");
+		assert_eq!(
+			settings.decks_height, default.decks_height,
+			"smaller than a pane may be"
+		);
 	}
 
 	#[test]

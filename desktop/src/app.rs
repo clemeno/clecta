@@ -42,13 +42,28 @@ const SAVE_AFTER: Duration = Duration::from_secs(2);
 const SWEEP: Duration = Duration::from_millis(40);
 const SWEEP_STEPS: u32 = 30;
 
-/// Height of the top section, and width of the files pane, as fractions.
-const DECKS_RATIO: f32 = 0.42;
+/// Width of the files pane, as a fraction. The *height* of the top section is not a
+/// fraction — see `decks_ratio` (PLAN §6).
 const TREE_RATIO: f32 = 0.68;
 
 /// The smallest a pane may be dragged to, in pixels. One value for every pane on both
 /// axes — the ceiling noted in PLAN §6.
-const MIN_PANE: f32 = 170.0;
+pub const MIN_PANE: f32 = 170.0;
+
+/// The four numbers that make the pane grid's height derivable from the window's: the gap
+/// the grid leaves between panes, the padding around the whole window, the gap above the
+/// status bar, and the bar's own height.
+///
+/// Constants rather than literals in `view`, and the status bar is *pinned* to a height
+/// rather than left to measure its own text, because the decks pane keeps a height in
+/// **pixels** (PLAN §6): converting that to the ratio `pane_grid` wants needs the grid's
+/// height, and iced 0.14 has no way to ask a widget how big it turned out. So everything
+/// outside the grid is made a constant, and `CHROME` is the exact difference.
+const PANE_SPACING: f32 = 6.0;
+const WINDOW_PADDING: f32 = 6.0;
+const STATUS_GAP: f32 = 4.0;
+const STATUS_HEIGHT: f32 = 24.0;
+const CHROME: f32 = 2.0 * WINDOW_PADDING + STATUS_GAP + STATUS_HEIGHT;
 
 /// Width of the mixer strip. Fixed, because the two players should keep the width they
 /// are given as the window resizes; the mixer's controls do not grow usefully.
@@ -62,7 +77,7 @@ pub fn run() -> iced::Result {
 
 	iced::application(
 		// `boot` is `Fn`, not `FnOnce`, so the settings are cloned into each call rather
-		// than moved. One clone of five fields, once.
+		// than moved. One clone of six fields, once.
 		move || Clecta::boot(settings.clone()),
 		Clecta::update,
 		Clecta::view,
@@ -163,6 +178,13 @@ pub struct Clecta {
 	browser: Browser,
 	tree: Tree,
 	panes: pane_grid::State<Section>,
+	/// The horizontal split, kept so a window resize can move it. Never `None`: unlike the
+	/// tree, neither pane it separates can be folded away.
+	decks_split: pane_grid::Split,
+	/// How tall the players and the mixer want to be, in **pixels** rather than a fraction
+	/// of the window (PLAN §6). Kept as what was asked for, not as what fits: a window too
+	/// short to grant it compacts the panel, and growing the window again gives it back.
+	decks_height: f32,
 	/// The vertical split, so the fold button can find it. `None` while folded, because
 	/// closing the tree pane destroys the split with it (PLAN §6).
 	tree_split: Option<pane_grid::Split>,
@@ -202,7 +224,6 @@ impl Clecta {
 		let (_tree_pane, tree_split) = panes
 			.split(Axis::Vertical, files_pane, Section::Tree)
 			.expect("splitting an existing pane always succeeds");
-		panes.resize(decks_split, DECKS_RATIO);
 		panes.resize(tree_split, TREE_RATIO);
 
 		let (engine, notice) = match Engine::new() {
@@ -228,6 +249,8 @@ impl Clecta {
 			browser: Browser::default(),
 			tree: Tree::new(fsio::roots()),
 			panes,
+			decks_split,
+			decks_height: settings.decks_height,
 			tree_split: Some(tree_split),
 			tree_ratio: TREE_RATIO,
 			window: settings.window,
@@ -239,6 +262,9 @@ impl Clecta {
 			sweep: 0,
 		};
 		app.apply_gains();
+		// The split is placed from a pixel height and the window's, so it cannot be set while
+		// building the grid above — the window size is not known there.
+		app.apply_decks_height();
 
 		// Open where the last run left off, or on the home folder — so the first thing on
 		// screen is a real listing rather than an empty pane with a button in it. The
@@ -258,6 +284,7 @@ impl Clecta {
 			crossfader: self.crossfader,
 			folder: self.browser.folder.clone(),
 			window: self.window,
+			decks_height: self.decks_height,
 		}
 	}
 
@@ -406,7 +433,16 @@ impl Clecta {
 				if Some(event.split) == self.tree_split {
 					self.tree_ratio = event.ratio;
 				}
-				self.panes.resize(event.split, event.ratio);
+				if event.split == self.decks_split {
+					// Recorded in pixels and then re-derived, rather than stored as the ratio
+					// the drag reported: `apply_decks_height` clamps, so the splitter stops at
+					// the minimum instead of being draggable past where the panes can go.
+					self.decks_height = decks_height(self.window.1, event.ratio);
+					self.dirty = true;
+					self.apply_decks_height();
+				} else {
+					self.panes.resize(event.split, event.ratio);
+				}
 			}
 
 			Message::ReconnectPressed => return self.reconnect(),
@@ -448,6 +484,9 @@ impl Clecta {
 				if self.window != (size.width, size.height) {
 					self.window = (size.width, size.height);
 					self.dirty = true;
+					// The players keep their height, so the split has to *move* as the window
+					// grows rather than scale with it (PLAN §6).
+					self.apply_decks_height();
 				}
 			}
 
@@ -731,6 +770,19 @@ impl Clecta {
 		Task::batch(tasks)
 	}
 
+	/// Put the horizontal splitter where `decks_height` asks for, compacting the players only
+	/// if the window is too short for it.
+	///
+	/// The wanted height is deliberately not written back when it is compacted: that is what
+	/// lets a window squashed and then pulled open again come back to the panel the user
+	/// chose, rather than to whatever the squashed one happened to fit.
+	fn apply_decks_height(&mut self) {
+		self.panes.resize(
+			self.decks_split,
+			decks_ratio(self.window.1, self.decks_height),
+		);
+	}
+
 	/// Close the tree pane, or bring it back at the width it had.
 	fn fold_tree(&mut self) {
 		match self.pane_holding(Section::Tree) {
@@ -813,13 +865,13 @@ impl Clecta {
 			};
 			pane_grid::Content::new(body).style(container::bordered_box)
 		})
-		.spacing(6)
+		.spacing(PANE_SPACING)
 		.min_size(MIN_PANE)
 		.on_resize(8, Message::Resized);
 
 		column![panes, self.status_bar()]
-			.spacing(4)
-			.padding(6)
+			.spacing(STATUS_GAP)
+			.padding(WINDOW_PADDING)
 			.into()
 	}
 
@@ -864,6 +916,9 @@ impl Clecta {
 	}
 
 	/// One line: what just happened, and the way out when the audio device is gone.
+	///
+	/// Its height is pinned rather than measured, so the pane grid above it has a height that
+	/// can be worked out from the window's — see `CHROME`.
 	fn status_bar(&self) -> Element<'_, Message> {
 		let mut bar = row![
 			text(&self.notice).size(12),
@@ -883,6 +938,7 @@ impl Clecta {
 		]
 		.spacing(8)
 		.padding([0, 6])
+		.height(STATUS_HEIGHT)
 		.align_y(iced::Center);
 
 		if self.engine.is_none() {
@@ -895,6 +951,45 @@ impl Clecta {
 
 		bar.into()
 	}
+}
+
+/// The pane grid's height inside a window this tall.
+///
+/// Exact rather than approximate, because everything the window holds outside the grid is a
+/// constant (`CHROME`) — which is the whole reason the status bar has a pinned height.
+fn grid_height(window_height: f32) -> f32 {
+	// `max` and not a comparison: it also flattens a `NaN`, since `f32::max` returns the
+	// other operand when one is not a number. Everything below can then assume a real
+	// number without repeating the check.
+	(window_height - CHROME).max(0.0)
+}
+
+/// The split ratio that gives the decks pane `wanted` pixels — and less than that only when
+/// the window is too short to grant them (PLAN §6).
+///
+/// `pane_grid` stores a fraction, so a taller window would otherwise give the players a
+/// taller panel, which is exactly what the fixed-height rows in it do not want. Inverting
+/// `Axis::split`'s own arithmetic — `round(height * ratio - spacing / 2)` — is what keeps
+/// the answer to the pixel.
+///
+/// The clamp repeats what `pane_grid` already does when it lays out, deliberately: the
+/// widget clamps the *drawn* panes but keeps drawing the splitter at the stored ratio, so a
+/// ratio left out of range would put the grab line somewhere the panes are not.
+fn decks_ratio(window_height: f32, wanted: f32) -> f32 {
+	let grid = grid_height(window_height);
+	if grid <= 0.0 {
+		return 0.5;
+	}
+
+	// Same order as `Axis::split`: the floor first, then the ceiling, so a window with no
+	// room for both minimums gives the browser its share rather than the players.
+	let height = wanted.max(MIN_PANE).min(grid - MIN_PANE - PANE_SPACING);
+	((height + PANE_SPACING / 2.0) / grid).clamp(0.0, 1.0)
+}
+
+/// The inverse: what a dragged splitter means in pixels, which is what gets remembered.
+fn decks_height(window_height: f32, ratio: f32) -> f32 {
+	(grid_height(window_height) * ratio - PANE_SPACING / 2.0).max(0.0)
 }
 
 /// The two drop gestures, both of which need raw events rather than a widget (PLAN §10).
@@ -980,4 +1075,92 @@ fn scan_peaks(id: DeckId, path: PathBuf) -> Task<Message> {
 			delivered.unwrap_or_else(|_| Err("the waveform scan stopped unexpectedly".to_string()));
 		Message::PeaksScanned(id, path, result)
 	})
+}
+
+/// The only testable thing in this module: the layout arithmetic above is pure, and it is
+/// what a window resize is judged by (PLAN §6). Everything else here needs a window.
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// What `pane_grid` will actually draw the top pane as, given a ratio — `Axis::split`'s
+	/// own formula, so the test measures the widget's behaviour and not the app's intent.
+	fn drawn(window_height: f32, ratio: f32) -> f32 {
+		let grid = grid_height(window_height);
+		(grid * ratio - PANE_SPACING / 2.0)
+			.round()
+			.max(MIN_PANE)
+			.min(grid - MIN_PANE - PANE_SPACING)
+	}
+
+	#[test]
+	fn the_players_keep_their_height_however_tall_the_window_gets() {
+		// Arrange: the panel the user chose, and every window height it fits in.
+		let wanted = 300.0;
+
+		// Act / Assert: within a pixel, because the widget rounds to one. From the shortest
+		// window that can hold the panel *and* a minimum browser — below that the answer is
+		// deliberately not the wanted height, which is the next test.
+		let shortest = (wanted + MIN_PANE + PANE_SPACING + CHROME) as u32;
+		for height in (shortest..=2000).step_by(37) {
+			let height = height as f32;
+			let drawn = drawn(height, decks_ratio(height, wanted));
+			assert!(
+				(drawn - wanted).abs() <= 1.0,
+				"window {height}: panel drawn {drawn}, wanted {wanted}"
+			);
+		}
+	}
+
+	#[test]
+	fn a_window_too_short_compacts_the_panel_and_then_gives_it_back() {
+		// Arrange: a tall panel and a window with nowhere near the room for it.
+		let wanted = 600.0;
+		let short = MIN_PANE * 2.0 + PANE_SPACING + CHROME + 40.0;
+
+		// Act
+		let compacted = drawn(short, decks_ratio(short, wanted));
+
+		// Assert: squashed, but never past the minimum, and the browser still has its own.
+		assert!(compacted < wanted, "still {compacted} in a {short} window");
+		assert!(compacted >= MIN_PANE, "compacted to {compacted}");
+		let browser = grid_height(short) - compacted - PANE_SPACING;
+		assert!(browser >= MIN_PANE, "browser left with {browser}");
+
+		// Assert: the wanted height was not consumed by the squash — a window pulled open
+		// again comes back to the panel the user chose.
+		let restored = drawn(wanted + CHROME + MIN_PANE + PANE_SPACING, {
+			decks_ratio(wanted + CHROME + MIN_PANE + PANE_SPACING, wanted)
+		});
+		assert!((restored - wanted).abs() <= 1.0, "restored to {restored}");
+	}
+
+	#[test]
+	fn dragging_the_splitter_and_resizing_the_window_are_inverses() {
+		// Arrange: a drag reports a fraction of the grid, and it has to survive the trip
+		// through pixels or the panel would creep every time the window moved.
+		let height = 900.0;
+
+		// Act / Assert
+		for ratio in [0.25, 0.4, 0.5, 0.75] {
+			let round_trip = decks_ratio(height, decks_height(height, ratio));
+			assert!(
+				(round_trip - ratio).abs() < 0.001,
+				"ratio {ratio} came back as {round_trip}"
+			);
+		}
+	}
+
+	#[test]
+	fn an_impossible_window_still_produces_a_usable_ratio() {
+		// Arrange / Act / Assert: a window shorter than its own chrome divides by nothing,
+		// and a fraction outside `0..=1` puts `pane_grid`'s splitter off the screen.
+		for height in [0.0, 1.0, CHROME, CHROME + 1.0, f32::NAN] {
+			let ratio = decks_ratio(height, 300.0);
+			assert!(
+				(0.0..=1.0).contains(&ratio),
+				"window {height} gave a ratio of {ratio}"
+			);
+		}
+	}
 }

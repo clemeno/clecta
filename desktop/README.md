@@ -57,6 +57,11 @@ cargo build --release --target x86_64-apple-darwin
   file row to select it, **double-click** a media row to load it into whichever player is
   idle, or use **→ Player 1 / → Player 2**. **◧ hide tree** in the status bar folds the
   tree away and brings it back at the width it had (PLAN §6, §9).
+- **The players keep their height.** Drag the horizontal splitter and that panel stays that
+  tall whatever the window does — a taller window makes the *file list* taller, since the
+  players' rows are all fixed-size and would only gain empty space. Squash the window and
+  the panel compacts; pull it open again and it comes back to the height you chose, because
+  the height you asked for is remembered separately from the height that fits (PLAN §6).
 - **Drag and drop, both ways in.** Drag a row from the files pane onto either player and
   it loads *there* — the pointer is the app's the whole way, so the drag is truly aimed.
   Drag a file in from Finder / Explorer and it lands on **the idle player**, because the
@@ -66,8 +71,8 @@ cargo build --release --target x86_64-apple-darwin
   rather than ignored (PLAN §10).
 - **No audio device is survivable.** The app still browses, says so in the status bar,
   and offers **Reconnect audio** (PLAN §11).
-- **It is portable.** Both faders, the crossfader, the curve, the folder and the window
-  size come back next launch, from **`clecta-data/settings.json` beside the executable** —
+- **It is portable.** Both faders, the crossfader, the curve, the folder, the window size
+  and the players' height come back next launch, from **`clecta-data/settings.json` beside the executable** —
   beside the `.app`, not inside it, on macOS. Nothing is written anywhere else: no
   registry keys, no `~/Library` unless the app itself sits somewhere unwritable. Delete
   the folder and you have deleted clecta. The file is written **two seconds after you
@@ -118,8 +123,8 @@ yourself for that:
 cargo build --release
 ```
 
-`cargo test` covers the pure modules, and only those — anything needing a device or a
-real folder is manual (PLAN §12):
+`cargo test` covers the pure modules, plus the pure arithmetic inside the ones that are not
+— anything needing a device or a real folder is manual (PLAN §12):
 
 | Module | What is checked |
 |---|---|
@@ -129,11 +134,12 @@ real folder is manual (PLAN §12):
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
+| `app.rs` | the players' section keeping its pixel height at every window height, compacting when the window is too short without forgetting what was asked for, a splitter drag surviving the round trip through pixels, and an impossible window still yielding a usable ratio |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Four things the suite cannot reach, all of which need a window a person can look at. **The
+Five things the suite cannot reach, all of which need a window a person can look at. **The
 first three pass on macOS, by hand:**
 
 - **The close-button save.** ⌘Q *was* the open question here, and the answer was that it
@@ -157,6 +163,11 @@ first three pass on macOS, by hand:**
   cannot be scripted here. What wants looking at: that the playhead lands where the pointer
   was, that a playing track keeps playing and a paused one stays paused, and that the
   pointer turns into a hand over a loaded strip but not over an empty one (PLAN §14b).
+- **Dragging the splitter, and then the window edge.** Half of this is measured rather than
+  assumed: a probe widget printed the players' pane at exactly the height the settings file
+  asked for, twice, which is what pins the chrome constant the whole scheme rests on. What
+  no script here can do is *drag* — the splitter to a new height, and the window's bottom
+  edge up and down to watch the panel hold still and then compact (PLAN §6).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.

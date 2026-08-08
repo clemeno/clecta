@@ -258,7 +258,9 @@ this one keeps the desktop-only ones.
 - **Two sections, one draggable horizontal splitter.** The top section has a sensible
   minimum height (the transport must never be clipped); the drag is clamped so neither
   section can be squeezed to nothing — cmote's 60 % clamp rule, §18 there, for the same
-  reason: a splitter with no ceiling leaves the user dragging their way back out.
+  reason: a splitter with no ceiling leaves the user dragging their way back out. The top
+  section's height is a **number of pixels**, not a share of the window, and it is
+  remembered across a restart — see "The players keep a height, not a share" below.
 - **The tree is a fixed-width column at the right of the bottom section**, with its own
   vertical splitter and a **fold button**. Folding it gives the files pane the full
   width; the pane never disappears, because a browser with no file list is not a
@@ -304,6 +306,53 @@ so never calling it costs nothing. Three real costs, all small, all paid in the 
   upgrade is clamping the ratio in the `Resized` handler — where the app already sits.
 
 **Do not write a third splitter implementation from scratch.**
+
+### The players keep a height, not a share
+
+`pane_grid` stores a **ratio**, so a taller window gave the players a taller panel. That is
+the wrong answer for this layout and not merely a preference: the panel's rows are a name,
+a clock, a 56-pixel waveform and a row of buttons, all fixed. Every pixel a ratio hands it
+is empty space taken from the file list, which is the one part of the window that can
+actually use more room. So the decks pane keeps a **pixel height**, dragged to taste,
+persisted (§11), and compacted only when the window is too short to grant it.
+
+**The interesting part is that iced 0.14 cannot tell you how big anything turned out.** A
+ratio is `pixels / grid_height`, and the grid's height is decided during layout — there is
+no `on_resize` on a container, and `responsive` needs the `lazy` feature. Three ways out:
+
+| way | cost |
+|---|---|
+| turn on `lazy` and wrap the grid in `responsive` | a feature and a re-layout closure, for one number |
+| guess the chrome and accept the drift | the panel creeps a pixel or two per resize |
+| **make the chrome a constant** | the status bar loses its automatic height |
+
+The third one is chosen, and it is the difference between measuring a layout and *deciding*
+it. Everything the window holds outside the grid — 6 px of padding twice, a 4 px gap, and
+the status bar — is a named constant, the status bar is pinned to 24 px instead of being
+allowed to size itself to its text, and the grid's height is then exactly
+`window height − 40` by construction. No measurement, no drift, and `view` uses the same
+constants so the two cannot fall out of step.
+
+The ratio itself is the inverse of `Axis::split`'s own arithmetic, read out of
+`iced_widget`'s source rather than guessed: it lays the top pane out at
+`round(height × ratio − spacing / 2)`, so the ratio wanted is `(pixels + spacing / 2) /
+height`. **Measured, not assumed**: a probe widget printed the pane's real bounds as
+`height: 300.0` for a wanted 300 in a 932-pixel window, and `420.0` after the file asked
+for 420 — exact, which also confirms the pinned status bar is honoured.
+
+Two details that are the whole behaviour:
+
+- **The wanted height is never overwritten when it is compacted.** Squashing the window
+  clamps what is *drawn*; `decks_height` still holds what the user chose, so pulling the
+  window open again restores the panel rather than keeping whatever the squashed window
+  happened to fit. This is why the clamp lives in `decks_ratio` and not in the field.
+- **The clamp repeats what `pane_grid` already does**, on purpose. The widget clamps the
+  panes it lays out but keeps drawing the splitter at the *stored* ratio, so a ratio left
+  out of range would put the grab line somewhere the panes are not — and a splitter you
+  cannot grab is worse than one that stops early.
+
+`ponytail:` if a pane ever needs to keep a *width* the same way, this generalizes; nothing
+here is written twice yet, so nothing is abstracted.
 
 ---
 
@@ -668,7 +717,8 @@ Everything else about the drop is shared, and is decided:
 aesthetic: it is the requirement.
 
 - **Every file clecta writes goes in `clecta-data/` beside the app.** One file in v1 —
-  `settings.json` (curve, faders, crossfader, last folder, window size). No registry
+  `settings.json` (curve, faders, crossfader, last folder, window size, the height of the
+  players-and-mixer section). No registry
   keys, no `plist` writes, no `~/Library` unless the portable spot is genuinely
   unwritable.
 - **Resolution order** (`paths.rs`, plain `std`, no `dirs` crate — cmote's rule):
@@ -708,7 +758,7 @@ aesthetic: it is the requirement.
   app menu's **Quit** run `applicationWillTerminate`, which winit converts to
   `LoopExiting`; iced 0.14 does not implement winit's `ApplicationHandler::exiting`, so
   the event is dropped before any clecta code sees it. There is no hook to add — the
-  design had to change, not the wiring. So a `dirty` flag is set by the five things worth
+  design had to change, not the wiring. So a `dirty` flag is set by the six things worth
   keeping, and a `time::every(2s)` subscription **exists only while `dirty` is true**,
   saving and clearing it. Nothing ticks at rest, and quitting any way at all costs at most
   the last two seconds. Strictly a *throttle*, not a debounce: the write lands two seconds
@@ -773,7 +823,8 @@ aesthetic: it is the requirement.
 ## 12. Testing
 
 Rust's built-in `#[test]` / `#[cfg(test)]`, AAA pattern, no framework — same as cmote.
-Pure logic is tested; anything needing a device or a real folder is manual.
+Pure logic is tested — including the pure arithmetic that lives inside a module which is not
+otherwise pure; anything needing a device or a real folder is manual.
 
 - **`mixer.rs`** — the required one. Both curves at both ends and the centre, each curve's
   defining identity at the midpoint (`g1² + g2² = 1` / `g1 + g2 = 1`), and the
@@ -816,6 +867,15 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   immediately**: it caught that `f32::clamp` passes a `NaN` through unchanged, so the
   first version's clamp was decoration and a mis-measured strip would have panicked
   `Duration::mul_f32` on the click (§14b).
+- **`app.rs`** — the one testable thing in the wiring, and it earned its `mod tests`: the
+  pixel↔ratio arithmetic that keeps the players at a height (§6). That the panel is drawn at
+  the height asked for at *every* window height from the shortest that fits to 2000 — against
+  `Axis::split`'s own formula, so the test measures the widget rather than the intent — that
+  a too-short window compacts it without ever going under `min_size` or starving the browser,
+  that pulling the window open again restores what the user chose, that a splitter drag
+  survives the round trip through pixels, and that a window shorter than its own chrome still
+  yields a ratio inside `0..=1` rather than dividing by nothing and putting the splitter off
+  the screen.
 - **`audio.rs`** — one test, and the only one this module can have: everything else here
   needs an output device. A *scan* does not, so the decode path is checked for real, from a
   file on disk to the array the widget draws. The fixture is generated rather than
@@ -1182,6 +1242,7 @@ the button and dragging would need the held flag, and that is the line §14 stil
 | Q12 | Saying a scan is running | **A band sweeping the strip, from the first frame.** In the strip rather than the status bar, because the strip is what is being waited for; no 250 ms threshold, because the gate costs more than the flash it prevents | §14a |
 | Q13 | When a folder is saved | **Immediately on a successful listing**, not on the 2 s throttle. The throttle's price is right for a fader that moves sixty times a second and wrong for a folder that moves once; navigating and quitting straight after is ordinary use, not a corner case | §11 |
 | Q14 | What a seek does to the transport | **Nothing.** Playing keeps playing from the new place, paused stays paused there. Not a `deck::Event` and never through `transition`, because a self-edge on all four states is "nothing happens" written four times — and no pause around `try_seek`, which would gap a playing track | §14b, §7 |
+| Q15 | How the players' section is sized | **A pixel height, persisted, compacted only when the window is too short.** Its rows are all fixed, so a ratio hands the extra space to the one pane that cannot use it. And since iced 0.14 cannot report a laid-out size, the chrome around the pane grid is made a *constant* — status bar pinned to 24 px — rather than measured or guessed | §6, §11 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
