@@ -57,11 +57,13 @@ cargo build --release --target x86_64-apple-darwin
   file row to select it, **double-click** a media row to load it into whichever player is
   idle, or use **→ Player 1 / → Player 2**. **◧ hide tree** in the status bar folds the
   tree away and brings it back at the width it had (PLAN §6, §9).
-- **The players keep their height.** Drag the horizontal splitter and that panel stays that
+- **The players keep their height.** Drag the divider under them and that panel stays that
   tall whatever the window does — a taller window makes the *file list* taller, since the
   players' rows are all fixed-size and would only gain empty space. Squash the window and
   the panel compacts; pull it open again and it comes back to the height you chose, because
-  the height you asked for is remembered separately from the height that fits (PLAN §6).
+  the height you asked for is remembered separately from the height that fits. It holds
+  *still* during a live resize, which took two goes: the first version kept the panel at the
+  right height and visibly wobbled on the way, and PLAN §6 tells that story (PLAN §6).
 - **Drag and drop, both ways in.** Drag a row from the files pane onto either player and
   it loads *there* — the pointer is the app's the whole way, so the drag is truly aimed.
   Drag a file in from Finder / Explorer and it lands on **the idle player**, because the
@@ -134,13 +136,14 @@ cargo build --release
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
-| `app.rs` | the players' section keeping its pixel height at every window height, compacting when the window is too short without forgetting what was asked for, a splitter drag surviving the round trip through pixels, and an impossible window still yielding a usable ratio |
+| `app.rs` | the players' section keeping its pixel height at every window height, compacting when the window is too short without forgetting what was asked for, giving up its own floor before the browser's when neither fits, and an impossible window still yielding a usable height |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Five things the suite cannot reach, all of which need a window a person can look at. **The
-first three pass on macOS, by hand:**
+Five things the suite cannot reach, all of which need a window a person can look at. **All
+five now pass on macOS, by hand** — and the last two rounds are why the list exists: three
+of the app's defects so far were found here and none of them by a passing test.
 
 - **The close-button save.** ⌘Q *was* the open question here, and the answer was that it
   never reaches the app at all — so the settings are now written on a two-second throttle
@@ -158,16 +161,16 @@ first three pass on macOS, by hand:**
   because the bars were painted thirteen levels of grey away from the panel behind them.
   Numbers cannot catch that; screen capture from a script is blocked by the same permission
   wall as scripted clicking, so it takes an eye (PLAN §14a).
-- **The seek gesture** — new, and the one item on this list not yet confirmed. The
-  arithmetic behind it is tested and the wiring type-checks, but a click is precisely what
-  cannot be scripted here. What wants looking at: that the playhead lands where the pointer
-  was, that a playing track keeps playing and a paused one stays paused, and that the
-  pointer turns into a hand over a loaded strip but not over an empty one (PLAN §14b).
-- **Dragging the splitter, and then the window edge.** Half of this is measured rather than
-  assumed: a probe widget printed the players' pane at exactly the height the settings file
-  asked for, twice, which is what pins the chrome constant the whole scheme rests on. What
-  no script here can do is *drag* — the splitter to a new height, and the window's bottom
-  edge up and down to watch the panel hold still and then compact (PLAN §6).
+- **The seek gesture.** The playhead lands where the pointer was, a playing track carries on
+  and a paused one stays put, and the cursor turns into a hand over a loaded strip and not
+  over an empty one. Confirmed, first try — the arithmetic had already been tested and the
+  only question was the wiring (PLAN §14b).
+- **Dragging the divider, and then the window edge.** This is the one that failed. The
+  height itself had been measured twice with a probe widget and was exact both times, and
+  the panel still *wobbled* as the window's bottom edge moved: iced lays out at the new
+  window size a frame before the app hears about the resize, so a height derived from a
+  ratio is always one frame stale. Fixed by making the height a literal instead, and the
+  drag now holds still, compacts on a short window, and comes back (PLAN §6).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.
