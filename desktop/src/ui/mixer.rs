@@ -4,8 +4,8 @@
 //! The gain numbers shown beside each fader are `mixer::gains`' own output, not a second
 //! calculation — so what the strip displays is exactly what the players were set to.
 
-use iced::widget::{column, container, pick_list, row, slider, text};
-use iced::{Element, Fill};
+use iced::widget::{button, column, container, pick_list, row, slider, space, text};
+use iced::{Center, Element, Fill};
 
 use crate::app::Message;
 use crate::deck::{Deck, DeckId};
@@ -31,10 +31,18 @@ pub fn view(
 			column![
 				text("crossfader").size(12),
 				slider(0.0..=1.0, crossfader, Message::CrossfaderChanged).step(STEP),
+				// The two end labels were already here as text; making them buttons costs a
+				// widget each and saves dragging the whole travel to reach an end you can
+				// name. The centre one has no label to inherit and is the one that could not
+				// be done by hand at all: 0.5 exactly is a value a mouse lands on by luck.
 				row![
-					text("◄ 1").size(11),
-					text("2 ►").size(11).width(Fill).align_x(iced::Right),
-				],
+					preset("◄ 1", Message::CrossfaderChanged(0.0)),
+					space::horizontal(),
+					preset("centre", Message::CrossfaderChanged(0.5)),
+					space::horizontal(),
+					preset("2 ►", Message::CrossfaderChanged(1.0)),
+				]
+				.align_y(Center),
 			]
 			.spacing(4),
 			pick_list(Curve::ALL, Some(curve), Message::CurveSelected)
@@ -58,11 +66,33 @@ fn fader(id: DeckId, value: f32, gain: f32) -> Element<'static, Message> {
 			// is the thing worth noticing (PLAN §8).
 			text(format!("{gain:.2}")).size(12),
 		],
-		slider(0.0..=1.0, value, move |value| Message::FaderChanged(
-			id, value
-		))
-		.step(STEP),
+		row![
+			preset("0", Message::FaderChanged(id, 0.0)),
+			slider(0.0..=1.0, value, move |value| Message::FaderChanged(
+				id, value
+			))
+			.step(STEP),
+			preset("max", Message::FaderChanged(id, 1.0)),
+		]
+		.spacing(6)
+		.align_y(Center),
 	]
 	.spacing(4)
 	.into()
+}
+
+/// A button that jumps a fader straight to one exact value.
+///
+/// It sends the **same message the slider sends**, which is the whole design: there is no
+/// second way into the mixer state, nothing to keep in sync, and every value these buttons
+/// can produce is one `mixer::gains` is already tested at (PLAN §8, §12).
+///
+/// `button::text` rather than a chip: these sit inside a control, and a row of filled
+/// rectangles would read as more important than the fader they belong to.
+fn preset(label: &'static str, message: Message) -> Element<'static, Message> {
+	button(text(label).size(11))
+		.padding([2, 6])
+		.style(button::text)
+		.on_press(message)
+		.into()
 }

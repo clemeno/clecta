@@ -46,8 +46,11 @@ cargo build --release --target x86_64-apple-darwin
   it does not seek yet (PLAN §14a, §14).
 - **The mixer strip.** A volume fader per player and a crossfader, with a
   **Power / Linear** curve selector. The number beside each fader is the gain actually
-  sent to that player, so the cubic taper and the crossfade are visible as they move
-  (PLAN §8).
+  sent to that player, so the cubic taper and the crossfade are visible as they move.
+  Every slider has its ends on buttons — **0** and **max** either side of each volume
+  fader, **◄ 1 / centre / 2 ►** under the crossfader. The centre one earns its place: the
+  ends can be reached by shoving the knob into the wall, but `0.5` exactly is a value a
+  mouse lands on by luck (PLAN §8).
 - **The browser.** A files pane and a folder tree, each in its own pane with a draggable
   splitter. Click a folder name in the tree to show it, the arrow to open it. Click a
   file row to select it, **double-click** a media row to load it into whichever player is

@@ -417,6 +417,30 @@ centre, each curve's defining identity at the midpoint (`g1² + g2² = 1` for `P
 `g1 + g2 = 1` for `Linear`), and the invariant that a fader at 0 is silent under either
 curve no matter where the crossfader sits.
 
+### The preset buttons
+
+Every slider in the strip has its ends on buttons, and the crossfader has its centre on
+one too: **◄ 1 / centre / 2 ►** under the crossfader, **0** and **max** either side of each
+volume fader. Added after the smoke test, because the strip was usable and still annoying —
+a slider is the right control for *searching* for a value and the wrong one for *returning*
+to a value you can already name.
+
+The centre button is the one that is not merely a convenience. `0.0` and `1.0` are the ends
+of the travel and a drag lands on them by shoving the knob into the wall; **`0.5` exactly is
+a value a mouse hits by luck**, and a crossfader parked at 0.49 sounds like a crossfader
+parked at 0.50 while not being it. A button is the only way to be certain.
+
+What makes this three lines rather than a feature is that the buttons emit the **same
+messages the sliders emit** — `FaderChanged` and `CrossfaderChanged`, with a literal instead
+of a drag position. No new message, no new state, no new arm in `update`, and nothing added
+to §12: every value a button can produce is one `gains` is already tested at. That is worth
+saying out loud because the tempting shape — a `Preset` message with its own handler — would
+have been a second path into the same state, and second paths are what drift apart.
+
+`ponytail:` no keyboard shortcuts and no double-click-to-centre, which is what a hardware
+mixer's detent would be. Three buttons cover it; add the gestures if the buttons turn out to
+be the thing being hunted for.
+
 ---
 
 ## 9. The browser (`browser.rs`, `tree.rs`, `fsio.rs`, `ui/`)
