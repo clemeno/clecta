@@ -24,6 +24,12 @@ iced = { version = "0.14.0", features = ["smol", "advanced"] }
 # Default features are the macOS backend; Windows needs none. Pure Rust on both, so the
 # no-C-toolchain property (PLAN §11) holds.
 notify = "8.2.0"
+# `clecta-data/cache.redb` (PLAN §11a): what has already been worked out about a file, so a
+# waveform is scanned once rather than once per launch. An embedded key/value store with one
+# dependency of its own (`libc`, which is declarations rather than C), MIT OR Apache-2.0, and
+# no `cc` on either target — so the no-C-toolchain property (PLAN §11) survives it. SQLite
+# would not have: `libsqlite3-sys` compiles C, which is the one thing `deny.toml` bans.
+redb = "4.1.0"
 # Native folder picker (PLAN §3). NSOpenPanel / Win32, same crate as cmote.
 rfd = "0.17.2"
 # Audio output, mixing and decoding (PLAN §7, §8). Wraps `cpal` for the device and its

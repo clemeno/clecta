@@ -9,6 +9,7 @@
 mod app;
 mod audio;
 mod browser;
+mod cache;
 mod deck;
 mod fsio;
 mod mixer;

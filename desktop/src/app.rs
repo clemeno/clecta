@@ -7,7 +7,8 @@
 //! dispatch table stays readable as the app grows.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use iced::futures::Stream;
@@ -26,12 +27,13 @@ use notify::{RecursiveMode, Watcher};
 
 use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
+use crate::cache::{self, Cache};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
 use crate::playlist::{self, ListId, Playlist};
 use crate::settings::Settings;
 use crate::tree::Tree;
-use crate::{fsio, ui};
+use crate::{fsio, paths, ui};
 
 /// The playhead poll (PLAN §4). 20 Hz: fast enough that a time readout never looks stuck,
 /// slow enough that it is not a battery bug — and it only runs while something plays.
@@ -97,6 +99,11 @@ const CHROME: f32 = 2.0 * WINDOW_PADDING + STATUS_GAP + STATUS_HEIGHT;
 /// Width of the mixer strip. Fixed, because the two players should keep the width they
 /// are given as the window resizes; the mixer's controls do not grow usefully.
 const MIXER_WIDTH: f32 = 240.0;
+
+/// The cache's name inside `clecta-data/` (PLAN §11a). Beside `settings.json` rather than in a
+/// per-user cache folder, so a portable install carries what it has already worked out with
+/// it — and the extension says what it is to anyone looking at the folder.
+const CACHE_FILE: &str = "cache.redb";
 
 pub fn run() -> iced::Result {
 	// Read before the window exists, because its size is one of the things restored. A
@@ -343,6 +350,11 @@ pub struct Clecta {
 	/// its answer lands, so without this a second edit arriving mid-lookup would send the same
 	/// file off to be opened and parsed all over again (PLAN §7a).
 	measuring: HashSet<PathBuf>,
+	/// What has already been worked out about a file (PLAN §11a). Shared with every job that
+	/// reads or writes it: an `Arc` because those jobs are threads, and the whole point is
+	/// that the cache is touched *there* rather than on the GUI thread, where a commit is an
+	/// `fsync`.
+	cache: Arc<Cache>,
 	/// The scanning animation's step counter. A plain integer rather than a timestamp, so
 	/// nothing in `view` has to read the clock — the phase is whatever the last `Sweep`
 	/// left behind.
@@ -401,9 +413,21 @@ impl Clecta {
 			queue_scroll: [0.0; 3],
 			autoscroll: None,
 			measuring: HashSet::new(),
+			// Opened here rather than lazily, for the same reason `Settings::load` is read
+			// before the window exists: it is one small file, once, and everything after it
+			// wants to know whether there is a cache to ask (PLAN §11a).
+			cache: Arc::new(Cache::open(&paths::data_dir().join(CACHE_FILE))),
 			sweep: 0,
 		};
 		app.apply_gains();
+
+		// Drop entries whose file is gone. The one job in the app that gets a bare thread
+		// rather than `off_thread`: nothing waits for the answer and nothing on screen
+		// changes, so there is no message to send and no `Task` to carry it (PLAN §11a).
+		let pruning = app.cache.clone();
+		std::thread::spawn(move || {
+			pruning.prune();
+		});
 
 		// Open where the last run left off, or on the home folder — so the first thing on
 		// screen is a real listing rather than an empty pane with a button in it. The
@@ -1082,13 +1106,14 @@ impl Clecta {
 
 		// The batch survives the job, because the arm needs it whether or not the job answers.
 		let asked = paths.clone();
+		let cache = self.cache.clone();
 
 		off_thread(
 			move || {
 				paths
 					.into_iter()
 					.map(|path| {
-						let length = audio::duration(&path);
+						let length = cached_duration(&cache, &path);
 						(path, length)
 					})
 					.collect::<Vec<_>>()
@@ -1252,7 +1277,7 @@ impl Clecta {
 					duration,
 				});
 
-				scan_peaks(id, path)
+				scan_peaks(id, path, self.cache.clone())
 			}
 			// `{error:#}` prints the anyhow chain on one line, which is what turns
 			// "cannot decode x.mp4" into "cannot decode x.mp4: unsupported codec".
@@ -1791,11 +1816,16 @@ fn list_folders(folder: PathBuf) -> Task<Message> {
 ///
 /// The error is flattened to a `String` here because a `Message` has to be `Clone` and an
 /// `anyhow::Error` is not — the same reason `fsio` returns one (PLAN §9).
-fn scan_peaks(id: DeckId, path: PathBuf) -> Task<Message> {
+///
+/// The cache is asked *inside* the job rather than before it (PLAN §11a). It reads a file and
+/// its answer arrives as a `fsync`-shaped write, so it belongs on the same side of the thread
+/// boundary as the decode it is replacing — and the app above is unchanged either way, because
+/// a hit and a scan produce the same message.
+fn scan_peaks(id: DeckId, path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 	let scanned = path.clone();
 
 	off_thread(
-		move || audio::peaks(&scanned).map_err(|error| format!("{error:#}")),
+		move || cached_peaks(&cache, &scanned).map_err(|error| format!("{error:#}")),
 		move |result| {
 			// Reported rather than swallowed: a strip that stays flat for ever with no line
 			// in the status bar is the one outcome worse than a slow scan.
@@ -1804,6 +1834,50 @@ fn scan_peaks(id: DeckId, path: PathBuf) -> Task<Message> {
 			Message::PeaksScanned(id, path.clone(), result)
 		},
 	)
+}
+
+/// A track's waveform: from the cache if it is there, from the file if it is not, and into the
+/// cache on the way past (PLAN §11a).
+///
+/// The two halves of the stamp rule live here and nowhere else. **No stamp, no caching** — a
+/// file that cannot be stat'd is scanned every time, which is the behaviour there was before
+/// the cache and is right for a path that is behaving strangely. And a scan that *fails* is
+/// not stored: the cache holds answers about files, not the fact that one of them would not
+/// open, which is a condition that can change under it.
+fn cached_peaks(cache: &Cache, path: &Path) -> anyhow::Result<Vec<f32>> {
+	let stamp = cache::stamp(path);
+
+	if let Some(stamp) = stamp
+		&& let Some(peaks) = cache.peaks(path, stamp)
+	{
+		return Ok(peaks);
+	}
+
+	let peaks = audio::peaks(path)?;
+	if let Some(stamp) = stamp {
+		cache.store_peaks(path, stamp, &peaks);
+	}
+	Ok(peaks)
+}
+
+/// The same, for a track's length (PLAN §7a, §11a).
+///
+/// The one difference from the waveform is what happens to a failure, and it is not an
+/// inconsistency: `audio::duration` has no error to report, only the *absence* of a length,
+/// and "this file has no length" is an answer worth remembering — it is exactly what stops the
+/// queues re-opening an unreadable file on every edit for the rest of the run.
+fn cached_duration(cache: &Cache, path: &Path) -> Option<Duration> {
+	let Some(stamp) = cache::stamp(path) else {
+		return audio::duration(path);
+	};
+
+	if let Some(length) = cache.duration(path, stamp) {
+		return length;
+	}
+
+	let length = audio::duration(path);
+	cache.store_duration(path, stamp, length);
+	length
 }
 
 /// The two testable things in this module: what a divider drag is allowed to store

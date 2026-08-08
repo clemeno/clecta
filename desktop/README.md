@@ -124,6 +124,15 @@ cargo build --release --target x86_64-apple-darwin
   a browser, not a corner case. It is plain JSON you can edit: a value that makes no
   sense falls back to its default on its own, and a file that will not parse at all reads
   as defaults rather than stopping the app (PLAN §11).
+- **A waveform is scanned once, not once per launch.** What has been worked out about a file
+  — its shape and its length — is kept in **`clecta-data/cache.redb`**, beside the settings
+  and travelling with them, so a portable install carries its own history. Reading a stored
+  waveform takes **54 µs against the 73 ms** the scan it replaces took, and the array is
+  bit-identical to the one a fresh scan would produce. An entry is good only for the file it
+  was written for: change the file and it is scanned again, on the next launch. It is only a
+  cache — **delete it whenever you like** and the app rebuilds it as it goes. Entries whose
+  file has gone are dropped at startup, so it stays the size of the library it describes
+  (PLAN §11a).
 
 ## What does not, yet
 
@@ -170,6 +179,7 @@ cargo build --release
 | `browser.rs` | extension → kind, the natural-numeric sort, the hidden filter, a selection surviving (or not) a refresh |
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
+| `cache.rs` | the record encoding without a database — an exact round trip, a changed size or timestamp reading as a miss, another format byte read as a miss rather than as noise, a length told apart from the absence of one, and a payload that is not a whole number of columns thrown away rather than truncated — then one pass over a real database in a temporary folder: store and read back, rewrite the fixture and watch its entry go stale, delete another and watch pruning drop exactly its entry |
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it, a queued track that no longer exists dropped without the rest of the queue |
 | `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height; plus which key means refresh — F5 and ⌘R yes, a bare `r` no |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |

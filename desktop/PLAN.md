@@ -98,6 +98,7 @@ type-checking is not running. §15 is the log.
 | `symphonia` | 0.5.5 (via rodio) | Container demux + codec decode | Pure Rust. MPL-2.0 — permissive, file-level copyleft; fine to link, and `cargo deny`'s licence allow-list must include it |
 | `rfd` | 0.17.2 | Native folder-open dialog | `NSOpenPanel` / Win32. Same crate as cmote |
 | `notify` | 8.2.0 | Watching the shown folder (§9) | FSEvents / `ReadDirectoryChangesW` — the OS pushes, nothing polls. CC0-1.0, already on the allow-list, and no `cc` on either target. Added after v1, on the strength of the pane being cheap to redraw |
+| `redb` | 4.1.0 | The file cache (§11a) | An embedded ACID key/value store in pure Rust, one dependency of its own (`libc` — declarations, not a compilation). MIT OR Apache-2.0, both already on the allow-list, and no `cc` on either target. **SQLite is what this is instead of**: `libsqlite3-sys` compiles C, which is the one thing `deny.toml` bans |
 | `serde` / `serde_json` | 1.0.229 / 1.0.151 | `clecta-data/settings.json` (§11) | `derive` on one small struct. A corrupt file is logged and treated as absent |
 | `anyhow` | 1.0.104 | App-level error handling | Context-rich errors, `?` everywhere |
 
@@ -1305,6 +1306,120 @@ aesthetic: it is the requirement.
 
 ---
 
+## 11a. The cache (`cache.rs`)
+
+`clecta-data/cache.redb`, beside `settings.json` and nothing like it: **what has already been
+worked out about other people's files**, so it is not worked out again. A waveform costs a
+third of a second of decoding per track (§14a) and was being paid on every launch, for the
+same files, for ever.
+
+### It is a cache, and that word does the work
+
+Everything below follows from one sentence: **deleting this file loses nothing but time.**
+Nothing reads it to decide what is *true* — only to avoid recomputing what is already known.
+So:
+
+- every failure is swallowed, because there is no caller that could do anything useful with a
+  `Result`. A database that will not open leaves the app doing exactly what it did before this
+  file existed;
+- a file that will not open is **deleted and recreated** rather than repaired, which turns
+  "corrupt once" into "cold once" instead of "no cache for ever";
+- **a miss is indistinguishable from no cache at all** — a missing entry, a stale one, a record
+  written by an older format and a database that is not there all return `None` down the same
+  path.
+
+That is also why the growth policy needs no number in it. At startup, entries whose file is
+gone are dropped, so the cache is bounded by the library it describes: 4–8 KB a track, under
+80 MB for ten thousand of them. No cap to tune, no eviction that can throw away the track you
+were about to want.
+
+### Not SQLite, and the reason is a ban we wrote on purpose
+
+The obvious answer is SQLite, and it is the wrong one *here*. `rusqlite` pulls
+`libsqlite3-sys`, which compiles C — and `deny.toml` bans `cc` outright, because the
+no-C-toolchain property (§11) is the one thing that makes "copy it anywhere and run it" true.
+§12 calls that ban a tripwire for exactly this moment, so it did its job: the choice became
+visible instead of quietly dying.
+
+**redb** is what SQLite would have been without the C: pure Rust, one dependency of its own
+(`libc`, which is declarations rather than a compilation), MIT OR Apache-2.0 — both already on
+the allow-list — a single file, and ACID. Checked rather than assumed: no `cc` in either
+target's tree, and `cargo deny` passes with no new allow-list entry.
+
+What is given up is SQL. There is no `SELECT … WHERE bpm > 120` here, and the day something
+wants one is the day this is revisited. What is *not* given up is the shape the later data
+needs: a table per kind of fact, keyed by the same file.
+
+### Two tables, not one record
+
+`waveforms` and `durations` are separate because they are worked out at different moments by
+different jobs — a waveform when a track is loaded, a length when it is queued. A table each
+means a write touches only what it knows, and it is where the next kind of fact goes: **a new
+table, not a migration**.
+
+Each value is a format byte, then the stamp, then the payload. The format byte is one byte and
+buys the only migration story a cache needs — bump it, and every old record reads as a miss
+and is overwritten the next time it is wanted. Without it a changed layout reads old bytes as
+new ones, which for an array of floats means a waveform of *noise* rather than an error.
+
+Peaks are stored as little-endian `f32`, four bytes a column, not quantised to a byte. The
+strip is a few hundred pixels wide and would never show the difference, but four times nothing
+is still nothing (8 KB at most), and an array that is **bit-identical to a fresh scan** means a
+cached waveform can never be the suspect when something looks wrong. A length is eight bytes
+of nanoseconds, or **no bytes at all** for a file that had none — the empty payload is how
+"asked, and there is no length" is told apart from "never asked", which is the same distinction
+`playlist::Item::duration` draws in memory and for the same reason.
+
+### The stamp, and what it is deliberately not
+
+An entry is good only for the file it was written for, and the test is **size plus modified
+time** — one `stat`, which the browser already does for every row it draws.
+
+Not a content hash. Hashing every byte is roughly what the scan it is avoiding costs, and
+hashing a sample of the bytes buys the rename case at the price of a read and a collision
+nobody can rule out. The two cases the stamp gets wrong cost exactly **one re-scan each**: a
+file edited without changing its length inside its filesystem's timestamp granularity — two
+seconds on FAT32, which a portable install on a USB stick may well be sitting on — and a file
+renamed or moved, which loses its entry and earns a new one. A cache that is occasionally cold
+is a cache; a cache that is occasionally *wrong* is a bug that looks like a corrupt file.
+
+A path that is not UTF-8 is simply never cached. Both shipped platforms produce UTF-8 for
+anything a person typed, and the alternative is `OsStr::as_encoded_bytes` and an `unsafe` to
+get back — a real cost whose only symptom is a track that re-scans.
+
+### Where it is asked, and where it is not
+
+**Inside the jobs, never on the GUI thread.** A commit is an `fsync`, which is §4's rule
+verbatim: if it blocks, it gets a thread. So `cached_peaks` and `cached_duration` sit on the
+far side of `off_thread`, replacing the decode they wrap, and the app above them is unchanged —
+a hit and a scan produce the same message. That is what kept this feature from touching the
+transport, the widget or the queues at all.
+
+The pruning pass is the one job in the app that gets a **bare `std::thread::spawn`** rather
+than `off_thread`: nothing waits for the answer and nothing on screen changes, so there is no
+message to send and no `Task` to carry it.
+
+Two asymmetries are deliberate. A **failed scan is not stored** — the cache holds answers about
+files, not the fact that one would not open, which is a condition that can change under it. A
+**length that came back empty is** stored, because `audio::duration` has no error to report,
+only the absence of a length, and that is exactly what stops the queues re-opening an
+unreadable file on every edit for the rest of the run.
+
+### What it actually bought, measured
+
+| | first time | from the cache |
+|---|---|---|
+| a 3½-minute WAV, `--release` | **73 ms** | **54 µs** |
+| a 3-second WAV, `--release` | 9.7 ms | 35 µs |
+
+The read is flat because a stored array is at most 2048 columns whatever the track's length,
+so the ratio grows with the file: **1 350×** for the WAV above, and an MP3 — 325 ms of
+symphonia rather than 73 ms of PCM passthrough (§14a) — lands nearer six thousand. Both arrays
+came back bit-identical to the scan that produced them, which is the property the `f32` storage
+was chosen for.
+
+---
+
 ## 12. Testing
 
 Rust's built-in `#[test]` / `#[cfg(test)]`, AAA pattern, no framework — same as cmote.
@@ -1400,6 +1515,18 @@ otherwise pure; anything needing a device or a real folder is manual.
   than assumed. One case exists only because the function is shared: the same offset names a
   different row at a pitch of 22 than at 24, which is what a hard-coded constant in a shared
   helper would have got quietly wrong.
+- **`cache.rs`** — two halves, and both are needed (§11a). The encoding is pure and is checked
+  without a database: a record that survives a round trip *exactly*, since a cached waveform is
+  supposed to be the same array a scan produced; a stamp that does not match reading as a miss,
+  for both a changed length and a changed timestamp; a record carrying another format byte
+  read as a miss rather than as an array of plausible noise; a length and the *absence* of one
+  told apart; and a payload that is not a whole number of `f32`s thrown away rather than
+  truncated, because a waveform missing its last column would draw without complaining.
+
+  Then one pass over a **real database in a temporary folder**, because "the bytes are right"
+  and "redb was asked the right question" are different claims: store and read back, a file
+  that was never cached, then rewrite the fixture and watch its entry stop answering, then
+  delete a second fixture and watch `prune` drop exactly its entry and leave the other alone.
 - **`ui/playlist.rs`** — `running_time`, which is the only thing in that file that is not
   widgets: how many tracks, how long they run, and the `+` that says the total is a floor
   rather than a figure. An empty list says *nothing at all* rather than `0 · 0:00`, because
@@ -1503,6 +1630,13 @@ the root.
   shipped target. The `[graph] targets` prune is what keeps it out, so the ban is a
   tripwire: the day a dependency needs a C compiler on Windows or macOS, CI says so
   instead of the property quietly dying.
+
+  **That day came, and the tripwire worked** (§11a). The obvious store for a waveform cache
+  is SQLite, and `rusqlite` pulls `libsqlite3-sys`, which compiles C on both shipped targets.
+  The ban turned "a dependency that quietly ends portability" into a decision someone had to
+  make out loud, and the answer was `redb` — the same shape without the compiler. Worth
+  recording because a tripwire nobody ever trips is indistinguishable from one that does not
+  work.
 - **No release build in CI.** The README's fourth local check is deliberately not a job:
   `clippy --all-targets` already type-checks everything, and `lto` + `codegen-units = 1`
   costs minutes per run to re-prove a thing that only matters at release time.
@@ -1853,6 +1987,8 @@ not to make the widget cleverer.
 | Q20 | Where a queue's scroll edges live, for a drag that has to reach an off-screen row | **The header and the footer *are* the edges.** Two strips that appeared with the drag would push every row down as it began — the caret's feedback loop, arriving before the user has aimed at anything — and two reserved for ever would spend twenty pixels of every list on something useful for a second at a time. The header and footer are already the top and bottom of the rows, and a button that is already held cannot press the buttons on them | §7a |
 | Q21 | Whether the app can work out where a queue is scrolled to | **No, and it does not have to.** The pane's height is whatever the players left over, and any number derived from `self.window` is a frame stale (Q16). So the scroll is `scroll_by`, which iced clamps against the real bounds, and the app learns the result rather than deciding it: a `scrollable` republishes its viewport on the next redraw whenever it has moved. That is also what keeps the virtualized rows following a scroll no pointer asked for | §7a, §9 |
 | Q22 | What to do about a track being queued twice | **Ask, across all three lists, with a native modal.** Refusing would be the app deciding something it cannot know — playing a track twice in a set is deliberate as often as it is a slip. The scope is the *set* rather than the destination list, because Cue 1 and Cue 2 each holding a track plays it twice just as surely as one list holding it twice. The modal is `rfd`, which the app already carries for **Load…**, against an in-app confirmation bar with its own state and two messages: the same trade §10 made, and reversible the day the question needs more than two answers | §7a |
+| Q23 | SQLite for the file cache | **No — `redb`, and the reason is a ban we wrote ourselves.** `rusqlite` pulls `libsqlite3-sys`, which compiles C on both shipped targets, and `deny.toml` bans `cc` because the no-C-toolchain property is what makes "copy it anywhere and run it" true (§11). §12 called that ban a tripwire for exactly this moment; this is the moment, and it worked. redb is the same shape without the compiler — pure Rust, ACID, one file, MIT OR Apache-2.0 already on the allow-list. What is given up is SQL, and the day something wants a `WHERE` clause is the day to revisit it | §11a, §12 |
+| Q24 | What makes a cached entry stale | **Size plus modified time — one `stat`, not a hash.** Hashing every byte costs about what the scan it avoids costs; hashing a sample buys the rename case for a read and a collision nobody can rule out. The two cases the stamp gets wrong cost exactly one re-scan each: an in-place edit inside FAT32's two-second granularity, and a rename. A cache that is occasionally cold is a cache; one that is occasionally *wrong* is a bug that looks like a corrupt file | §11a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
@@ -1866,7 +2002,7 @@ size were the easy part.
 Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
 the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
 one use of the window's height that was enough to keep the defect alive. Both were settled
-the same way, by looking at a running window. That is now four of the twenty-two (Q7, Q10,
+the same way, by looking at a running window. That is now four of the twenty-four (Q7, Q10,
 Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
 and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
 

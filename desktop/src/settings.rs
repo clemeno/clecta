@@ -1,4 +1,8 @@
-//! The one file clecta writes: `clecta-data/settings.json` (PLAN §11).
+//! What clecta remembers about *itself*: `clecta-data/settings.json` (PLAN §11).
+//!
+//! One of the two files it writes, and the one that is the source of truth. The other is the
+//! cache beside it (`cache.rs`, PLAN §11a), which holds what has been worked out about other
+//! people's files and can be deleted at any time without losing anything but time.
 //!
 //! The rule that shapes this module is that **a settings file must never be able to stop
 //! the app from starting**. Absent, empty, truncated, wrong types, hand-edited nonsense —
