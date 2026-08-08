@@ -721,6 +721,24 @@ aesthetic: it is the requirement.
   plain `fs::write`, not write-to-temp-then-rename: losing the fader positions to a crash
   *mid-write* costs one run of defaults. **The remaining gap is a kill or a crash within
   two seconds of a change**, which is the honest cost of not writing per slider frame.
+- **The folder does not wait for the throttle.** A successful directory listing writes the
+  file there and then. The two-second window is the right price for a fader, which changes
+  sixty times a second and whose exact value nobody can name; it is the wrong price for the
+  folder, which changes once and is the setting a user most expects to survive quitting
+  right after they set it. Navigating and quitting inside two seconds is not a corner case —
+  it is what "open the folder and go" looks like.
+
+  It cost four lines and no new state, because `dirty` already says exactly the right thing:
+  a listing flushes **only when something is actually unsaved**. That guard is what keeps a
+  refresh, and the listing that opens the app, from writing a file they did not change. A
+  listing that *fails* does not flush — the folder is still shown, so the throttle will
+  store it, but a folder the app could not read is not this run's last word.
+
+  Verified by making the branch unreachable-by-accident and then reaching it. The throttle
+  was temporarily set to sixty seconds so that any write at all had to come from the flush;
+  the file was written 1.9 s after launch, which is a debug build creating a wgpu surface,
+  not the flush taking its time. With the throttle back at two seconds, a boot that changes
+  nothing still leaves the file untouched — the regression this guard exists to prevent.
 - **One binary, no installer.** Same release profile as cmote (`lto`,
   `codegen-units = 1`, `strip`, `panic = "abort"`). `#![windows_subsystem = "windows"]`
   in `main.rs` so no console window pops on Windows (inert on macOS).

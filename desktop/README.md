@@ -71,7 +71,9 @@ cargo build --release --target x86_64-apple-darwin
   registry keys, no `~/Library` unless the app itself sits somewhere unwritable. Delete
   the folder and you have deleted clecta. The file is written **two seconds after you
   change something**, and again when the window closes, so quitting any way at all — ⌘Q
-  included — keeps your settings. It is plain JSON you can edit: a value that makes no
+  included — keeps your settings. Changing folder does not wait: it is saved the moment the
+  listing appears, because navigating and quitting straight after is the ordinary way to use
+  a browser, not a corner case. It is plain JSON you can edit: a value that makes no
   sense falls back to its default on its own, and a file that will not parse at all reads
   as defaults rather than stopping the app (PLAN §11).
 

@@ -179,7 +179,8 @@ pub struct Clecta {
 	/// the audio device is (PLAN §7).
 	notice: String,
 	/// A persisted setting has changed and is not on disk yet. Drives the autosave
-	/// subscription, which exists only while this is true.
+	/// subscription, which exists only while this is true — and is what lets a successful
+	/// folder listing flush early without turning every refresh into a write.
 	dirty: bool,
 	/// The scanning animation's step counter. A plain integer rather than a timestamp, so
 	/// nothing in `view` has to read the clock — the phase is whatever the last `Sweep`
@@ -414,7 +415,22 @@ impl Clecta {
 					return Task::none();
 				}
 				match result {
-					Ok(entries) => self.browser.show(folder, entries),
+					Ok(entries) => {
+						self.browser.show(folder, entries);
+						// A listing that arrives is the moment the new folder becomes real,
+						// so it goes to disk now instead of in two seconds — quitting
+						// straight after navigating is exactly when the throttle loses it.
+						//
+						// Guarded by `dirty` for the same reason `boot` clears it: a refresh
+						// and the listing that opens the app both land here having changed
+						// nothing, and neither should rewrite the file. A listing that
+						// *failed* deliberately does not save: the folder is shown, so the
+						// throttle will still store it, but not as this run's last word.
+						if self.dirty {
+							self.settings().save();
+							self.dirty = false;
+						}
+					}
 					Err(error) => {
 						self.notice = error.clone();
 						self.browser.fail(error);
