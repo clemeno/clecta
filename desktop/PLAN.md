@@ -52,7 +52,7 @@ type-checking is not running. §15 is the log.
 | Naming | **Idiomatic Rust** — `snake_case`, `SCREAMING_SNAKE` consts, no Hungarian prefixes. Same reasoning as cmote §15: the org's C-family rules fight `rustc`'s own lints. Tabs are honoured by `hard_tabs = true` in `rustfmt.toml` |
 | Targets | **`x86_64-pc-windows-msvc`** (Windows 11) **and `x86_64-apple-darwin`** (macOS Sequoia, Intel) — both first-class, dual CI, same pair as cmote |
 | Distribution | **Portable, as a hard requirement**: one self-contained binary, no installer, no registry / `plist` writes, and **every file clecta writes lives in `clecta-data/` beside the executable** (§11) |
-| Persistence | One **`clecta-data/settings.json`**: crossfader curve, both faders, the crossfader, last folder, window size, the players' height. Corrupt file → defaults, never a crash |
+| Persistence | One **`clecta-data/settings.json`**: crossfader curve, both faders, the crossfader, last folder, window size, the players' height, and the three queues — the only unbounded thing in it (§7a). Corrupt file → defaults, never a crash |
 | Drop targeting | **In-app drag is aimed** (we own the pointer); an **OS drag lands on the idle player** — no track, else not playing, else Player 1 — and the hover ring shows which (§10) |
 
 ---
@@ -212,12 +212,14 @@ clecta/
         ├── tree.rs      the folder tree's model: nodes, expansion, path arithmetic (§9)
         ├── fsio.rs      std::fs reads run off the GUI thread: list a dir, list its subfolders, the roots (§9)
         ├── paths.rs     clecta-data/ beside the app if writable, else the per-user dir; the .app walk-up (§11)
+        ├── playlist.rs  PURE queue arithmetic: three lists, their edits, and what each does to the selection (§7a)
         ├── settings.rs  load/save clecta-data/settings.json; a corrupt file reads as defaults (§11)
         ├── waveform.rs  PURE peak arithmetic: fold a file's samples to a bounded array, fit it to pixels (§14a)
         └── ui/
             ├── mod.rs       shared view helpers (elide_middle, the section splitters)
             ├── deck.rs      one player's panel: title, transport buttons, time, drop ring
             ├── mixer.rs     the two faders and the crossfader
+            ├── playlist.rs  one queue's panel: add, select, reorder, send to a neighbour (§7a)
             ├── browser.rs   the files pane and its rows
             ├── tree.rs      the folder tree pane, its splitter and its fold button
             └── waveform.rs  the custom advanced::Widget: a bar per pixel column, the playhead, the scrub (§14a)
@@ -476,6 +478,119 @@ Two things the docs did not mention, both found by running it rather than readin
 - **rodio's control tick is 5 ms** (`periodic_access`), which is the unit every
   pause/seek/volume change is quantised to. That is what makes the stop ordering above
   matter, and it is the floor on how tightly any two transport calls can be sequenced.
+
+---
+
+## 7a. The queues (`playlist.rs`, `ui/playlist.rs`)
+
+Three lists, drawn as a second row inside the players panel: **Cue 1** under Player 1, **Cue
+2** under Player 2, and **Next up** under the mixer, shared between them.
+
+### rodio's queue is the wrong queue
+
+§14 deferred this with a one-line plan: *"rodio's `Player` is already a queue; v1 just never
+appends more than one source."* That line is wrong, and it is worth saying why before
+anything else, because it is the kind of wrong that would have been discovered three days in.
+
+Appending a second source to rodio's `Player` breaks four things the app already has:
+
+- `Track::duration` and the waveform describe **one file**. A queued second source is not in
+  either.
+- Seeking would seek within the concatenation, so the strip and the playhead would stop
+  agreeing with the audio.
+- `Ended` is `Player::empty()` going true on the tick (§4, §7). It does **not** go true
+  *between* queued sources, so the app would never learn that the track changed — the title,
+  the waveform and the time readout would all still be describing the track that finished.
+- The transport state machine has no state for "playing, but a different track than the one
+  loaded".
+
+So the queue is **app-managed**: a list of paths, and on `Ended` the app loads the next one
+through the same `load` every other door uses. rodio keeps playing exactly one source at a
+time, which is the arrangement everything else in §7 was built on.
+
+### One rule for when a queue is read
+
+**A track ending is the only event that pulls from a queue.** Not a player sitting empty at
+startup, not a file being added to a list, not a load that failed. That is what makes every
+automatic load traceable to a track the user heard end, and it means adding files to a list
+never causes a sound.
+
+When a player's track ends, `next_source` decides where the replacement comes from: **its own
+cue first, the shared list second.** A track deliberately cued to Player 1 outranks the pool,
+which is what makes the pool "whatever is free" rather than a third queue with rules of its
+own. Both empty, and the player just stops, as it always did.
+
+The new track **lands on `Stopped`**, like every other load (§7). It is ready at 0:00 with its
+waveform scanning, and audible only when someone presses Play. On a mixer an unrequested
+fade-in is a mistake that cannot be taken back, and §7's "a successful load always lands on
+Stopped" did not need an exception carved into it.
+
+The track is *taken* out of the list rather than marked as played: a queue is what is still to
+come, so the row leaving as it reaches the player is what makes the list mean that.
+
+### The selection is the hard part
+
+Everything in `playlist.rs` is `Vec` arithmetic, and all of it exists to answer one question:
+**what happens to the highlighted row when the list moves under it?** A row that stays
+highlighted while a different track slides beneath it is worse than no highlight at all — the
+next button press then acts on something the user did not point at.
+
+So the selection is an **index**, not a path — the opposite of the files pane (§9), because a
+queue may hold the same track twice and a path does not name a row — and every edit carries it:
+
+- an insert **above** the selection pushes it down, so the highlight stays on its track;
+- removing a row above it pulls it up;
+- removing the selected row leaves the highlight on **the row that slid into its place**, so
+  pressing remove three times removes three consecutive rows rather than needing a re-aim
+  after each;
+- removing the last row falls back to the new last row, and an empty list selects nothing;
+- `shift` swaps two rows **and follows whichever of them was selected** — the one a
+  swap-only implementation gets wrong.
+
+Each of those is a test, and one of them earned its place immediately: the first `remove`
+used a `?` inside a `match` arm to find the fallback index, which returns from `remove`
+*itself* — so the row was deleted, the function reported that nothing had been removed, and
+the selection was left pointing at a track that was gone. Written out longhand instead.
+
+### What the buttons are
+
+Per list: **⤒** and **⤓** add the files pane's selection to the top or the end. They live on
+each list rather than in the browser's header because there are three lists and two ways in:
+six buttons in one header would each need a label saying which list they meant, where a button
+sitting *on* a list needs none.
+
+**✕** removes the selected row, **▲ ▼** move it, and **← →** send it to the neighbouring list,
+appended. The arrows sit at the outer edges of each list's footer, facing the list they send
+to, so the pair either side of a gap reads as one control *between* two lists. Neighbours
+only: Cue 1 and Cue 2 are not adjacent, so a track cannot be thrown across the shared list
+without stopping there — which is the point of the middle list being in the middle.
+
+Every button is **dead rather than absent** when it cannot act, and dead for a specific
+reason each time: nothing selected, already at the top, already at the bottom, no neighbour in
+that direction, nothing addable selected in the browser.
+
+### Layout, and what a divider drag now grows
+
+The three lists are a second row *inside* the fixed-height players panel (§6), each under its
+own column. The controls above them — title, time, waveform, transport, mixer — are all
+fixed-size rows, so the panel's player half **shrinks to its content** and the list takes
+everything left over. That is what makes dragging the one divider grow the *queues*, which is
+the thing whose useful size varies, rather than padding the players with empty space.
+
+The default `decks_height` grows 300 → 480 to fit them. An existing `settings.json` keeps
+whatever height it had, so an upgrade opens with short queues until the divider is dragged —
+which is the right trade against overriding a value the user chose.
+
+### Persistence
+
+All three lists are in `settings.json` (§11), and they are the **only unbounded thing in that
+file** — worth saying out loud, because everything else there is one number. A cue list built
+over an evening and lost to a quit is worse than no cue list.
+
+Stored as plain paths, and sanitized on the way in like every other field: a queued track that
+has been deleted, renamed or unmounted is **dropped**, and so is one whose extension is not
+media. A queue is a promise about what plays next, and the worst possible moment to discover a
+broken row is when a track ends and the next one is due. One bad path does not empty the list.
 
 ---
 
@@ -1035,6 +1150,14 @@ otherwise pure; anything needing a device or a real folder is manual.
   immediately**: it caught that `f32::clamp` passes a `NaN` through unchanged, so the
   first version's clamp was decoration and a mis-measured strip would have panicked
   `Duration::mul_f32` on the click (§14b).
+- **`playlist.rs`** — the queues (§7a), and almost every test is about the *selection* rather
+  than the list: an insert above it carries it down, a remove above it pulls it up, removing
+  the selected row lands on whatever slid into its place, removing the last row falls back to
+  the new last, and a shift takes the highlight with the track it moved. Plus the two rules
+  around them — the arrows reach a neighbour and only a neighbour, and `next_source` prefers a
+  player's own cue over the shared list. The remove test paid for itself on the first run: a
+  `?` in a `match` arm was returning from `remove` itself, so the row was deleted, the
+  function said nothing had been, and the selection pointed at a track that was gone.
 - **`ui/browser.rs`** — `visible_rows(scroll, total)`, the virtualization's whole arithmetic
   (§9). A range wrong by one row leaves a blank strip where a row should be; wrong by a lot
   shows an empty pane over a full folder. So: a folder shorter than the cap is built whole,
@@ -1165,8 +1288,6 @@ path, so `/ponytail-debt` can harvest them later.
   time-stretch stage rodio does not have (`rubato` or a phase vocoder).
 - **Headphone cue / pre-listen.** Needs a *second* output device and a second mixer —
   the point at which the "one shared stream" decision in §4 has to be revisited.
-- **A queue / playlist per player.** rodio's `Player` is already a queue; v1 just never
-  appends more than one source.
 - **Watching the tree.** The files pane watches the folder it shows (§9); the tree does not
   watch the folders it lists. One watcher per expanded folder against one for the app, for a
   pane whose contents change far less often.

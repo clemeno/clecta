@@ -9,6 +9,7 @@
 pub mod browser;
 pub mod deck;
 pub mod mixer;
+pub mod playlist;
 pub mod tree;
 pub mod waveform;
 

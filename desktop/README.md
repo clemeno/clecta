@@ -47,6 +47,15 @@ cargo build --release --target x86_64-apple-darwin
   on from the new place and a paused one stays paused there. A scrub follows the pointer
   past either end of the strip and off the panel, and stops wherever you let go (PLAN §14a,
   §14b).
+- **Three queues.** A cue list under each player, and a shared **Next up** under the mixer.
+  When a track ends, that player takes the next one — **its own cue first, the shared list
+  second** — and loads it *stopped* at 0:00, so nothing ever becomes audible without a Play
+  press. A track ending is the only thing that pulls from a list: adding files never starts a
+  sound. **⤒ ⤓** on each list add whatever the files pane has selected, to the top or the end;
+  **✕ ▲ ▼** edit the selection; **← →** hand it to the neighbouring list. Cue 1 and Cue 2 are
+  not neighbours, so a track crosses through the shared list rather than jumping. All three
+  survive a restart, and a queued file that has been deleted or renamed since is dropped
+  rather than left to fail at the moment it is due (PLAN §7a).
 - **The mixer strip.** A volume fader per player and a crossfader, with a
   **Power / Linear** curve selector. The number beside each fader is the gain actually
   sent to that player, so the cubic taper and the crossfade are visible as they move.
@@ -90,8 +99,8 @@ cargo build --release --target x86_64-apple-darwin
   rather than ignored (PLAN §10).
 - **No audio device is survivable.** The app still browses, says so in the status bar,
   and offers **Reconnect audio** (PLAN §11).
-- **It is portable.** Both faders, the crossfader, the curve, the folder, the window size
-  and the players' height come back next launch, from **`clecta-data/settings.json` beside the executable** —
+- **It is portable.** Both faders, the crossfader, the curve, the folder, the window size,
+  the players' height and the three queues come back next launch, from **`clecta-data/settings.json` beside the executable** —
   beside the `.app`, not inside it, on macOS. Nothing is written anywhere else: no
   registry keys, no `~/Library` unless the app itself sits somewhere unwritable. Delete
   the folder and you have deleted clecta. The file is written **two seconds after you
@@ -109,6 +118,10 @@ cargo build --release --target x86_64-apple-darwin
   in clecta's own code. The upgrade path is upstream, and PLAN §10 spells it out.
 - **No video picture** — the audio track of an `.mp4` / `.mkv` plays, and that is v1
   (PLAN §14). No cue points, no tempo.
+- **No dragging into or within a queue.** The lists are built and reordered with their
+  buttons; a drag still only targets a player. Reordering by drag, dragging between lists,
+  dragging a file from the browser straight into a list, and dragging a queued row onto a
+  player are all designed and next up (PLAN §7a).
 
 ## Checks
 
@@ -147,16 +160,17 @@ cargo build --release
 | `browser.rs` | extension → kind, the natural-numeric sort, the hidden filter, a selection surviving (or not) a refresh |
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
-| `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
+| `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it, a queued track that no longer exists dropped without the rest of the queue |
 | `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height; plus which key means refresh — F5 and ⌘R yes, a bare `r` no |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
 | `ui/waveform.rs` | the scrub's three rules: a press arms only over the strip, a move seeks only while the button is held and follows it outside the strip too, a release disarms wherever it happens |
+| `playlist.rs` | what every queue edit does to the selection — an insert above it carries it down, a remove above it pulls it up, removing the selected row lands on what slid into its place, a shift takes the highlight with the track — plus the arrows reaching a neighbour and only a neighbour, and the next track coming from a player's own cue before the shared list |
 | `ui/browser.rs` | which rows the pane builds: a short folder built whole, the window moving by whole rows as it scrolls, the end of a long list still filling the pane, and a negative or `NaN` scroll offset still naming real rows |
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Nine things the suite cannot reach, all of which need a window a person can look at. **Five
-of the nine pass on macOS, by hand**; the last four are new and unchecked. The last two
+Ten things the suite cannot reach, all of which need a window a person can look at. **Five
+of the ten pass on macOS, by hand**; the last five are new and unchecked. The last two
 rounds are why the list exists: three of the app's defects so far were found here and none
 of them by a passing test.
 
@@ -209,6 +223,11 @@ of them by a passing test.
   running app. What a script cannot do is click a folder in the tree, and that is the case
   worth an eye: the watcher is keyed on the path, so choosing another folder has to tear the
   old one down and start one on the new place, with no watcher left behind (PLAN §9).
+- **A queue handing over at the end of a track.** *Not checked yet*, and the one worth
+  waiting for: every edit to a list is tested, but the handover itself is not — that a track
+  running out really does load the next one, that it lands *stopped* rather than playing, that
+  the title and the waveform follow it, and that the shared list is reached only when that
+  player's own cue is empty. It needs two short tracks and a minute of listening (PLAN §7a).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.

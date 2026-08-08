@@ -49,6 +49,14 @@ pub struct Settings {
 	/// because that panel's rows are fixed-size and a taller window should give the extra
 	/// space to the browser (PLAN §6).
 	pub decks_height: f32,
+	/// The two per-player queues, in player order, and the shared one (PLAN §7a).
+	///
+	/// The only *unbounded* thing this file holds, which is the reason to say out loud that
+	/// it is worth it: a cue list built over an evening and lost to a quit is worse than no
+	/// cue list. Stored as plain paths — a queue is an ordered list of files and nothing
+	/// else, so there is no state here that could go stale except the files themselves.
+	pub cues: [Vec<PathBuf>; 2],
+	pub common: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -59,9 +67,12 @@ impl Default for Settings {
 			crossfader: 0.5,
 			folder: None,
 			window: (1180.0, 760.0),
-			// Enough for the two panels' four rows and the mixer's controls, and leaving the
+			// Enough for the two panels' four rows, the mixer's controls, and a queue under
+			// each of them deep enough to be worth looking at (PLAN §7a) — while leaving the
 			// rest of a default window to the browser.
-			decks_height: 300.0,
+			decks_height: 480.0,
+			cues: [Vec::new(), Vec::new()],
+			common: Vec::new(),
 		}
 	}
 }
@@ -151,6 +162,19 @@ impl Settings {
 			self.folder = None;
 		}
 
+		// A queued track that has been deleted, renamed or unmounted since the last run.
+		// Dropped rather than kept, because a queue is a promise about what plays next and a
+		// row that cannot play is a promise the app would break at the worst moment — when a
+		// track ends and the next one is due. The rest of the queue survives, which is the
+		// same "one bad value does not take the good ones with it" rule as the faders above.
+		for queue in self
+			.cues
+			.iter_mut()
+			.chain(std::iter::once(&mut self.common))
+		{
+			queue.retain(|path| path.is_file() && crate::browser::kind_of(path).is_media());
+		}
+
 		self
 	}
 }
@@ -158,6 +182,14 @@ impl Settings {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A real file with a media extension. `sanitized` drops a queued path that is not one,
+	/// so a fixture built from imaginary paths would fail its own round trip.
+	fn queued(name: &str) -> PathBuf {
+		let path = std::env::temp_dir().join(name);
+		std::fs::write(&path, b"x").expect("the temp file for a queue fixture");
+		path
+	}
 
 	/// Settings with nothing left at its default, so a round trip that drops a field is
 	/// visible.
@@ -170,6 +202,11 @@ mod tests {
 			folder: Some(std::env::temp_dir()),
 			window: (900.0, 600.0),
 			decks_height: 260.0,
+			cues: [
+				vec![queued("clecta-cue-one.mp3")],
+				vec![queued("clecta-cue-two.flac")],
+			],
+			common: vec![queued("clecta-common.wav")],
 		}
 	}
 
@@ -246,6 +283,31 @@ mod tests {
 
 		// Act / Assert: `None` means "open on home", which always exists.
 		assert_eq!(Settings::from_json(text).folder, None);
+	}
+
+	#[test]
+	fn a_queued_track_that_no_longer_exists_is_dropped_without_the_rest() {
+		// Arrange: a queue holding one real media file, one that was deleted since the last
+		// run, and one that is not media at all — a settings file someone hand-edited.
+		let real = queued("clecta-queue-survivor.mp3");
+		let sleeve = queued("clecta-queue-sleeve.jpg");
+		let settings = Settings {
+			common: vec![
+				PathBuf::from("/nowhere/gone.mp3"),
+				real.clone(),
+				sleeve.clone(),
+			],
+			..Settings::default()
+		};
+
+		// Act
+		let common = settings.sanitized().common;
+
+		// Assert: a queue is a promise about what plays next, and the worst moment to
+		// discover a broken one is when a track ends and the next is due. The good row
+		// survives — one bad path does not empty the list.
+		assert_eq!(common, vec![real], "kept the one that can still play");
+		assert!(!common.contains(&sleeve), "a .jpg is not a queueable track");
 	}
 
 	#[test]

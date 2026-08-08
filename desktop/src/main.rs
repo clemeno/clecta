@@ -13,6 +13,7 @@ mod deck;
 mod fsio;
 mod mixer;
 mod paths;
+mod playlist;
 mod settings;
 mod tree;
 mod ui;

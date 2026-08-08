@@ -1,0 +1,431 @@
+//! The three queues (PLAN §7a): one in front of each player, and one shared between them.
+//!
+//! Pure, like `deck.rs` and for the same reason — every rule here is an edit to a list, and
+//! an edit to a list is exactly the kind of thing that is wrong by one and looks right. So
+//! the whole module is `Vec` arithmetic with no iced and no filesystem, and the interesting
+//! part is not the moving but **what happens to the selection when the list moves under
+//! it**: a row that stays highlighted while a different track slides beneath it is worse
+//! than no highlight at all.
+
+use std::path::PathBuf;
+
+use crate::deck::DeckId;
+
+/// Which of the three lists. The player-owned ones are `Cue`, the shared one is `Common`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListId {
+	/// What one player plays next, and no other player's business.
+	Cue(DeckId),
+	/// The shared pool: whichever player finishes first takes from it (PLAN §7a).
+	Common,
+}
+
+impl ListId {
+	/// All three, left to right as they are drawn — which is also the order the `←` and `→`
+	/// buttons step through, so `neighbour` and the layout cannot disagree.
+	pub const ALL: [ListId; 3] = [
+		ListId::Cue(DeckId::One),
+		ListId::Common,
+		ListId::Cue(DeckId::Two),
+	];
+
+	/// Index into a three-element array of anything per-list.
+	pub fn index(self) -> usize {
+		match self {
+			ListId::Cue(DeckId::One) => 0,
+			ListId::Common => 1,
+			ListId::Cue(DeckId::Two) => 2,
+		}
+	}
+
+	/// What the user calls this list.
+	pub fn label(self) -> &'static str {
+		match self {
+			ListId::Cue(DeckId::One) => "Cue 1",
+			ListId::Common => "Next up",
+			ListId::Cue(DeckId::Two) => "Cue 2",
+		}
+	}
+
+	/// The list one step in this direction, or `None` at either end.
+	///
+	/// Neighbours only: `Cue 1` and `Cue 2` are not adjacent, so the arrows cannot throw a
+	/// track across the shared list without it stopping there. That is the point of the
+	/// middle list being in the middle.
+	pub fn neighbour(self, right: bool) -> Option<ListId> {
+		let step = if right { 1 } else { -1 };
+		let index = self.index() as isize + step;
+
+		ListId::ALL.get(usize::try_from(index).ok()?).copied()
+	}
+}
+
+/// One queued track: a path, and the name the view draws every frame.
+///
+/// The name is cached for the same reason `deck::Track` caches it — `Path::file_name`
+/// returns an `OsStr` that would be re-converted on every row of every frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Item {
+	pub path: PathBuf,
+	pub name: String,
+}
+
+impl Item {
+	pub fn new(path: PathBuf) -> Self {
+		let name = crate::fsio::name_of(&path);
+		Self { path, name }
+	}
+}
+
+/// One list, and which of its rows is selected.
+///
+/// Selected by **index**, not by path, which is the opposite of the files pane (`browser.rs`)
+/// and deliberately so: a queue may hold the same track twice — playing something twice in a
+/// set is a thing people do — so a path does not name a row. The price is that every edit has
+/// to carry the selection with it, which is what most of this module is.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Playlist {
+	items: Vec<Item>,
+	selected: Option<usize>,
+}
+
+impl Playlist {
+	/// Build from stored paths (PLAN §11). Nothing is selected on a fresh start.
+	pub fn from_paths(paths: Vec<PathBuf>) -> Self {
+		Self {
+			items: paths.into_iter().map(Item::new).collect(),
+			selected: None,
+		}
+	}
+
+	/// The paths, for the settings file.
+	pub fn paths(&self) -> Vec<PathBuf> {
+		self.items.iter().map(|item| item.path.clone()).collect()
+	}
+
+	pub fn items(&self) -> &[Item] {
+		&self.items
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.items.is_empty()
+	}
+
+	pub fn selected(&self) -> Option<usize> {
+		self.selected
+	}
+
+	/// Select a row, or clear the selection if the index is not one.
+	pub fn select(&mut self, index: usize) {
+		self.selected = (index < self.items.len()).then_some(index);
+	}
+
+	/// Add to the end. The selection does not move: rows above it are untouched.
+	pub fn append(&mut self, item: Item) {
+		self.items.push(item);
+	}
+
+	/// Add to the front — "play this next" without a reorder.
+	pub fn prepend(&mut self, item: Item) {
+		self.insert(0, item);
+	}
+
+	/// Add at a position, clamped to the end. The selection follows its row down.
+	pub fn insert(&mut self, index: usize, item: Item) {
+		let index = index.min(self.items.len());
+		self.items.insert(index, item);
+
+		if let Some(selected) = self.selected.as_mut()
+			&& *selected >= index
+		{
+			*selected += 1;
+		}
+	}
+
+	/// Take a row out, and leave the selection somewhere sensible.
+	///
+	/// Removing the selected row leaves the selection on the row that *slid up into its
+	/// place* — the next track — rather than jumping to the top or vanishing, so pressing
+	/// remove three times removes three consecutive rows.
+	pub fn remove(&mut self, index: usize) -> Option<Item> {
+		if index >= self.items.len() {
+			return None;
+		}
+		let item = self.items.remove(index);
+
+		self.selected = match self.selected {
+			// Above the hole: unmoved.
+			Some(selected) if selected < index => Some(selected),
+			// Below it: shifted up with everything else.
+			Some(selected) if selected > index => Some(selected - 1),
+			// It *was* the hole. Keep the index if a row slid into it, else the new last row,
+			// else there is nothing left to select. Written out rather than with a `?`,
+			// which would return from `remove` itself and throw the removed item away.
+			Some(_) if self.items.is_empty() => None,
+			Some(_) => Some(index.min(self.items.len() - 1)),
+			None => None,
+		};
+
+		Some(item)
+	}
+
+	/// Take the row the player would play next, which is always the top one.
+	pub fn take_next(&mut self) -> Option<Item> {
+		self.remove(0)
+	}
+
+	/// Take the selected row out, for the `←` / `→` buttons and a drag that leaves the list.
+	pub fn take_selected(&mut self) -> Option<Item> {
+		self.remove(self.selected?)
+	}
+
+	/// Move a row one place up or down, carrying the selection with it — the selection names
+	/// a *track*, so a track that moves must take its highlight along.
+	///
+	/// `false` at either end rather than a silent no-op, so the caller can leave the button
+	/// disabled instead of offering a press that does nothing.
+	pub fn shift(&mut self, index: usize, up: bool) -> bool {
+		let Some(other) = (if up {
+			index.checked_sub(1)
+		} else {
+			(index + 1 < self.items.len()).then_some(index + 1)
+		}) else {
+			return false;
+		};
+		if index >= self.items.len() {
+			return false;
+		}
+
+		self.items.swap(index, other);
+		if self.selected == Some(index) {
+			self.selected = Some(other);
+		} else if self.selected == Some(other) {
+			self.selected = Some(index);
+		}
+
+		true
+	}
+}
+
+/// Where the track after this one comes from, when a player's track ends (PLAN §7a).
+///
+/// **Own cue first, the shared list second.** A track deliberately cued to Player 1 outranks
+/// the pool, which is what makes the pool "whatever is free" rather than a third queue with
+/// rules of its own. `None` when both are empty, and the player simply stops.
+pub fn next_source(id: DeckId, cue: &Playlist, common: &Playlist) -> Option<ListId> {
+	if !cue.is_empty() {
+		Some(ListId::Cue(id))
+	} else if !common.is_empty() {
+		Some(ListId::Common)
+	} else {
+		None
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn list(names: &[&str]) -> Playlist {
+		Playlist::from_paths(
+			names
+				.iter()
+				.map(|name| PathBuf::from("/m").join(name))
+				.collect(),
+		)
+	}
+
+	fn names(list: &Playlist) -> Vec<&str> {
+		list.items().iter().map(|item| item.name.as_str()).collect()
+	}
+
+	#[test]
+	fn the_arrows_only_reach_a_neighbour() {
+		// Arrange / Act / Assert: the middle list is the only way across, so a track cannot
+		// jump from one player's cue to the other's in one press.
+		let (one, two) = (ListId::Cue(DeckId::One), ListId::Cue(DeckId::Two));
+
+		assert_eq!(one.neighbour(true), Some(ListId::Common));
+		assert_eq!(ListId::Common.neighbour(true), Some(two));
+		assert_eq!(two.neighbour(false), Some(ListId::Common));
+		assert_eq!(ListId::Common.neighbour(false), Some(one));
+
+		// And the ends are ends — this is what disables the buttons.
+		assert_eq!(one.neighbour(false), None, "left of the first");
+		assert_eq!(two.neighbour(true), None, "right of the last");
+	}
+
+	#[test]
+	fn every_list_has_its_own_slot() {
+		// Arrange / Act / Assert: `index` is what makes `[Playlist; 3]` legal, so a
+		// collision would silently merge two lists into one.
+		let indices: Vec<usize> = ListId::ALL.iter().map(|id| id.index()).collect();
+		assert_eq!(indices, vec![0, 1, 2]);
+	}
+
+	#[test]
+	fn adding_puts_a_track_where_it_was_asked_to_go() {
+		// Arrange
+		let mut list = list(&["b.mp3", "c.mp3"]);
+
+		// Act
+		list.append(Item::new(PathBuf::from("/m/d.mp3")));
+		list.prepend(Item::new(PathBuf::from("/m/a.mp3")));
+
+		// Assert
+		assert_eq!(names(&list), ["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
+	}
+
+	#[test]
+	fn an_insert_above_the_selection_carries_it_down() {
+		// Arrange: the third row selected.
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
+		list.select(2);
+
+		// Act: something arrives at the top.
+		list.prepend(Item::new(PathBuf::from("/m/new.mp3")));
+
+		// Assert: the highlight is still on `c.mp3`, which is now row 3. A selection that
+		// stayed on index 2 would be highlighting `b.mp3` — the same row, a different track.
+		assert_eq!(list.selected(), Some(3));
+		assert_eq!(names(&list)[3], "c.mp3");
+
+		// An insert *below* it moves nothing.
+		list.insert(4, Item::new(PathBuf::from("/m/last.mp3")));
+		assert_eq!(list.selected(), Some(3));
+	}
+
+	#[test]
+	fn removing_the_selected_row_selects_what_slid_into_its_place() {
+		// Arrange
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
+		list.select(1);
+
+		// Act
+		let removed = list.remove(1);
+
+		// Assert: the next track, so pressing remove repeatedly removes consecutive rows
+		// rather than requiring a re-aim after each one.
+		assert_eq!(removed.map(|item| item.name), Some("b.mp3".to_string()));
+		assert_eq!(list.selected(), Some(1));
+		assert_eq!(names(&list)[1], "c.mp3");
+	}
+
+	#[test]
+	fn removing_the_last_row_falls_back_to_the_new_last_row() {
+		// Arrange: the bottom row selected, with nothing below to slide up.
+		let mut list = list(&["a.mp3", "b.mp3"]);
+		list.select(1);
+
+		// Act / Assert
+		list.remove(1);
+		assert_eq!(
+			list.selected(),
+			Some(0),
+			"the row above takes the highlight"
+		);
+
+		list.remove(0);
+		assert_eq!(list.selected(), None, "an empty list has nothing to select");
+		assert!(list.is_empty());
+	}
+
+	#[test]
+	fn removing_a_row_above_the_selection_keeps_the_same_track_selected() {
+		// Arrange
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
+		list.select(2);
+
+		// Act: a row above the selection goes.
+		list.remove(0);
+
+		// Assert: still `c.mp3`, one row higher.
+		assert_eq!(list.selected(), Some(1));
+		assert_eq!(names(&list)[1], "c.mp3");
+	}
+
+	#[test]
+	fn taking_the_next_track_takes_the_top_one() {
+		// Arrange
+		let mut list = list(&["a.mp3", "b.mp3"]);
+
+		// Act / Assert
+		assert_eq!(list.take_next().map(|item| item.name), Some("a.mp3".into()));
+		assert_eq!(names(&list), ["b.mp3"]);
+		assert_eq!(list.take_next().map(|item| item.name), Some("b.mp3".into()));
+		assert_eq!(list.take_next(), None, "an empty queue stops the player");
+	}
+
+	#[test]
+	fn shifting_a_row_takes_its_highlight_with_it() {
+		// Arrange
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
+		list.select(2);
+
+		// Act
+		assert!(list.shift(2, true));
+
+		// Assert: the track moved and the highlight went with it. This is the one a
+		// swap-only implementation gets wrong.
+		assert_eq!(names(&list), ["a.mp3", "c.mp3", "b.mp3"]);
+		assert_eq!(list.selected(), Some(1));
+	}
+
+	#[test]
+	fn shifting_the_row_a_selection_swaps_with_moves_the_selection_too() {
+		// Arrange: move the row *above* the selected one down onto it.
+		let mut list = list(&["a.mp3", "b.mp3"]);
+		list.select(1);
+
+		// Act
+		assert!(list.shift(0, false));
+
+		// Assert: `b.mp3` is now row 0 and is still the selected track.
+		assert_eq!(names(&list), ["b.mp3", "a.mp3"]);
+		assert_eq!(list.selected(), Some(0));
+	}
+
+	#[test]
+	fn a_row_cannot_be_shifted_off_either_end() {
+		// Arrange / Act / Assert: `false` rather than a no-op, so the button is drawn dead
+		// instead of offering a press that does nothing.
+		let mut list = list(&["a.mp3", "b.mp3"]);
+
+		assert!(!list.shift(0, true), "up from the top");
+		assert!(!list.shift(1, false), "down from the bottom");
+		assert!(!list.shift(9, true), "a row that is not there");
+		assert_eq!(names(&list), ["a.mp3", "b.mp3"], "nothing moved");
+	}
+
+	#[test]
+	fn selecting_a_row_that_is_not_there_selects_nothing() {
+		// Arrange / Act / Assert: the guard that keeps every `selected` index valid, which
+		// the rest of this module assumes.
+		let mut list = list(&["a.mp3"]);
+		list.select(5);
+		assert_eq!(list.selected(), None);
+	}
+
+	#[test]
+	fn the_next_track_comes_from_the_players_own_cue_first() {
+		// Arrange: both lists have something.
+		let cue = list(&["mine.mp3"]);
+		let common = list(&["shared.mp3"]);
+		let empty = Playlist::default();
+
+		// Act / Assert: the deliberate cue outranks the pool.
+		assert_eq!(
+			next_source(DeckId::One, &cue, &common),
+			Some(ListId::Cue(DeckId::One))
+		);
+
+		// The pool is the fallback, not the first choice…
+		assert_eq!(
+			next_source(DeckId::Two, &empty, &common),
+			Some(ListId::Common)
+		);
+
+		// …and two empty lists mean the player just stops.
+		assert_eq!(next_source(DeckId::One, &empty, &empty), None);
+	}
+}

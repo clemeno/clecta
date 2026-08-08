@@ -66,7 +66,9 @@ pub fn view(id: DeckId, deck: &Deck, ring: bool, sweep: f32) -> Element<'_, Mess
 	.style(move |theme: &Theme| panel_style(theme, ring))
 	.padding(12)
 	.width(Fill)
-	.height(Fill)
+	// Shrink, not `Fill`: every row above is a fixed size, so filling would only pad the
+	// panel with empty space — and the queue below it is what should take the room a
+	// divider drag adds (PLAN §7a).
 	.into()
 }
 

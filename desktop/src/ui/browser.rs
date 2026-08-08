@@ -189,7 +189,7 @@ fn file_row(entry: &Entry, selected: bool) -> Element<'_, Message> {
 
 /// A selected row gets a filled background; every other row gets nothing, so the
 /// selection is the only thing the eye is drawn to.
-fn row_style(theme: &Theme, selected: bool) -> container::Style {
+pub fn row_style(theme: &Theme, selected: bool) -> container::Style {
 	if !selected {
 		return container::Style::default();
 	}

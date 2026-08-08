@@ -27,6 +27,7 @@ use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
+use crate::playlist::{self, ListId, Playlist};
 use crate::settings::Settings;
 use crate::tree::Tree;
 use crate::{fsio, ui};
@@ -151,6 +152,18 @@ pub enum Message {
 	/// The files pane was scrolled. Not a preference — the view needs it to know which rows
 	/// are worth building (PLAN §9).
 	Scrolled(scrollable::Viewport),
+	/// A queue row was clicked. The index, not the path: a queue may hold the same track
+	/// twice (PLAN §7a).
+	QueueSelected(ListId, usize),
+	/// Add the browser's selection to a queue — at the top when `true`, at the end when
+	/// `false`.
+	QueueAdd(ListId, bool),
+	/// Take the selected row out of a queue.
+	QueueRemove(ListId),
+	/// Move the selected row one place up (`true`) or down (`false`).
+	QueueMove(ListId, bool),
+	/// Send the selected row to the neighbouring queue, right (`true`) or left (`false`).
+	QueueShift(ListId, bool),
 	/// A disclosure arrow in the tree.
 	FolderToggled(PathBuf),
 	/// The tree's fold button.
@@ -245,6 +258,9 @@ pub struct Clecta {
 	/// settle timer the same way `dirty` drives the autosave: it exists only while this is
 	/// true, so a folder nothing is happening in costs nothing (PLAN §9).
 	stale: bool,
+	/// The three queues, indexed by `ListId::index` (PLAN §7a): one in front of each player,
+	/// and the shared one between them.
+	queues: [Playlist; 3],
 	/// The scanning animation's step counter. A plain integer rather than a timestamp, so
 	/// nothing in `view` has to read the clock — the phase is whatever the last `Sweep`
 	/// left behind.
@@ -295,6 +311,11 @@ impl Clecta {
 			notice,
 			dirty: false,
 			stale: false,
+			queues: [
+				Playlist::from_paths(settings.cues[0].clone()),
+				Playlist::from_paths(settings.common.clone()),
+				Playlist::from_paths(settings.cues[1].clone()),
+			],
 			sweep: 0,
 		};
 		app.apply_gains();
@@ -318,6 +339,11 @@ impl Clecta {
 			folder: self.browser.folder.clone(),
 			window: self.window,
 			decks_height: self.decks_height,
+			cues: [
+				self.queues[ListId::Cue(DeckId::One).index()].paths(),
+				self.queues[ListId::Cue(DeckId::Two).index()].paths(),
+			],
+			common: self.queues[ListId::Common.index()].paths(),
 		}
 	}
 
@@ -413,7 +439,7 @@ impl Clecta {
 
 	fn update(&mut self, message: Message) -> Task<Message> {
 		match message {
-			Message::Tick => self.poll_players(),
+			Message::Tick => return self.poll_players(),
 
 			Message::Transport(id, event) => self.transport(id, event),
 
@@ -470,6 +496,57 @@ impl Clecta {
 			}
 
 			Message::FolderTouched => self.stale = true,
+
+			Message::QueueSelected(id, index) => self.queues[id.index()].select(index),
+
+			// Every arm below edits a queue, and every queue is persisted, so each ends in
+			// `queued` rather than repeating the `dirty` flag four times.
+			Message::QueueAdd(id, prepend) => {
+				// Read from the *browser*, not from a payload on the message: the button was
+				// drawn from this same selection, so carrying a path would be carrying a copy
+				// of something that cannot have changed in between.
+				if let Some(entry) = self
+					.browser
+					.selection()
+					.filter(|entry| entry.kind.is_media())
+				{
+					let item = playlist::Item::new(entry.path.clone());
+					let queue = &mut self.queues[id.index()];
+
+					if prepend {
+						queue.prepend(item);
+					} else {
+						queue.append(item);
+					}
+					self.queued();
+				}
+			}
+
+			Message::QueueRemove(id) => {
+				if let Some(index) = self.queues[id.index()].selected() {
+					self.queues[id.index()].remove(index);
+					self.queued();
+				}
+			}
+
+			Message::QueueMove(id, up) => {
+				if let Some(index) = self.queues[id.index()].selected()
+					&& self.queues[id.index()].shift(index, up)
+				{
+					self.queued();
+				}
+			}
+
+			Message::QueueShift(id, right) => {
+				// Both halves or neither: a track taken out of one list and not put into
+				// another is a track the user just lost.
+				if let Some(target) = id.neighbour(right)
+					&& let Some(item) = self.queues[id.index()].take_selected()
+				{
+					self.queues[target.index()].append(item);
+					self.queued();
+				}
+			}
 
 			// No `dirty`: where the pane is scrolled to is not something a restart should
 			// restore, and marking it would write `settings.json` every time a wheel turned.
@@ -656,15 +733,21 @@ impl Clecta {
 
 	/// Read the playhead and watch for the end of a track — the whole GUI↔audio bridge
 	/// (PLAN §4).
-	fn poll_players(&mut self) {
-		let Some(engine) = self.engine.as_ref() else {
-			return;
-		};
+	fn poll_players(&mut self) -> Task<Message> {
+		if self.engine.is_none() {
+			return Task::none();
+		}
+
+		let mut ended = Vec::new();
 
 		for id in DeckId::ALL {
 			if !self.decks[id.index()].is_playing() {
 				continue;
 			}
+
+			// Re-borrowed each time round rather than held: the loop now calls `&mut self`
+			// methods, and the engine is only read.
+			let engine = self.engine.as_ref().expect("checked above");
 
 			if engine.finished(id) {
 				// There is no end-of-track callback in rodio; `empty()` going true on the
@@ -672,10 +755,48 @@ impl Clecta {
 				let deck = &mut self.decks[id.index()];
 				deck.transport = deck::transition(deck.transport, deck::Event::Ended);
 				deck.position = Duration::ZERO;
+				ended.push(id);
 			} else {
 				self.decks[id.index()].position = engine.position(id);
 			}
 		}
+
+		// After the loop, not inside it: `advance` loads, and loading is a `&mut self` call
+		// that would fight the engine borrow above.
+		Task::batch(ended.into_iter().map(|id| self.advance(id)))
+	}
+
+	/// Give a player that has just finished the next track from a queue (PLAN §7a).
+	///
+	/// **Only from here**, which is the whole dispatch rule: a track ending is the one event
+	/// that pulls from a queue. A player sitting empty at startup is left alone, so adding
+	/// files to a list never loads anything by itself and every automatic load can be traced
+	/// back to a track the user heard end.
+	///
+	/// The track is *taken* rather than marked played: a queue is what is still to come, so
+	/// the row leaving the list as it reaches the player is what makes the list mean that.
+	fn advance(&mut self, id: DeckId) -> Task<Message> {
+		let cue = &self.queues[ListId::Cue(id).index()];
+		let common = &self.queues[ListId::Common.index()];
+
+		let Some(source) = playlist::next_source(id, cue, common) else {
+			return Task::none();
+		};
+		let Some(item) = self.queues[source.index()].take_next() else {
+			return Task::none();
+		};
+
+		self.queued();
+		// Lands on `Stopped`, like every other load (PLAN §7): the next track is ready at
+		// 0:00 and audible only when someone presses Play. On a mixer an unrequested fade-in
+		// is a mistake that cannot be taken back.
+		self.load(id, item.path)
+	}
+
+	/// A queue changed, so the settings file is out of date. One place, so the four editing
+	/// arms and `advance` cannot each remember it differently.
+	fn queued(&mut self) {
+		self.dirty = true;
 	}
 
 	/// Apply a transport event to both the model and the audio thread, in that order of
@@ -980,19 +1101,45 @@ impl Clecta {
 	}
 
 	/// The top section: two players with the mixer strip between them (PLAN §6).
+	/// The players, the mixer, and the queue under each of them (PLAN §6, §7a).
+	///
+	/// Three columns, and each column is its control above its list. The controls are all
+	/// fixed-size rows, so they take what they need and the **list takes the rest** — which
+	/// is what makes dragging the divider grow the queues rather than pad the players with
+	/// empty space.
 	fn decks_view(&self) -> Element<'_, Message> {
 		let ring = self.drop_ring();
+		// Asked once for all three lists: they each draw the same two add buttons, and the
+		// answer is a property of the files pane rather than of any list.
+		let addable = self
+			.browser
+			.selection()
+			.is_some_and(|entry| entry.kind.is_media());
+
+		let queue = |id: ListId| ui::playlist::view(id, &self.queues[id.index()], addable);
 
 		row![
-			self.deck_view(DeckId::One, ring),
-			container(ui::mixer::view(
-				&self.decks[0],
-				&self.decks[1],
-				self.crossfader,
-				self.curve,
-			))
+			column![
+				self.deck_view(DeckId::One, ring),
+				queue(ListId::Cue(DeckId::One))
+			]
+			.spacing(8),
+			column![
+				container(ui::mixer::view(
+					&self.decks[0],
+					&self.decks[1],
+					self.crossfader,
+					self.curve,
+				)),
+				queue(ListId::Common),
+			]
+			.spacing(8)
 			.width(MIXER_WIDTH),
-			self.deck_view(DeckId::Two, ring),
+			column![
+				self.deck_view(DeckId::Two, ring),
+				queue(ListId::Cue(DeckId::Two))
+			]
+			.spacing(8),
 		]
 		.spacing(8)
 		.padding(8)
