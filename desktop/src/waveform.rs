@@ -138,6 +138,26 @@ pub fn sweep_band(width: f32, phase: f32) -> Option<(f32, f32)> {
 	(end > start).then_some((start, end))
 }
 
+/// Where a click `x` pixels into a strip `width` wide lands in the track, as a fraction of
+/// its length. `None` for a strip with no width.
+///
+/// The `None` is not politeness about a degenerate case. The caller multiplies a `Duration`
+/// by this, and `Duration::mul_f32` **panics** on a `NaN` rather than saturating — so a
+/// mis-measured strip would take the app down mid-click.
+///
+/// Guarding the width alone is not enough, which the test below found rather than the
+/// author: `f32::clamp` passes a `NaN` **straight through**, so `clamp(0.0, 1.0)` is not a
+/// range guarantee at all. The range test on the way out is the actual guard; the clamp
+/// only handles a pointer dragged past either edge.
+pub fn seek_fraction(width: f32, x: f32) -> Option<f32> {
+	if width <= 0.0 {
+		return None;
+	}
+
+	let fraction = (x / width).clamp(0.0, 1.0);
+	(0.0..=1.0).contains(&fraction).then_some(fraction)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -270,6 +290,35 @@ mod tests {
 					"phase {phase} gave {start}..{end}"
 				);
 			}
+		}
+	}
+
+	#[test]
+	fn a_click_maps_to_the_fraction_of_the_track_under_it() {
+		// Arrange / Act / Assert: both ends exact, because clicking the very start of a
+		// strip has to mean 0 and not "nearly 0".
+		assert_eq!(seek_fraction(400.0, 0.0), Some(0.0));
+		assert_eq!(seek_fraction(400.0, 400.0), Some(1.0));
+		assert_eq!(seek_fraction(400.0, 100.0), Some(0.25));
+	}
+
+	#[test]
+	fn a_click_can_never_produce_a_fraction_that_panics_a_duration() {
+		// Arrange / Act / Assert: `Duration::mul_f32` panics on a `NaN` or a negative, so
+		// this is the guard that keeps a mis-measured strip from taking the app down.
+		assert_eq!(seek_fraction(0.0, 10.0), None, "a strip with no width");
+		assert_eq!(seek_fraction(-5.0, 10.0), None, "a negative width");
+
+		// A pointer past either edge — reachable while a button is held and dragged.
+		assert_eq!(seek_fraction(400.0, -30.0), Some(0.0), "left of the strip");
+		assert_eq!(seek_fraction(400.0, 900.0), Some(1.0), "right of the strip");
+
+		for (width, x) in [(400.0, f32::NAN), (f32::NAN, 10.0), (400.0, f32::INFINITY)] {
+			let fraction = seek_fraction(width, x);
+			assert!(
+				fraction.is_none_or(|f| (0.0..=1.0).contains(&f)),
+				"width {width}, x {x} gave {fraction:?}"
+			);
 		}
 	}
 

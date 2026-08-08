@@ -11,12 +11,15 @@
 //! built-in widget's background is made of: there is no second, lower rendering layer
 //! being reached for.
 //!
-//! Display only, deliberately: no `update`, so clicking it does not seek yet (PLAN §14).
+//! It is now a control as well as a picture: `update` turns a click into a seek, which is
+//! the two extra methods PLAN §14 said scrubbing would cost — `update` for the event and
+//! `mouse_interaction` so the pointer says the strip is clickable before it is clicked.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer;
 use iced::advanced::widget::{Tree, Widget};
-use iced::{Element, Length, Rectangle, Size, Theme, mouse};
+use iced::advanced::{Clipboard, Shell};
+use iced::{Element, Event, Length, Rectangle, Size, Theme, mouse};
 
 use crate::waveform;
 
@@ -43,14 +46,21 @@ const SWEEP_BAR: f32 = 4.0;
 /// Borrows the scan rather than owning it — the array lives in the `Deck` and is rebuilt
 /// only when a track is loaded, so cloning it into the view every frame would be a copy of
 /// a couple of thousand floats for nothing.
-struct Waveform<'a> {
+struct Waveform<'a, Message> {
 	peaks: &'a [f32],
 	/// `0.0..=1.0`, or `None` when there is nothing to measure against: an empty player,
 	/// or a stream whose length the decoder could not work out (PLAN §7).
+	///
+	/// Doubles as the answer to "is this strip clickable?", which is not a coincidence: a
+	/// strip with no total to place a playhead against has no total to seek within either.
 	progress: Option<f32>,
 	/// The scanning animation's phase, `0.0..=1.0`, or `None` when no scan is running —
 	/// which covers an empty player and a scan that failed as well as a finished one.
 	sweep: Option<f32>,
+	/// What a click means, as a fraction of the track. The widget deliberately does not
+	/// know what a second is: turning the fraction into a `Duration` needs the track's
+	/// length, which lives in the `Deck`.
+	on_seek: Box<dyn Fn(f32) -> Message + 'a>,
 }
 
 /// The strip, ready to drop into a panel.
@@ -61,11 +71,13 @@ pub fn view<'a, Message: 'a>(
 	peaks: &'a [f32],
 	progress: Option<f32>,
 	sweep: Option<f32>,
+	on_seek: impl Fn(f32) -> Message + 'a,
 ) -> Element<'a, Message> {
 	Element::new(Waveform {
 		peaks,
 		progress,
 		sweep,
+		on_seek: Box::new(on_seek),
 	})
 }
 
@@ -84,12 +96,72 @@ pub fn view<'a, Message: 'a>(
 /// | not yet played | `secondary.base` | `#878a90` |
 /// | already played | `primary.base` | `#5865f2` |
 /// | the playhead | `danger.base` | `#c3423f` |
-impl<Message, Renderer> Widget<Message, Theme, Renderer> for Waveform<'_>
+impl<Message, Renderer> Widget<Message, Theme, Renderer> for Waveform<'_, Message>
 where
 	Renderer: renderer::Renderer,
 {
 	fn size(&self) -> Size<Length> {
 		Size::new(Length::Fill, Length::Fixed(HEIGHT))
+	}
+
+	/// A left press inside the strip is a seek (PLAN §14).
+	///
+	/// Press, not release: a transport control should answer the instant the button goes
+	/// down, and waiting for the release would make a click that drifted a few pixels feel
+	/// like it went somewhere else.
+	///
+	/// No `Tree` state, so this stays a stateless widget. That is only possible because a
+	/// *click* needs no memory — a drag-scrub would need the button-held flag, and that is
+	/// the line this deliberately does not cross.
+	fn update(
+		&mut self,
+		_tree: &mut Tree,
+		event: &Event,
+		layout: Layout<'_>,
+		cursor: mouse::Cursor,
+		_renderer: &Renderer,
+		_clipboard: &mut dyn Clipboard,
+		shell: &mut Shell<'_, Message>,
+		_viewport: &Rectangle,
+	) {
+		if self.progress.is_none()
+			|| !matches!(
+				event,
+				Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+			) {
+			return;
+		}
+
+		let bounds = layout.bounds();
+		let Some(cursor) = cursor.position_over(bounds) else {
+			return;
+		};
+
+		if let Some(fraction) = waveform::seek_fraction(bounds.width, cursor.x - bounds.x) {
+			shell.publish((self.on_seek)(fraction));
+			// Nothing under this strip handles a left press today — the panel's `mouse_area`
+			// exists only while a drag is armed and only watches enter/exit. This is the
+			// contract every built-in control keeps anyway: a widget that acted on a click
+			// says so, rather than letting it fall through and be acted on twice.
+			shell.capture_event();
+		}
+	}
+
+	/// A pointer over a strip that can be seeked, and nothing over one that cannot — so an
+	/// empty player is visibly not a control, without needing a disabled look.
+	fn mouse_interaction(
+		&self,
+		_tree: &Tree,
+		layout: Layout<'_>,
+		cursor: mouse::Cursor,
+		_viewport: &Rectangle,
+		_renderer: &Renderer,
+	) -> mouse::Interaction {
+		if self.progress.is_some() && cursor.is_over(layout.bounds()) {
+			mouse::Interaction::Pointer
+		} else {
+			mouse::Interaction::None
+		}
 	}
 
 	/// `atomic`, because this widget has no children and no intrinsic size to negotiate:

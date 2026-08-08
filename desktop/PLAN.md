@@ -812,7 +812,10 @@ Pure logic is tested; anything needing a device or a real folder is manual.
   every width is in range**, including widgets wider and narrower than the scan and a
   column past the end of its own width — and the same guard for the scanning band, which
   slides in from off one edge and out past the other and must never be drawn outside the
-  strip on the way.
+  strip on the way. `seek_fraction` is here too, and it is the test that **paid for itself
+  immediately**: it caught that `f32::clamp` passes a `NaN` through unchanged, so the
+  first version's clamp was decoration and a mis-measured strip would have panicked
+  `Duration::mul_f32` on the click (§14b).
 - **`audio.rs`** — one test, and the only one this module can have: everything else here
   needs an output device. A *scan* does not, so the decode path is checked for real, from a
   file on disk to the array the widget draws. The fixture is generated rather than
@@ -905,9 +908,10 @@ path, so `/ponytail-debt` can harvest them later.
 - **Video rendering.** v1 decodes the audio track only. Upgrade path: an ffmpeg binding
   and a texture in a custom iced widget — a large C dependency and a licensing question,
   worth paying only when the picture is actually the feature.
-- **Scrubbing.** Clicking the waveform to seek. The display landed (§14a); the *gesture*
-  did not, and it is the interesting half — a `Widget` that handles events needs `update`
-  and a `Shell`, which the display-only one does not. `audio.rs` already seeks, for Stop.
+- **Drag-scrubbing.** Clicking the waveform to seek **landed** — see §14b, which is where
+  the prediction this entry made got checked. What is still deferred is holding the button
+  and dragging: that needs `Tree` state for the held flag, which is the line the widget
+  currently does not cross.
 - **Cue points, loops, tempo / pitch, BPM detection.** Real DJ features. Tempo needs a
   time-stretch stage rodio does not have (`rubato` or a phase vocoder).
 - **Headphone cue / pre-listen.** Needs a *second* output device and a second mixer —
@@ -1031,12 +1035,13 @@ Two traps came with running it in the background, both of which are the same tra
   scan *lands* would leave the outgoing track's shape on screen under the incoming track's
   playhead for a few seconds, which reads as a bug rather than as waiting.
 
-### The widget is three methods
+### The widget is three methods — then five
 
-`ui/waveform.rs` implements `advanced::Widget` and overrides `size`, `layout` and `draw`.
+`ui/waveform.rs` first implemented `advanced::Widget` with `size`, `layout` and `draw`.
 Everything else the trait asks for has a default that is already right for a widget with
 no children, no state and no events — which is worth saying out loud, because the trait
-looks like nine methods of work and is not.
+looks like nine methods of work and is not. Making it clickable (§14b) added exactly two
+more, and no state: the count went three, five, and stopped.
 
 `layout` is `layout::atomic`: no children to place, no intrinsic size to negotiate, take
 the width offered and the fixed height asked for. `draw` is `fill_quad` and nothing else —
@@ -1088,6 +1093,79 @@ already correct. The defect was entirely in the mapping from correct numbers to 
 pixels, and the only instrument for that is an eye. It took one glance to find what none of
 the automation could.
 
+---
+
+## 14b. Scrubbing (`ui/waveform.rs`, `audio.rs`)
+
+§14 deferred this and predicted what it would cost: "a `Widget` that handles events needs
+`update` and a `Shell`". That was right, and it was the whole bill — two methods, no state,
+and a strip that was a picture is now a control.
+
+### Seeking is the one thing that does not touch the transport
+
+The rule the user asked for, and the one worth writing down: **a click moves the playhead
+and nothing else.** Playing keeps playing from the new place; paused stays paused there;
+stopped stays stopped there. So `seek` is deliberately *not* a `deck::Event` and never
+reaches `transition`. §7's state machine has no edge for it because there is no edge to
+have — the transport is unchanged by definition, and adding a self-edge to every state
+would be writing down "nothing happens" four times.
+
+That also decides the rodio call. `stop` pauses *before* it seeks, for a reason the spike
+paid for: control changes land on a 5 ms tick and seeking first lets the callback play on
+from zero until the pause catches up. `seek` must not borrow that trick. A pause would be
+audible — a playing player would gap, and a paused one would need a `play` afterwards that
+the user never asked for. The price is that the landing point can be a tick out, which is
+1/200th of a second in a track and a fifth of a pixel in the strip.
+
+### The playhead has to be set by hand
+
+`deck.position` is normally whatever the last tick polled, and **the tick only runs while
+something plays** (§4). So a seek on a paused player would move the audio and leave the red
+line exactly where it was until someone pressed Play — a click that visibly does nothing,
+which is worse than a strip that is not clickable at all. `seek` writes the position itself.
+
+### `clamp` is not a range guarantee
+
+`seek_fraction` lives in `waveform.rs` with the rest of the arithmetic, and it exists for
+one reason: the caller multiplies a `Duration` by its result, and `Duration::mul_f32`
+**panics** on a `NaN` rather than saturating. A zero-width strip divides to `NaN`, so the
+first version guarded the width and clamped the result.
+
+The test found that this was not enough, which is the point of writing the test:
+
+```
+width 400, x NaN gave Some(NaN)
+```
+
+**`f32::clamp` passes a `NaN` straight through.** It is `if self < min … else if self > max
+… else self`, and every comparison against `NaN` is false, so `NaN` falls out of the `else`.
+A clamp reads like a range guarantee and is not one. The guard is now a range *test* on the
+way out — the same `!(0.0..=1.0).contains(…)` shape `settings.rs` already uses on a
+hand-edited file, and for exactly the same reason: this is a trust boundary, not a
+formality. The app-side handler repeats the test rather than trusting the widget, because
+it is the code that does the multiplying.
+
+### What the two new methods actually do
+
+- **`update`** acts on `ButtonPressed`, not `ButtonReleased`. A transport control should
+  answer as the button goes down; waiting for the release makes a click that drifted three
+  pixels feel like it landed somewhere else. It publishes a *fraction*, not a time: the
+  widget does not know what a second is, and the track's length lives in the `Deck`. It
+  captures the event afterwards — nothing under the strip handles a left press today, but
+  a widget that acted on a click saying so is the contract every built-in control keeps.
+- **`mouse_interaction`** returns `Pointer` over a seekable strip and `None` otherwise,
+  where "seekable" is `progress.is_some()` — the same test that decides whether a playhead
+  is drawn, and not a coincidence: a strip with no total to place a playhead against has no
+  total to seek within. An empty player therefore reads as not-a-control without needing a
+  greyed-out look.
+
+Still no `Tree` state, which is what keeps this cheap: a *click* needs no memory. Holding
+the button and dragging would need the held flag, and that is the line §14 still defers.
+
+---
+
+## 15. The decision log
+
 | # | Question | Decision | Landed in |
 |---|---|---|---|
 | Q1 | Audio engine | **rodio 0.22** — cpal + symphonia with the mixing already written; the real-time layer is a `Source` away if it later becomes the lesson | §1, §2, §3 |
@@ -1102,6 +1180,8 @@ the automation could.
 | Q10 | Picking colours from a palette | **Compare the values, never trust the role name.** Not a preference either: `background.weak` is what `rounded_box` paints a panel, so a strip using it for its bed drew nothing at all | §14a |
 | Q11 | Where long work runs | **A `std::thread` and a `oneshot`, not `Task::perform`.** iced's smol executor defaults to *one* worker, so CPU work in an async block stops every subscription in the app — the playhead clock froze while a track was being scanned | §4, §14a |
 | Q12 | Saying a scan is running | **A band sweeping the strip, from the first frame.** In the strip rather than the status bar, because the strip is what is being waited for; no 250 ms threshold, because the gate costs more than the flash it prevents | §14a |
+| Q13 | When a folder is saved | **Immediately on a successful listing**, not on the 2 s throttle. The throttle's price is right for a fader that moves sixty times a second and wrong for a folder that moves once; navigating and quitting straight after is ordinary use, not a corner case | §11 |
+| Q14 | What a seek does to the transport | **Nothing.** Playing keeps playing from the new place, paused stays paused there. Not a `deck::Event` and never through `transition`, because a self-edge on all four states is "nothing happens" written four times — and no pause around `try_seek`, which would gap a playing track | §14b, §7 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

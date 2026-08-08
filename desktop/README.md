@@ -42,8 +42,9 @@ cargo build --release --target x86_64-apple-darwin
   its own, and the strip fills in when it lands — around a third of a second for a
   three-minute track. The player is playable the whole time, and a band sweeps the strip
   while the scan runs so the wait is visible rather than mysterious. The part already
-  played is coloured, and a playhead crosses it. It is a picture, not a control: clicking
-  it does not seek yet (PLAN §14a, §14).
+  played is coloured, and a playhead crosses it. **Click it to jump there** — the transport
+  does not change, so a playing track carries on from the new place and a paused one stays
+  paused there (PLAN §14a, §14b).
 - **The mixer strip.** A volume fader per player and a crossfader, with a
   **Power / Linear** curve selector. The number beside each fader is the gain actually
   sent to that player, so the cubic taper and the crossfade are visible as they move.
@@ -82,9 +83,9 @@ cargo build --release --target x86_64-apple-darwin
 - **No aiming an OS drop.** A file dragged in from Finder goes to the idle player, not to
   the one under the cursor — the position is thrown away by winit and is not recoverable
   in clecta's own code. The upgrade path is upstream, and PLAN §10 spells it out.
-- **No scrubbing.** The waveform shows where you are; it will not take you somewhere else.
-  The seek itself already exists — Stop uses it — so what is missing is the gesture
-  (PLAN §14).
+- **No drag-scrubbing.** Clicking the waveform jumps; holding and dragging along it does
+  not follow. A click needs no memory, so the widget stays stateless; a drag would need the
+  button-held flag (PLAN §14).
 - **No video picture** — the audio track of an `.mp4` / `.mkv` plays, and that is v1
   (PLAN §14). No cue points, no tempo.
 - **No list virtualization.** A folder of five thousand files builds five thousand
@@ -128,12 +129,12 @@ real folder is manual (PLAN §12):
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
 | `settings.rs` | a round trip, four kinds of broken file reading as defaults, a missing field keeping its default, one bad value falling back without taking the good ones with it |
-| `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, and the scanning band never drawn outside the strip |
+| `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, every pixel column of every width in range, the scanning band never drawn outside the strip, and a click never producing a fraction that would panic a `Duration` |
 | `audio.rs` | one scan of a real file — a generated WAV, silent for a second then loud for a second — which is the only thing in this module that needs no audio device |
 | `ui/mod.rs` | eliding, sizes, the calendar (including a leap day), the clock |
 
-Three things the suite cannot reach, all of which need a window a person can look at.
-**All three now pass on macOS, by hand:**
+Four things the suite cannot reach, all of which need a window a person can look at. **The
+first three pass on macOS, by hand:**
 
 - **The close-button save.** ⌘Q *was* the open question here, and the answer was that it
   never reaches the app at all — so the settings are now written on a two-second throttle
@@ -151,6 +152,11 @@ Three things the suite cannot reach, all of which need a window a person can loo
   because the bars were painted thirteen levels of grey away from the panel behind them.
   Numbers cannot catch that; screen capture from a script is blocked by the same permission
   wall as scripted clicking, so it takes an eye (PLAN §14a).
+- **The seek gesture** — new, and the one item on this list not yet confirmed. The
+  arithmetic behind it is tested and the wiring type-checks, but a click is precisely what
+  cannot be scripted here. What wants looking at: that the playhead lands where the pointer
+  was, that a playing track keeps playing and a paused one stays paused, and that the
+  pointer turns into a hand over a loaded strip but not over an empty one (PLAN §14b).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.

@@ -44,7 +44,12 @@ pub fn view(id: DeckId, deck: &Deck, ring: bool, sweep: f32) -> Element<'_, Mess
 				deck.track.as_ref().and_then(|track| track.duration)
 			))
 			.size(13),
-			ui::waveform::view(&deck.peaks, progress(deck), deck.scanning.then_some(sweep)),
+			ui::waveform::view(
+				&deck.peaks,
+				progress(deck),
+				deck.scanning.then_some(sweep),
+				move |fraction| Message::Seeked(id, fraction),
+			),
 			row![
 				transport_button("▶", deck::Event::Play, loaded && !deck.is_playing()),
 				transport_button("⏸", deck::Event::Pause, deck.is_playing()),

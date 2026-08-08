@@ -130,6 +130,9 @@ pub enum Message {
 	PeaksScanned(DeckId, PathBuf, Result<Vec<f32>, String>),
 	/// Advance the scanning animation one step. Sent only while a scan is running.
 	Sweep,
+	/// The waveform was clicked, at this fraction of the track. Moves the playhead and
+	/// nothing else — a playing player keeps playing, a paused one stays paused (PLAN §14).
+	Seeked(DeckId, f32),
 	/// The window was resized. Recorded, then saved with everything else once the app has
 	/// been still for `SAVE_AFTER`.
 	WindowResized(Size),
@@ -529,6 +532,8 @@ impl Clecta {
 			// Wrapping, because this counter is only ever read modulo `SWEEP_STEPS`, and an
 			// app left scanning for three years should not panic in a debug build.
 			Message::Sweep => self.sweep = self.sweep.wrapping_add(1),
+
+			Message::Seeked(id, fraction) => self.seek(id, fraction),
 		}
 
 		Task::none()
@@ -560,6 +565,50 @@ impl Clecta {
 
 	/// Apply a transport event to both the model and the audio thread, in that order of
 	/// authority: the state machine decides, the engine follows.
+	/// Move a player's playhead to a fraction of its track, and change nothing else.
+	///
+	/// Not a `deck::Event`, and deliberately not routed through `transition`: seeking is
+	/// the one thing that moves a player without moving its transport. Playing keeps
+	/// playing from the new place, paused stays paused there. The state machine of §7 has
+	/// no edge for this because there is no edge to have.
+	fn seek(&mut self, id: DeckId, fraction: f32) {
+		// No track, or a stream the decoder could give no length for (PLAN §7): there is
+		// nothing for a fraction to be a fraction of. The widget already declines to send
+		// this in that case; the guard is here because the message can outlive the frame
+		// that produced it.
+		let Some(total) = self.decks[id.index()]
+			.track
+			.as_ref()
+			.and_then(|track| track.duration)
+		else {
+			return;
+		};
+
+		// A range test rather than a clamp: `f32::clamp` passes a `NaN` through and
+		// `Duration::mul_f32` panics on one. Same reasoning as `waveform::seek_fraction`,
+		// which is what makes this second check cheap rather than redundant — it is the
+		// boundary of the module that does the multiplying.
+		if !(0.0..=1.0).contains(&fraction) {
+			return;
+		}
+		let to = total.mul_f32(fraction);
+
+		if let Some(engine) = self.engine.as_ref()
+			&& let Err(error) = engine.seek(id, to)
+		{
+			// `ponytail:` a stream that cannot seek keeps its old position, the same
+			// failure Stop already has. PLAN §7's fallback — re-open and re-append — would
+			// fix both at once if it is ever worth it.
+			self.notice = format!("{}: {error:#}", id.label());
+			return;
+		}
+
+		// Set here rather than left to the tick, which runs only while something plays: a
+		// paused player would otherwise keep drawing its old playhead until it was started
+		// again, and clicking a strip that visibly does nothing is worse than not clicking.
+		self.decks[id.index()].position = to;
+	}
+
 	fn transport(&mut self, id: DeckId, event: deck::Event) {
 		let current = self.decks[id.index()].transport;
 		let next = deck::transition(current, event);

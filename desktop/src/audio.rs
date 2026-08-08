@@ -116,6 +116,21 @@ impl Engine {
 		Ok(())
 	}
 
+	/// Move the playhead, leaving the transport exactly as it was (PLAN §14).
+	///
+	/// The deliberate difference from `stop` above is the *absence* of the pause: `stop`
+	/// pauses first because it is on its way to a stopped player anyway, and that also
+	/// dodges rodio's 5 ms control tick. Here a pause would be audible — a playing player
+	/// would gap, and a paused one would need a `play` afterwards it never asked for. The
+	/// cost is that the landing point can be a tick out, which is inaudible in a track and
+	/// invisible in a 400-pixel strip.
+	pub fn seek(&self, id: DeckId, to: Duration) -> Result<()> {
+		self.player(id)
+			.try_seek(to)
+			.context("cannot seek this stream")?;
+		Ok(())
+	}
+
 	/// Push both gains at once, because they always change together: the crossfader
 	/// moves one up as it moves the other down (PLAN §8).
 	pub fn set_gains(&self, gains: (f32, f32)) {
