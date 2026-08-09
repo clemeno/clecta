@@ -113,6 +113,15 @@ pub struct Item {
 	/// stream, or a file that no longer opens (PLAN §7a). Collapsing them into one `None`
 	/// would make the app re-open an unreadable file for ever.
 	pub duration: Option<Option<Duration>>,
+	/// How long the music runs, with the leader and the run-out taken off (PLAN §14c) — the
+	/// number a set is actually built from, when anything has worked it out.
+	///
+	/// One layer where `duration` has two, and deliberately: a length is a header parse that
+	/// every queue edit pays for, so *not measured* and *no length* are worth telling apart. The
+	/// music's edges cost a full decode and are only ever **read** here (`cached_facts`), so
+	/// `None` means nothing more than nobody has scanned this file yet — the same rule
+	/// `App::remember` follows, and for the same reason.
+	pub music: Option<Duration>,
 }
 
 impl Item {
@@ -122,6 +131,7 @@ impl Item {
 			path,
 			name,
 			duration: None,
+			music: None,
 		}
 	}
 }
@@ -265,18 +275,27 @@ impl Playlist {
 			.map(|item| item.path.as_path())
 	}
 
-	/// Record a length against every row holding this path that is still waiting for one.
+	/// Record what a job worked out against every row holding this path.
 	///
 	/// By path rather than by index, because the lists can be edited while the measuring runs
 	/// and an index would name a different track by the time the answer came back. A queue may
 	/// hold the same track twice, so one answer settles both rows.
-	pub fn measured(&mut self, path: &Path, length: Option<Duration>) {
-		for item in self
-			.items
-			.iter_mut()
-			.filter(|item| item.duration.is_none() && item.path == path)
-		{
-			item.duration = Some(length);
+	///
+	/// The two halves are applied under **different rules**, which is why they are not one `if`.
+	/// A length is settled once and kept, `None` included, or an unreadable file would be
+	/// re-opened on every edit for the rest of the run. The music's edges are only ever read
+	/// from the store, so a job that has none is a job that did not look deep enough — and a row
+	/// measured long ago still has to learn its playing time the moment a folder scan works it
+	/// out. Filtering both on `duration.is_none()` would have meant exactly that row never
+	/// learning it.
+	pub fn measured(&mut self, path: &Path, length: Option<Duration>, music: Option<Duration>) {
+		for item in self.items.iter_mut().filter(|item| item.path == path) {
+			if item.duration.is_none() {
+				item.duration = Some(length);
+			}
+			if music.is_some() {
+				item.music = music;
+			}
 		}
 	}
 
@@ -1012,8 +1031,12 @@ mod tests {
 		);
 
 		// Act: two answers arrive, and one of them is "this file has no length".
-		list.measured(&PathBuf::from("/m/a.mp3"), Some(Duration::from_secs(90)));
-		list.measured(&PathBuf::from("/m/b.mp3"), None);
+		list.measured(
+			&PathBuf::from("/m/a.mp3"),
+			Some(Duration::from_secs(90)),
+			None,
+		);
+		list.measured(&PathBuf::from("/m/b.mp3"), None, None);
 
 		// Assert: the known lengths add up, and the total still says it is not the whole
 		// story — which is what the `+` in the footer is.
@@ -1023,7 +1046,11 @@ mod tests {
 		// a row nobody can measure keeps the `+` for ever, which is the honest outcome. The
 		// two states differ in what the app does next, not in what the footer says: one is
 		// waiting for a thread and the other has stopped asking.
-		list.measured(&PathBuf::from("/m/c.mp3"), Some(Duration::from_secs(30)));
+		list.measured(
+			&PathBuf::from("/m/c.mp3"),
+			Some(Duration::from_secs(30)),
+			None,
+		);
 		assert_eq!(list.total(), (Duration::from_secs(120), false));
 		assert_eq!(list.unmeasured().count(), 0, "nothing left to ask about");
 
@@ -1040,7 +1067,11 @@ mod tests {
 		let mut list = list(&["a.mp3", "b.mp3", "a.mp3"]);
 
 		// Act
-		list.measured(&PathBuf::from("/m/a.mp3"), Some(Duration::from_secs(60)));
+		list.measured(
+			&PathBuf::from("/m/a.mp3"),
+			Some(Duration::from_secs(60)),
+			None,
+		);
 
 		// Assert: both copies, and nothing else.
 		assert_eq!(
@@ -1055,12 +1086,48 @@ mod tests {
 
 		// And an answer that failed is remembered as an answer, or the app would re-open an
 		// unreadable file every time anything else was added.
-		list.measured(&PathBuf::from("/m/b.mp3"), None);
+		list.measured(&PathBuf::from("/m/b.mp3"), None, None);
 		assert_eq!(list.items()[1].duration, Some(None));
 		assert_eq!(
 			list.unmeasured().count(),
 			0,
 			"nothing is still waiting to be measured"
+		);
+	}
+
+	#[test]
+	fn a_playing_time_arrives_after_the_length_and_never_unlearns_itself() {
+		// Arrange: a row measured the moment it was queued, which is every row — a length is a
+		// header parse and the queues pay for it on every edit.
+		let mut list = list(&["a.mp3"]);
+		list.measured(
+			&PathBuf::from("/m/a.mp3"),
+			Some(Duration::from_secs(215)),
+			None,
+		);
+		assert_eq!(list.items()[0].music, None, "nothing has scanned it");
+
+		// Act: the folder scan reaches it, long after. The length is settled and stays settled;
+		// the playing time has to land anyway, or a row measured once could never learn it.
+		list.measured(
+			&PathBuf::from("/m/a.mp3"),
+			Some(Duration::from_secs(1)),
+			Some(Duration::from_secs(198)),
+		);
+		assert_eq!(
+			list.items()[0].duration,
+			Some(Some(Duration::from_secs(215))),
+			"the first answer stands"
+		);
+		assert_eq!(list.items()[0].music, Some(Duration::from_secs(198)));
+
+		// Act / Assert: and a later queue edit, which only ever *reads* the store, must not take
+		// it away again — the same rule `App::remember` follows.
+		list.measured(&PathBuf::from("/m/a.mp3"), None, None);
+		assert_eq!(
+			list.items()[0].music,
+			Some(Duration::from_secs(198)),
+			"a job that did not look deep enough says nothing, not nothing-there"
 		);
 	}
 
@@ -1099,8 +1166,12 @@ mod tests {
 		// Arrange: one row answered, one answered with *nothing* — a stream, or a file that
 		// would not open.
 		let mut queue = list(&["a.mp3", "b.mp3"]);
-		queue.measured(&PathBuf::from("/m/a.mp3"), Some(Duration::from_secs(10)));
-		queue.measured(&PathBuf::from("/m/b.mp3"), None);
+		queue.measured(
+			&PathBuf::from("/m/a.mp3"),
+			Some(Duration::from_secs(10)),
+			None,
+		);
+		queue.measured(&PathBuf::from("/m/b.mp3"), None, None);
 		let queues = [queue, Playlist::default(), Playlist::default()];
 
 		// Act / Assert: neither is asked about again, which is what stops the app re-opening

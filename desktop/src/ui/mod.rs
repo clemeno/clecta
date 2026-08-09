@@ -187,6 +187,36 @@ pub fn format_clock(duration: Duration) -> String {
 	}
 }
 
+/// How long a track's music runs, and how long the file is — for a row that has room for at
+/// most one of them (PLAN §14c).
+///
+/// Two questions with three answers each, and the point of writing it once is that the files
+/// pane and the queues give the same answer to both. `duration` carries its usual pair: `None`
+/// is *not measured yet* and shows nothing at all, because a placeholder that flicks to a
+/// number a moment later on every row of a freshly opened list is worse than a gap. `Some(None)`
+/// is *measured, and there is no length* — a stream, or a file that will not open — and says so
+/// with `--:--` rather than a zero it would be read as.
+///
+/// `music` is `None` until something has decoded the file, so a row shows its plain length
+/// until it is prepared and `2:58 / 3:12` afterwards: the music first, because that is the
+/// number a set is planned against, and the file's own length behind it, because that is the
+/// one that has to match every other program on the machine.
+pub fn format_lengths(music: Option<Duration>, duration: Option<Option<Duration>>) -> String {
+	let whole = match duration {
+		Some(Some(length)) => format_clock(length),
+		Some(None) => "--:--".to_string(),
+		None => String::new(),
+	};
+
+	match music {
+		// A file scanned but not yet measured is the one order these can arrive in that would
+		// otherwise print a trailing separator and nothing after it.
+		Some(music) if whole.is_empty() => format_clock(music),
+		Some(music) => format!("{} / {whole}", format_clock(music)),
+		None => whole,
+	}
+}
+
 /// The `position / length` readout, with the length replaced when the decoder could not
 /// determine one (PLAN §7).
 pub fn format_transport(position: Duration, duration: Option<Duration>) -> String {
@@ -370,6 +400,32 @@ mod tests {
 		assert_eq!(format_clock(Duration::from_secs(42)), "0:42");
 		assert_eq!(format_clock(Duration::from_secs(195)), "3:15");
 		assert_eq!(format_clock(Duration::from_secs(3_725)), "1:02:05");
+	}
+
+	#[test]
+	fn a_row_says_nothing_until_it_knows_something_and_the_music_first_after() {
+		// Arrange
+		let secs = |seconds| Some(Duration::from_secs(seconds));
+
+		// Act / Assert: an unmeasured row is blank, not a placeholder that flicks to a number a
+		// moment later on every row of a freshly opened list.
+		assert_eq!(format_lengths(None, None), "");
+
+		// Measured, and the decoder had no length to give: said, not hidden, or the app would
+		// re-open the file for ever waiting for the answer it already has.
+		assert_eq!(format_lengths(None, Some(None)), "--:--");
+
+		// Measured but never scanned, which is every row of a queue until a folder scan reaches
+		// it: the file's own length and nothing else.
+		assert_eq!(format_lengths(None, Some(secs(195))), "3:15");
+
+		// Scanned: the music first, because that is the number a set is planned against.
+		assert_eq!(format_lengths(secs(178), Some(secs(195))), "2:58 / 3:15");
+
+		// Scanned before it was measured — the one order that would otherwise print a separator
+		// with nothing after it.
+		assert_eq!(format_lengths(secs(178), None), "2:58");
+		assert_eq!(format_lengths(secs(178), Some(None)), "2:58 / --:--");
 	}
 
 	#[test]

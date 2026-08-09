@@ -5,9 +5,9 @@
 //! worth testing — the extension table, the sort, the hidden filter.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::select::{self, Click};
 
@@ -117,13 +117,18 @@ pub struct Browser {
 	/// Where a Shift-click measures from: the row the last plain or command click landed on.
 	/// `None` when nothing has been clicked yet, which makes a Shift-click a plain one.
 	anchor: Option<PathBuf>,
-	/// Which rows the cache already answers for in full (PLAN §11c).
+	/// Which rows the cache already answers for in full, and how long the music in each runs
+	/// (PLAN §11c, §14c).
 	///
 	/// A *copy* of what the store said, not the store itself: `view` runs every frame and the
 	/// cache is a file on disk. It is replaced wholesale each time a listing is asked about, and
 	/// added to one path at a time as scans land — which is why it can only ever be optimistic
 	/// between two listings, never stale in the other direction.
-	prepared: HashSet<PathBuf>,
+	///
+	/// One map rather than a set and a map beside it: the mark and the playing time are the same
+	/// fact read from the same two tables, and two containers would be two chances to hold a
+	/// tick for a row with no time or the other way about.
+	prepared: HashMap<PathBuf, Option<Duration>>,
 	/// Off by default — a *local* media browser is not usually opened to find `.config`
 	/// (PLAN §9).
 	pub show_hidden: bool,
@@ -166,7 +171,7 @@ impl Browser {
 		// be an answer about a path the pane is no longer showing. The rows that survive keep
 		// their mark, so a refresh does not blink the whole column off while the store is
 		// asked again.
-		self.prepared.retain(|path| {
+		self.prepared.retain(|path, _| {
 			entries
 				.iter()
 				.any(|entry| &entry.path == path && entry.kind.is_media())
@@ -188,18 +193,28 @@ impl Browser {
 
 	/// Whether the store already holds everything a load of this file would need (PLAN §11c).
 	pub fn is_prepared(&self, path: &Path) -> bool {
-		self.prepared.contains(path)
+		self.prepared.contains_key(path)
+	}
+
+	/// How long this file's music runs, if anything has worked it out (PLAN §14c).
+	///
+	/// Two layers, and both are worth asking: the outer `None` is *nobody has scanned this*, and
+	/// `Some(None)` is *scanned, and there is no music in it* — a file of silence, which is an
+	/// answer rather than a gap. The column says the two differently for the same reason the
+	/// queues do.
+	pub fn music(&self, path: &Path) -> Option<Option<Duration>> {
+		self.prepared.get(path).copied()
 	}
 
 	/// What the store said about this listing, replacing whatever was believed before.
-	pub fn marked_prepared(&mut self, prepared: HashSet<PathBuf>) {
+	pub fn marked_prepared(&mut self, prepared: HashMap<PathBuf, Option<Duration>>) {
 		self.prepared = prepared;
 	}
 
 	/// One more file worked out, while the pane is showing it.
-	pub fn mark_prepared(&mut self, path: &Path) {
+	pub fn mark_prepared(&mut self, path: &Path, music: Option<Duration>) {
 		if self.entries.iter().any(|entry| entry.path == path) {
-			self.prepared.insert(path.to_path_buf());
+			self.prepared.insert(path.to_path_buf(), music);
 		}
 	}
 
@@ -591,10 +606,20 @@ mod tests {
 
 	#[test]
 	fn a_mark_survives_a_refresh_but_not_the_loss_of_its_file() {
-		// Arrange: the store's answer about the listing on screen.
+		// Arrange: the store's answer about the listing on screen. One of them was scanned and
+		// found to hold no music at all, which is an answer and not a gap.
 		let mut browser = pane();
-		browser.marked_prepared(HashSet::from([row("1.mp3"), row("2.mp3")]));
+		browser.marked_prepared(HashMap::from([
+			(row("1.mp3"), Some(Duration::from_secs(215))),
+			(row("2.mp3"), None),
+		]));
 		assert!(browser.is_prepared(&row("1.mp3")));
+		assert_eq!(
+			browser.music(&row("1.mp3")),
+			Some(Some(Duration::from_secs(215)))
+		);
+		assert_eq!(browser.music(&row("2.mp3")), Some(None), "scanned, silent");
+		assert_eq!(browser.music(&row("3.mp3")), None, "never scanned");
 
 		// Act: the folder is read again with one of them gone.
 		browser.show(PathBuf::from("/music"), vec![entry("1.mp3")]);
@@ -608,9 +633,14 @@ mod tests {
 		// Act / Assert: a file worked out while the pane is showing it gets marked, and one the
 		// pane has never heard of is not — a scan of a folder the user has navigated away from
 		// must not mark rows by name in whatever folder they are looking at now.
-		browser.mark_prepared(&row("1.mp3"));
-		browser.mark_prepared(&PathBuf::from("/elsewhere/1.mp3"));
+		browser.mark_prepared(&row("1.mp3"), Some(Duration::from_secs(180)));
+		browser.mark_prepared(&PathBuf::from("/elsewhere/1.mp3"), None);
 		assert!(browser.is_prepared(&row("1.mp3")));
+		assert_eq!(
+			browser.music(&row("1.mp3")),
+			Some(Some(Duration::from_secs(180))),
+			"the fresh scan's answer, not the old one"
+		);
 		assert!(!browser.is_prepared(Path::new("/elsewhere/1.mp3")));
 
 		// And emptying the store empties the column.

@@ -119,6 +119,22 @@ pub struct Trim {
 	pub end: Duration,
 }
 
+impl Trim {
+	/// How long the music itself runs: the file's length with the leader and the run-out taken
+	/// off, which is what a set is actually made of (PLAN §14c).
+	///
+	/// Derived, never stored. The two edges are already in the cache and this is arithmetic on
+	/// them — a third number written beside them would be a third number that can disagree with
+	/// them, and the one that is wrong would be the one on screen.
+	///
+	/// `saturating_sub` for a subtraction that cannot underflow today: `end` is one past the
+	/// last loud sample and `start` is the first, so a `Trim` that exists has `end > start`. It
+	/// is here because this draws a column, and a panic in a column is not worth two characters.
+	pub fn music(self) -> Duration {
+		self.end.saturating_sub(self.start)
+	}
+}
+
 /// The two edges of the music, found in the same pass that folds the waveform.
 ///
 /// Sample-exact rather than read off the finished peak array, which is the whole reason this
@@ -340,6 +356,29 @@ mod tests {
 		let trim = edges(&samples, 1_000, 2).expect("a file with music in it");
 		assert_eq!(trim.start, Duration::from_millis(50));
 		assert_eq!(trim.end, Duration::from_millis(150));
+	}
+
+	#[test]
+	fn the_playing_time_is_what_is_left_between_the_edges() {
+		// Arrange: a track with four seconds of leader and two of run-out.
+		let mut samples = vec![0.0_f32; 12_000];
+		samples[4_000..10_000].fill(0.8);
+
+		// Act / Assert: six seconds of music in a twelve-second file, and it is arithmetic on
+		// the two numbers already in the store rather than a third one written beside them.
+		let trim = edges(&samples, 1_000, 1).expect("a file with music in it");
+		assert_eq!(trim.music(), Duration::from_secs(6));
+
+		// Edges the wrong way round cannot happen — `end` is one past the last loud sample —
+		// but this draws a column, so it gives a `0:00` rather than a panic if they ever are.
+		assert_eq!(
+			Trim {
+				start: Duration::from_secs(9),
+				end: Duration::from_secs(1),
+			}
+			.music(),
+			Duration::ZERO
+		);
 	}
 
 	#[test]

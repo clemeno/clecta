@@ -17,7 +17,7 @@
 //!   this from inside an `off_thread` job, which is also why `Cache` is `Sync` and shared as
 //!   an `Arc`.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -171,7 +171,8 @@ impl Cache {
 		self.write(TRIMS, path, stamp, &encode_trim(trim));
 	}
 
-	/// Which of these files the store already answers for **in full** (PLAN §11c).
+	/// Which of these files the store already answers for **in full**, and how long the music in
+	/// each of them runs (PLAN §11c, §14c).
 	///
 	/// Full means both tables a load reads: the waveform and the music's edges, for this exact
 	/// version of the file. That is deliberately the same test `cached_scan` uses to decide it
@@ -179,18 +180,22 @@ impl Cache {
 	/// merely measured the length of has an entry here and is still a third of a second of work,
 	/// and saying otherwise would make the mark mean nothing.
 	///
+	/// A key present is the mark; its value is the playing time, and `None` there means the file
+	/// was scanned and had no music in it at all. The edges were already being read to answer the
+	/// first question, so the second is free — one query per listing, not two.
+	///
 	/// `ponytail:` two read transactions and an 8 KB copy per file, because it is `read` reused
 	/// rather than a presence check of its own. One folder's listing is hundreds of files and
 	/// this runs on a thread; give it one transaction and a header-only test if a listing of
 	/// tens of thousands ever takes long enough to see.
-	pub fn prepared(&self, files: &[(PathBuf, Stamp)]) -> HashSet<PathBuf> {
+	pub fn prepared(&self, files: &[(PathBuf, Stamp)]) -> HashMap<PathBuf, Option<Duration>> {
 		files
 			.iter()
-			.filter(|(path, stamp)| {
-				self.read(WAVEFORMS, path, *stamp).is_some()
-					&& self.read(TRIMS, path, *stamp).is_some()
+			.filter(|(path, stamp)| self.read(WAVEFORMS, path, *stamp).is_some())
+			.filter_map(|(path, stamp)| {
+				let trim = self.trim(path, *stamp)?;
+				Some((path.clone(), trim.map(Trim::music)))
 			})
-			.map(|(path, _)| path.clone())
 			.collect()
 	}
 
@@ -589,14 +594,33 @@ mod tests {
 
 		// Act / Assert: "prepared" is both tables or neither. A file with a waveform and no
 		// edges is still a whole decode away, which is exactly what the mark in the files pane
-		// promises it is not (PLAN §11c).
+		// promises it is not (PLAN §11c). The answer carries the playing time with it, worked out
+		// from the edges that were being read anyway (PLAN §14c) — 8.5 s of music in a 9 s file.
 		let half = dir.join("half.wav");
 		std::fs::write(&half, b"only a waveform").expect("writing the third fixture");
 		let half_stamp = stamp(&half).expect("stat of the third fixture");
 		cache.store_peaks(&half, half_stamp, &[0.1]);
 
-		let asked = [(track.clone(), moved), (half.clone(), half_stamp)];
-		assert_eq!(cache.prepared(&asked), HashSet::from([track.clone()]));
+		// And one scanned and found to hold no music at all, which is an answer rather than a
+		// gap: it is marked, and it has no playing time to give.
+		let silent = dir.join("silent.wav");
+		std::fs::write(&silent, b"nothing audible").expect("writing the fourth fixture");
+		let silent_stamp = stamp(&silent).expect("stat of the fourth fixture");
+		cache.store_peaks(&silent, silent_stamp, &[0.0]);
+		cache.store_trim(&silent, silent_stamp, None);
+
+		let asked = [
+			(track.clone(), moved),
+			(half.clone(), half_stamp),
+			(silent.clone(), silent_stamp),
+		];
+		assert_eq!(
+			cache.prepared(&asked),
+			HashMap::from([
+				(track.clone(), Some(Duration::from_millis(8_500))),
+				(silent.clone(), None),
+			])
+		);
 
 		// And the listing's own metadata makes the same stamp a `stat` does, which is the whole
 		// reason marking a folder costs no filesystem work.

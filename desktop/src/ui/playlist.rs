@@ -248,13 +248,10 @@ fn rows<'a>(
 					.size(12)
 					.width(Fill),
 				// Blank until it has been measured, rather than a placeholder that would flick
-				// to a number a moment later on every row of a freshly opened list.
-				text(match item.duration {
-					Some(Some(length)) => ui::format_clock(length),
-					Some(None) => "--:--".to_string(),
-					None => String::new(),
-				})
-				.size(11),
+				// to a number a moment later on every row of a freshly opened list — and the
+				// music's own length in front of the file's once anything has scanned it
+				// (PLAN §14c), which is the number the list is actually planned against.
+				text(ui::format_lengths(item.music, item.duration)).size(11),
 			]
 			.spacing(4),
 		)
@@ -416,7 +413,11 @@ mod tests {
 		// Measured or not, the count is right; the `+` is what changes.
 		assert_eq!(running_time(&list), "1 · 0:00+", "not measured yet");
 
-		list.measured(&PathBuf::from("/m/a.mp3"), Some(Duration::from_secs(215)));
+		list.measured(
+			&PathBuf::from("/m/a.mp3"),
+			Some(Duration::from_secs(215)),
+			None,
+		);
 		assert_eq!(running_time(&list), "1 · 3:35", "measured");
 	}
 }

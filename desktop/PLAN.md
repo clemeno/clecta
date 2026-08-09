@@ -1011,8 +1011,11 @@ does, which files are offered) unit-testable with no filesystem.
 
 - **One directory, read whole.** No batching: `read_dir` on a local disk returns in
   milliseconds where cmote's SFTP round trips did not.
-- **Rows, not icons** — name, size, modified date, and a leading glyph marking *audio* /
-  *video* / *other*. A media browser is scanned by name and length, not by thumbnail.
+- **Rows, not icons** — name, playing time, size, modified date, and a leading glyph marking
+  *audio* / *video* / *other*. A media browser is scanned by name and length, not by thumbnail.
+  The playing time sits *before* the size (§14c) because it is the one column that says what a
+  file is for rather than what it is; it is blank until something has scanned the file, which is
+  the same moment its `✓` appears (§11c).
 - **Not `widget::table` — `scrollable(column(rows))`.** iced 0.14 does ship a `table`, and
   three aligned columns with a header looked like exactly its job. The spike
   (`src/bin/ui_spike.rs`) says no: **`table` has no row.** `table::Column::view` produces
@@ -1799,6 +1802,11 @@ would be a bug that looks like a cold cache.
 The whole listing is asked about, not the visible rows: the hidden filter costs no filesystem
 work by design (§9), so revealing a dotfile has to reveal its mark with it.
 
+The same query now brings back **how long each file's music runs** (§14c), because it was
+already reading the edges to decide the mark and the playing time is arithmetic on them. One
+map rather than a set beside a map: the tick and the number are the same fact out of the same
+two tables, and two containers would be two chances to hold one without the other.
+
 ### Optimistic between two listings, never stale the other way
 
 Marks are added as work lands — a folder scan reports a file, or a track is loaded into a player
@@ -1887,7 +1895,10 @@ otherwise pure; anything needing a device or a real folder is manual.
   one: a refresh keeps the mark of a row it still lists and drops the one it lost, a file worked
   out while the pane shows it is marked, a path the pane has never heard of is *not* — so a scan
   of a folder the user navigated away from cannot mark rows by name in the folder they are
-  looking at now — and emptying the store empties the column.
+  looking at now — and emptying the store empties the column. The playing time rides in the
+  same test (§14c), because it rides in the same map: a scanned file's seconds come back, a
+  scanned *silent* one comes back marked with no time, and a file nobody has scanned is told
+  apart from both.
 - **`deck.rs`** — the transport state machine as a pure `transition(state, event)`, so
   every edge is checked with no audio device in the room.
 - **Drop policy** (`deck.rs`) — `drop_outcome(...) -> DropOutcome` pulled free of `self`,
@@ -1917,7 +1928,10 @@ otherwise pure; anything needing a device or a real folder is manual.
   fourth is the one that would ship silently wrong: **a channel is not a second**. The decoder
   interleaves, so a stereo file holds twice the sample rate per second, and getting that
   backwards puts every trim at twice its real depth — a handover that starts the next track
-  halfway through its first verse, on stereo files only, which is all of them.
+  halfway through its first verse, on stereo files only, which is all of them. A fifth reads
+  the answer back the way the two panes do: `Trim::music()` on a file with four seconds of
+  leader and two of run-out, plus edges the wrong way round giving `0:00` rather than the panic
+  a `Duration` subtraction would otherwise be (§14c).
 - **`playlist.rs`** — the queues (§7a), and almost every test is about the *selection* rather
   than the list: an insert above it carries it down, a remove above it pulls it up, removing
   the selected row lands on whatever slid into its place, removing the last row falls back to
@@ -1965,6 +1979,13 @@ otherwise pure; anything needing a device or a real folder is manual.
   answer settles both rows and nothing else — which is the reason `measured` works by path
   where everything above it works by index.
 
+  A third pins the two halves of `measured` apart (§14c). A row is measured the moment it is
+  queued and scanned much later, if ever, so the length is settled once and kept while the
+  playing time has to be allowed to land on a row that already has one — the order it actually
+  happens in, and the one a single `duration.is_none()` filter would have made impossible. The
+  same test checks a later queue edit, which only reads the store, cannot take the playing time
+  away again.
+
   `already_queued` gets two more, and the second is the one that matters (§7a). The first is
   the ordinary search: a track is found in whichever of the three lists actually holds it, not
   merely in the one being added to, and a track nothing holds is found nowhere. The second is
@@ -2004,7 +2025,11 @@ otherwise pure; anything needing a device or a real folder is manual.
   one whole turn at the rate the sweep counter actually ticks shows **all four frames, in
   order** — a spinner that skipped one would still animate, which is why this counts them —
   and the values no caller sends today are pinned too, because this indexes an array and a
-  phase of exactly 1 would be a panic inside a `draw`.
+  phase of exactly 1 would be a panic inside a `draw`. `format_lengths(music, duration)` is the
+  third (§14c), and it is here rather than in either pane because it is what makes the two agree:
+  the six states a row can be in, from blank through `--:--` and a plain length to
+  `2:58 / 3:15`, including the one order that would otherwise print a separator with nothing
+  after it — scanned before it was measured.
 - **`cache.rs`** — two halves, and both are needed (§11a). The encoding is pure and is checked
   without a database: a record that survives a round trip *exactly*, since a cached waveform is
   supposed to be the same array a scan produced; a stamp that does not match reading as a miss,
@@ -2025,7 +2050,10 @@ otherwise pure; anything needing a device or a real folder is manual.
   what the files pane asks (§11c): `prepared` names the file that has both tables and not the
   one that has only a waveform, and a listing's own size and modified time build the *same*
   stamp a `stat` does — the equality the whole no-filesystem-work claim rests on, and a silent
-  drift there would show as a folder that is never marked and never explains why.
+  drift there would show as a folder that is never marked and never explains why. And it now
+  reads the playing time back out of the same answer (§14c): a scanned file gives the seconds
+  between its edges, one scanned and found silent gives a mark with no time, and the one with
+  only a waveform gives neither.
 - **`ui/playlist.rs`** — `running_time`, which is the only thing in that file that is not
   widgets: how many tracks, how long they run, and the `+` that says the total is a floor
   rather than a figure. An empty list says *nothing at all* rather than `0 · 0:00`, because
@@ -2590,6 +2618,47 @@ the drag caret use, because they answer the same kind of question: *this is the 
 control is talking about*. Without them, **⇥ music** jumps to a spot the user has to take on
 trust.
 
+### The number the edges were actually for: how long the music runs
+
+`Trim::music()` is `end - start`, and that is the whole of it — **derived, never stored**. The
+two edges are already in the store, a third number written beside them is a third number that
+can disagree with them, and the one that would be wrong is the one on screen. It costs a
+subtraction; the ceiling it avoids is a table that has to be kept in step with another table.
+
+It appears in the two places files are chosen and ordered:
+
+- **The files pane**, in a column before the size (§9). A folder listing shows what a file *is*
+  — its size, its date — and this is the first column that says what it is *for*. It also gives
+  the `✓` beside it something to be about: a mark that only says "ready" is a mark you check
+  once, where a mark that brings a number with it is one you read.
+- **A queue row**, in front of the file's own length: `2:58 / 3:12`. The music first because
+  that is what the evening is planned against, the file's length behind it because that is the
+  number every other program on the machine agrees with. The same `format_lengths` builds both,
+  so a row cannot say one thing in one pane and another in the other.
+
+**It costs no extra work anywhere.** The pane's answer rides along with the query §11c already
+makes once per listing — the edges were being read to decide the mark, and the playing time is
+arithmetic on what came back. A queue row's rides along with `cached_facts`, which was already
+reading the trim so the handover could skip the blanks.
+
+The two panes need different rules for *not knowing*, and both are in `format_lengths`. A
+length is a header parse the queues pay for on every edit, so **not measured** (blank) and
+**measured, no length** (`--:--`) are worth telling apart. A playing time is a full decode and
+is only ever read, so a missing one means nothing more than nobody has scanned this yet — the
+same rule the trims map follows (above), and the reason `Playlist::measured` applies its two
+halves under two different tests. Filtering both on `duration.is_none()` would have meant that
+a row measured when it was queued could never learn its playing time afterwards, which is
+precisely the order it happens in.
+
+A prepared file with no music at all shows `--:--`: it was scanned, and the answer is that there
+is nothing in it. That is the same shape of answer a file with no length gives, and it reads the
+same way — the store has stopped asking.
+
+The running time in a queue's footer still adds up the **file** lengths, deliberately. It is the
+one number that has to match the clock on the wall whatever the transition setting says, and a
+total that changed meaning when a switch was flipped would be a worse number than one that is
+occasionally longer than the set.
+
 ### A stopped player that is asked to move becomes paused
 
 Q14 said a seek changes nothing about the transport, and that is still right for `Playing` and
@@ -2652,6 +2721,7 @@ around.
 | Q36 | Whether a mark may be added without asking the store | **Yes, optimistically, because the listing's answer replaces it.** A scan that succeeded is taken to be a scan that was stored, which is one case out — a file that cannot be stat'd is deliberately never cached — against a second lookup per file to learn what the decode already established. It is safe only because the set is *replaced* by the next listing rather than added to, so a wrong mark lives until the next refresh and no longer; a dead job answers "nothing prepared", which is the right way round to be wrong; and **Clear cache** empties the column, since it is a report of what is on disk. A `ponytail:` names it | §11c |
 | Q37 | Which files spin, and what drives them | **Any file with a thread on it, off the counter that was already turning.** One rule for the whole window: a folder scan and a player's own waveform scan are the same work, so a row spins for either and gets the same `✓` after. The phase is §14a's sweep counter — one for everything that turns, or two scans at once drift apart into what looks like a rendering fault — and its subscription grew one clause and no timer. *Which* files are turning has to be kept rather than derived: answers come back out of order, so the four in the air are never `files[done..next]` | §11c, §11b, §14a |
 | Q38 | What to do about `CFUserNotificationDisplayAlert` in the macOS log | **Nothing, and write down why.** It is `rfd`'s parentless path: no parent window means another process draws the alert while this one waits, which is the modal shortcut §7a already took, said out loud by the OS. iced lends a window handle inside `window::run` alone, so **Clear cache** could be parented but `admits` — asked in the middle of three queue edits, answering the code that asked — could not without three continuations and a queue that may change while the question is open. Parenting one of the two would trade a log line for two dialogs that do not look alike | §7a, §11a |
+| Q39 | Where the music's *length* comes from, and what it displaces | **Derived from the edges already stored, and it displaces nothing.** `Trim::music()` is `end - start`: a fourth table would be a number that can disagree with the two it was computed from, and the wrong one would be the one on screen. It reaches the files pane on the query §11c already makes once per listing — the edges were being read for the mark, so the number is free — and a queue row on the trim `cached_facts` was already reading for the handover. In the pane it is a column of its own before the size, because a listing says what a file *is* and this is the first thing that says what it is *for*; in a queue it goes in front of the file's length rather than instead of it, since the music is what the evening is planned against and the file's length is what every other program on the machine agrees with. The footer's running time deliberately stays a sum of *file* lengths: a total that changed meaning when a transition switch was flipped would be worse than one that is occasionally long | §14c, §11c, §9, §7a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
@@ -2665,7 +2735,7 @@ size were the easy part.
 Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
 the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
 one use of the window's height that was enough to keep the defect alive. Both were settled
-the same way, by looking at a running window. That is now four of the thirty-eight (Q7, Q10,
+the same way, by looking at a running window. That is now four of the thirty-nine (Q7, Q10,
 Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
 and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
 

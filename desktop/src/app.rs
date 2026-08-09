@@ -377,10 +377,10 @@ pub enum Message {
 	ReconnectPressed,
 	/// A directory listing came back off the GUI thread.
 	FilesListed(PathBuf, Result<Vec<Entry>, String>),
-	/// Which files of a listing the store already answers for in full (PLAN §11c). The folder
-	/// comes back with the answer for the same reason the listing does: to be thrown away if
-	/// the user has moved on since.
-	Prepared(PathBuf, HashSet<PathBuf>),
+	/// Which files of a listing the store already answers for in full, and how long the music in
+	/// each of them runs (PLAN §11c, §14c). The folder comes back with the answer for the same
+	/// reason the listing does: to be thrown away if the user has moved on since.
+	Prepared(PathBuf, HashMap<PathBuf, Option<Duration>>),
 	FoldersListed(PathBuf, Result<Vec<PathBuf>, String>),
 	/// A track's scan finished. Carries the path it was started for, because a player can
 	/// be given another track while the scan runs (PLAN §14a).
@@ -1235,7 +1235,7 @@ impl Clecta {
 				if result.is_ok() {
 					// Loading a track prepares it, so its row gets the same mark the folder scan
 					// would have given it (PLAN §11c) — one rule, whoever asked for the decode.
-					self.browser.mark_prepared(&path);
+					self.browser.mark_prepared(&path, trim.map(Trim::music));
 				}
 
 				// A scan takes a moment, and a player can be given a second track inside it.
@@ -1586,12 +1586,13 @@ impl Clecta {
 	/// is being looked up — and by path, so one answer settles every row holding that file. A
 	/// row that has been removed in the meantime simply matches nothing.
 	fn learned(&mut self, facts: &Facts) {
+		let music = facts.trim.map(Trim::music);
 		self.remember(&facts.path, facts.trim);
 		if facts.prepared {
-			self.browser.mark_prepared(&facts.path);
+			self.browser.mark_prepared(&facts.path, music);
 		}
 		for queue in &mut self.queues {
-			queue.measured(&facts.path, facts.duration);
+			queue.measured(&facts.path, facts.duration, music);
 		}
 	}
 
