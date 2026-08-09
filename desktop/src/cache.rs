@@ -40,10 +40,16 @@ use crate::waveform::Trim;
 const WAVEFORMS: TableDefinition<&str, &[u8]> = TableDefinition::new("waveforms");
 const DURATIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("durations");
 const TRIMS: TableDefinition<&str, &[u8]> = TableDefinition::new("trims");
+/// The promise above kept a second time, and the case that shows the design was right: the tempo
+/// (PLAN §14d) is worked out by the same pass again, and again it gets a table rather than a
+/// field — so a build that knows about tempi reads every trim already on disk, and the one thing
+/// a hand-edited tempo will need (PLAN §14d) is a store of its own it can be cleared from without
+/// touching a waveform.
+const TEMPOS: TableDefinition<&str, &[u8]> = TableDefinition::new("tempos");
 
 /// All of them, for the two operations that are about the store rather than about a file:
 /// pruning what the library no longer has, and emptying it on request.
-const TABLES: [TableDefinition<&str, &[u8]>; 3] = [WAVEFORMS, DURATIONS, TRIMS];
+const TABLES: [TableDefinition<&str, &[u8]>; 4] = [WAVEFORMS, DURATIONS, TRIMS, TEMPOS];
 
 /// The record layout's version, in the first byte of every value.
 ///
@@ -90,6 +96,21 @@ pub fn stamp_of(size: u64, modified: Option<SystemTime>) -> Stamp {
 			.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
 			.map_or(0, |since| since.as_nanos() as u64),
 	}
+}
+
+/// Everything a prepared row shows beside its mark (PLAN §11c, §14c, §14d).
+///
+/// One value rather than two maps, because it is one answer read from one set of tables in one
+/// pass: a tick with no tempo beside it and a tempo on an unticked row are both states that
+/// cannot happen, and the cheapest way to keep them impossible is to leave them unrepresentable.
+///
+/// Each field keeps its own `None`, which here means *scanned, and there is none* — silence has
+/// no playing time and a spoken word recording has no tempo. "Nobody has scanned this" is the
+/// absence of the whole value.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Ready {
+	pub tempo: Option<f32>,
+	pub music: Option<Duration>,
 }
 
 /// The store, or nothing at all when there could not be one.
@@ -171,30 +192,51 @@ impl Cache {
 		self.write(TRIMS, path, stamp, &encode_trim(trim));
 	}
 
-	/// Which of these files the store already answers for **in full**, and how long the music in
-	/// each of them runs (PLAN §11c, §14c).
+	/// How fast the track beats, if it has already been scanned for (PLAN §14d).
 	///
-	/// Full means both tables a load reads: the waveform and the music's edges, for this exact
-	/// version of the file. That is deliberately the same test `cached_scan` uses to decide it
-	/// has a hit, so a marked row is a row that will not be decoded again — a file the queues
-	/// merely measured the length of has an entry here and is still a third of a second of work,
-	/// and saying otherwise would make the mark mean nothing.
+	/// Two layers a third time, and the inner one is doing real work here: plenty of files have
+	/// no tempo — a spoken word recording, an ambient wash, a jingle too short to hold four
+	/// beats — and each of them costs a full decode to find that out. Storing "asked, and there
+	/// is none" is what keeps that decode from happening again on every launch.
+	pub fn tempo(&self, path: &Path, stamp: Stamp) -> Option<Option<f32>> {
+		let payload = self.read(TEMPOS, path, stamp)?;
+		decode_tempo(&payload)
+	}
+
+	pub fn store_tempo(&self, path: &Path, stamp: Stamp, tempo: Option<f32>) {
+		self.write(TEMPOS, path, stamp, &encode_tempo(tempo));
+	}
+
+	/// Which of these files the store already answers for **in full**, and what each of those
+	/// answers is (PLAN §11c, §14c, §14d).
 	///
-	/// A key present is the mark; its value is the playing time, and `None` there means the file
-	/// was scanned and had no music in it at all. The edges were already being read to answer the
-	/// first question, so the second is free — one query per listing, not two.
+	/// Full means every table a load reads: the waveform, the music's edges and the tempo, for
+	/// this exact version of the file. That is deliberately the same test `cached_scan` uses to
+	/// decide it has a hit, so a marked row is a row that will not be decoded again — a file the
+	/// queues merely measured the length of has an entry here and is still a third of a second of
+	/// work, and saying otherwise would make the mark mean nothing.
 	///
-	/// `ponytail:` two read transactions and an 8 KB copy per file, because it is `read` reused
+	/// A key present is the mark; its value is everything else the row shows. Both were already
+	/// being read to answer the first question, so neither costs a query of its own.
+	///
+	/// `ponytail:` three read transactions and an 8 KB copy per file, because it is `read` reused
 	/// rather than a presence check of its own. One folder's listing is hundreds of files and
 	/// this runs on a thread; give it one transaction and a header-only test if a listing of
 	/// tens of thousands ever takes long enough to see.
-	pub fn prepared(&self, files: &[(PathBuf, Stamp)]) -> HashMap<PathBuf, Option<Duration>> {
+	pub fn prepared(&self, files: &[(PathBuf, Stamp)]) -> HashMap<PathBuf, Ready> {
 		files
 			.iter()
 			.filter(|(path, stamp)| self.read(WAVEFORMS, path, *stamp).is_some())
 			.filter_map(|(path, stamp)| {
 				let trim = self.trim(path, *stamp)?;
-				Some((path.clone(), trim.map(Trim::music)))
+				let tempo = self.tempo(path, *stamp)?;
+				Some((
+					path.clone(),
+					Ready {
+						tempo,
+						music: trim.map(Trim::music),
+					},
+				))
 			})
 			.collect()
 	}
@@ -393,6 +435,33 @@ fn encode_trim(trim: Option<Trim>) -> Vec<u8> {
 	}
 }
 
+/// A tempo in beats per minute, or **no bytes at all** for a file that beats at none — the third
+/// use of the same shape, and the reason it is a shape rather than three ad-hoc encodings.
+///
+/// Stored as the `f32` the detector produced rather than as the hundredths the column prints. The
+/// rounding belongs to the display: a stored 128.00 could not be told from a stored 128.004, and
+/// the day a tempo is halved or doubled by hand (PLAN §14d) is the day that difference starts
+/// compounding.
+fn encode_tempo(tempo: Option<f32>) -> Vec<u8> {
+	match tempo {
+		Some(tempo) => tempo.to_le_bytes().to_vec(),
+		None => Vec::new(),
+	}
+}
+
+fn decode_tempo(payload: &[u8]) -> Option<Option<f32>> {
+	match payload.len() {
+		0 => Some(None),
+		4 => {
+			let tempo = f32::from_le_bytes(payload.try_into().ok()?);
+			// A stored `NaN` or a negative would print as a tempo nobody could act on, and it is
+			// cheaper to call that a miss than to teach the column about it.
+			(tempo.is_finite() && tempo > 0.0).then_some(Some(tempo))
+		}
+		_ => None,
+	}
+}
+
 fn decode_trim(payload: &[u8]) -> Option<Option<Trim>> {
 	match payload.len() {
 		0 => Some(None),
@@ -520,6 +589,25 @@ mod tests {
 	}
 
 	#[test]
+	fn a_tempo_and_the_absence_of_one_are_different_answers() {
+		// Arrange / Act / Assert: the same two-layer rule a third time. "Scanned, and this file
+		// beats at nothing" costs a whole decode to find out and is worth a record of its own,
+		// or a spoken word file is decoded again on every launch (PLAN §14d).
+		assert_eq!(decode_tempo(&encode_tempo(Some(128.5))), Some(Some(128.5)));
+		assert_eq!(
+			decode_tempo(&encode_tempo(None)),
+			Some(None),
+			"scanned, and there is no tempo in it"
+		);
+
+		// A stored number that could not be printed as a tempo is a miss rather than a column
+		// showing it: the record is thrown away and the file is scanned again.
+		assert_eq!(decode_tempo(&f32::NAN.to_le_bytes()), None, "not a number");
+		assert_eq!(decode_tempo(&(-4.0_f32).to_le_bytes()), None, "negative");
+		assert_eq!(decode_tempo(&[1, 2, 3]), None, "the wrong shape");
+	}
+
+	#[test]
 	fn a_malformed_waveform_is_not_half_a_waveform() {
 		// Arrange / Act / Assert: an array of floats is four bytes a column, and a payload
 		// that is not a whole number of them is a record to throw away rather than to
@@ -591,23 +679,28 @@ mod tests {
 		};
 		cache.store_trim(&track, moved, Some(trim));
 		assert_eq!(cache.trim(&track, moved), Some(Some(trim)));
+		cache.store_tempo(&track, moved, Some(128.5));
+		assert_eq!(cache.tempo(&track, moved), Some(Some(128.5)));
 
-		// Act / Assert: "prepared" is both tables or neither. A file with a waveform and no
+		// Act / Assert: "prepared" is every table or none of them. A file with a waveform and no
 		// edges is still a whole decode away, which is exactly what the mark in the files pane
-		// promises it is not (PLAN §11c). The answer carries the playing time with it, worked out
-		// from the edges that were being read anyway (PLAN §14c) — 8.5 s of music in a 9 s file.
+		// promises it is not (PLAN §11c). The answer carries the tempo and the playing time with
+		// it, both worked out from what was being read anyway (PLAN §14c, §14d) — 8.5 s of music
+		// in a 9 s file.
 		let half = dir.join("half.wav");
 		std::fs::write(&half, b"only a waveform").expect("writing the third fixture");
 		let half_stamp = stamp(&half).expect("stat of the third fixture");
 		cache.store_peaks(&half, half_stamp, &[0.1]);
+		cache.store_tempo(&half, half_stamp, Some(120.0));
 
 		// And one scanned and found to hold no music at all, which is an answer rather than a
-		// gap: it is marked, and it has no playing time to give.
+		// gap: it is marked, and it has neither a playing time nor a tempo to give.
 		let silent = dir.join("silent.wav");
 		std::fs::write(&silent, b"nothing audible").expect("writing the fourth fixture");
 		let silent_stamp = stamp(&silent).expect("stat of the fourth fixture");
 		cache.store_peaks(&silent, silent_stamp, &[0.0]);
 		cache.store_trim(&silent, silent_stamp, None);
+		cache.store_tempo(&silent, silent_stamp, None);
 
 		let asked = [
 			(track.clone(), moved),
@@ -617,8 +710,14 @@ mod tests {
 		assert_eq!(
 			cache.prepared(&asked),
 			HashMap::from([
-				(track.clone(), Some(Duration::from_millis(8_500))),
-				(silent.clone(), None),
+				(
+					track.clone(),
+					Ready {
+						tempo: Some(128.5),
+						music: Some(Duration::from_millis(8_500)),
+					}
+				),
+				(silent.clone(), Ready::default()),
 			])
 		);
 
@@ -632,6 +731,7 @@ mod tests {
 		assert_eq!(cache.peaks(&track, moved), None, "cleared");
 		assert_eq!(cache.duration(&track, moved), None, "cleared");
 		assert_eq!(cache.trim(&track, moved), None, "cleared");
+		assert_eq!(cache.tempo(&track, moved), None, "cleared");
 
 		// And an emptied store is still a store: what goes in after comes back out.
 		cache.store_trim(&track, moved, None);

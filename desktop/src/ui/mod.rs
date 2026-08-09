@@ -217,6 +217,28 @@ pub fn format_lengths(music: Option<Duration>, duration: Option<Option<Duration>
 	}
 }
 
+/// A detected tempo, to two decimals (PLAN §14d).
+///
+/// The same two layers the lengths use, and the same three answers. Nothing at all until
+/// something has scanned the file, because a column of placeholders that turn into numbers one by
+/// one is worse than a column that fills in. `--` once it has been scanned and there was no tempo
+/// to find — a spoken word recording, an ambient wash, a jingle too short to hold four beats —
+/// which is an answer, and a different one from silence about it.
+///
+/// Two decimals always, including on a round 128: a column of numbers that sometimes has a
+/// fractional part and sometimes does not is a column that has to be read rather than scanned,
+/// and the width is the same either way.
+///
+/// No unit anywhere. Position says what it is, and three characters of "BPM" on every row of two
+/// panes would cost more width than the number does.
+pub fn format_tempo(tempo: Option<Option<f32>>) -> String {
+	match tempo {
+		Some(Some(tempo)) => format!("{tempo:.2}"),
+		Some(None) => "--".to_string(),
+		None => String::new(),
+	}
+}
+
 /// The `position / length` readout, with the length replaced when the decoder could not
 /// determine one (PLAN §7).
 pub fn format_transport(position: Duration, duration: Option<Duration>) -> String {
@@ -426,6 +448,28 @@ mod tests {
 		// with nothing after it.
 		assert_eq!(format_lengths(secs(178), None), "2:58");
 		assert_eq!(format_lengths(secs(178), Some(None)), "2:58 / --:--");
+	}
+
+	#[test]
+	fn a_tempo_is_two_decimals_or_it_is_one_of_the_two_kinds_of_nothing() {
+		// Act / Assert: the same three answers the lengths give, in the same order (PLAN §14d).
+		assert_eq!(format_tempo(None), "", "nobody has scanned it");
+		assert_eq!(
+			format_tempo(Some(None)),
+			"--",
+			"scanned, and there is no tempo in it"
+		);
+
+		// Two decimals whatever the number, so the column is read down rather than across — and
+		// rounded rather than truncated, since 127.999 is a 128 track.
+		assert_eq!(format_tempo(Some(Some(128.0))), "128.00");
+		assert_eq!(format_tempo(Some(Some(127.999))), "128.00");
+		assert_eq!(format_tempo(Some(Some(97.4649))), "97.46");
+		assert_eq!(
+			format_tempo(Some(Some(174.005))),
+			"174.01",
+			"half a hundredth"
+		);
 	}
 
 	#[test]

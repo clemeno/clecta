@@ -1011,11 +1011,12 @@ does, which files are offered) unit-testable with no filesystem.
 
 - **One directory, read whole.** No batching: `read_dir` on a local disk returns in
   milliseconds where cmote's SFTP round trips did not.
-- **Rows, not icons** — name, playing time, size, modified date, and a leading glyph marking
-  *audio* / *video* / *other*. A media browser is scanned by name and length, not by thumbnail.
-  The playing time sits *before* the size (§14c) because it is the one column that says what a
-  file is for rather than what it is; it is blank until something has scanned the file, which is
-  the same moment its `✓` appears (§11c).
+- **Rows, not icons** — name, tempo, playing time, size, modified date, and a leading glyph
+  marking *audio* / *video* / *other*. A media browser is scanned by name and length, not by
+  thumbnail. The tempo (§14d) and the playing time (§14c) sit *before* the size because they are
+  the columns that say what a file is for rather than what it is, and the tempo leads because a
+  set is grouped by it before it is timed. Both are blank until something has scanned the file,
+  which is the same moment its `✓` appears (§11c).
 - **Not `widget::table` — `scrollable(column(rows))`.** iced 0.14 does ship a `table`, and
   three aligned columns with a header looked like exactly its job. The spike
   (`src/bin/ui_spike.rs`) says no: **`table` has no row.** `table::Column::view` produces
@@ -1622,6 +1623,10 @@ different jobs — a waveform when a track is loaded, a length when it is queued
 means a write touches only what it knows, and it is where the next kind of fact goes: **a new
 table, not a migration**.
 
+That promise has now been kept twice — `trims` (§14c) and `tempos` (§14d) — and the second one
+shows what it is worth beyond the migration it saves: a hand-edited tempo will need a store that
+can be emptied on its own without touching a waveform (Q41), and a table is already that.
+
 Each value is a format byte, then the stamp, then the payload. The format byte is one byte and
 buys the only migration story a cache needs — bump it, and every old record reads as a miss
 and is overwritten the next time it is wanted. Without it a changed layout reads old bytes as
@@ -1775,16 +1780,23 @@ out, this file has been — and a row is never in both states at once. A leading
 than a trailing one so the marks line up at the pane's edge, which is what makes a prepared
 folder readable without reading any of it.
 
-### "Prepared" is both tables or neither
+### "Prepared" is every table or none of them
 
-The mark tests exactly what `cached_scan` tests when it decides it has a hit: the waveform *and*
-the music's edges, for this exact stamp (§11a). Not "there is an entry for this file" — a track
-the queues merely measured the length of has a row in `durations` and is still a third of a
-second of decoding away. A mark that included it would be true about the database and a lie
-about the thing the user cares about, which is whether loading this track will be instant.
+The mark tests exactly what `cached_scan` tests when it decides it has a hit: the waveform, the
+music's edges *and* the tempo, for this exact stamp (§11a). Not "there is an entry for this
+file" — a track the queues merely measured the length of has a row in `durations` and is still a
+third of a second of decoding away. A mark that included it would be true about the database and
+a lie about the thing the user cares about, which is whether loading this track will be instant.
 
 That also makes the column a picture of §11a's staleness rule: edit a file and its mark goes,
 because the stamp moved and the store no longer answers for what is on disk.
+
+**And it is what a new fact costs.** Adding the tempo table (§14d) took every `✓` in every
+already-prepared folder away until one more **Prepare folder** run put them back, because a scan
+from a build that knew nothing about tempi is exactly the "still a whole decode away" case above.
+That is the honest price and the right way round to pay it: the alternative was a `✓` that means
+two different things depending on which build wrote the record, and a tempo column with permanent
+holes in it that nothing but **Clear cache** would ever fill.
 
 ### Asked once per listing, off the thread, for no `stat` at all
 
@@ -1895,10 +1907,10 @@ otherwise pure; anything needing a device or a real folder is manual.
   one: a refresh keeps the mark of a row it still lists and drops the one it lost, a file worked
   out while the pane shows it is marked, a path the pane has never heard of is *not* — so a scan
   of a folder the user navigated away from cannot mark rows by name in the folder they are
-  looking at now — and emptying the store empties the column. The playing time rides in the
-  same test (§14c), because it rides in the same map: a scanned file's seconds come back, a
-  scanned *silent* one comes back marked with no time, and a file nobody has scanned is told
-  apart from both.
+  looking at now — and emptying the store empties the column. The playing time and the tempo
+  ride in the same test (§14c, §14d), because they ride in the same map: a scanned file's seconds
+  and beats come back together, a scanned *silent* one comes back marked with neither, and a file
+  nobody has scanned is told apart from both.
 - **`deck.rs`** — the transport state machine as a pure `transition(state, event)`, so
   every edge is checked with no audio device in the room.
 - **Drop policy** (`deck.rs`) — `drop_outcome(...) -> DropOutcome` pulled free of `self`,
@@ -1932,6 +1944,16 @@ otherwise pure; anything needing a device or a real folder is manual.
   the answer back the way the two panes do: `Trim::music()` on a file with four seconds of
   leader and two of run-out, plus edges the wrong way round giving `0:00` rather than the panic
   a `Duration` subtraction would otherwise be (§14c).
+
+  `Tempo` is the third accumulator and gets three (§14d). The first builds a click track at 100,
+  128 and 174 BPM and reads each back **to a fiftieth of a BPM**, which is the whole claim the
+  second decimal makes — and 174 is in there on purpose, because 87 fits every other click exactly
+  as well and the faster reading has to win. The second is the same trap `Edges` has: **a channel
+  is not a beat either**, and reading a stereo file as mono is a tempo out by a factor of two,
+  which is the one mistake a detector is not allowed to make quietly. The third is the two kinds
+  of nothing — silence, a clip too short to hold two of the slowest beats it is asked about, a rate
+  the decoder would not answer for, and a stream of `NaN`s, all of which have to be *no tempo*
+  rather than a number somebody would act on.
 - **`playlist.rs`** — the queues (§7a), and almost every test is about the *selection* rather
   than the list: an insert above it carries it down, a remove above it pulls it up, removing
   the selected row lands on whatever slid into its place, removing the last row falls back to
@@ -1979,12 +2001,12 @@ otherwise pure; anything needing a device or a real folder is manual.
   answer settles both rows and nothing else — which is the reason `measured` works by path
   where everything above it works by index.
 
-  A third pins the two halves of `measured` apart (§14c). A row is measured the moment it is
-  queued and scanned much later, if ever, so the length is settled once and kept while the
-  playing time has to be allowed to land on a row that already has one — the order it actually
-  happens in, and the one a single `duration.is_none()` filter would have made impossible. The
-  same test checks a later queue edit, which only reads the store, cannot take the playing time
-  away again.
+  A third pins the two halves of `measured` apart (§14c, §14d). A row is measured the moment it
+  is queued and scanned much later, if ever, so the length is settled once and kept while the
+  playing time and the tempo have to be allowed to land on a row that already has one — the order
+  it actually happens in, and the one a single `duration.is_none()` filter would have made
+  impossible. The same test checks a later queue edit, which only reads the store, cannot take
+  either of them away again.
 
   `already_queued` gets two more, and the second is the one that matters (§7a). The first is
   the ordinary search: a track is found in whichever of the three lists actually holds it, not
@@ -2029,7 +2051,9 @@ otherwise pure; anything needing a device or a real folder is manual.
   third (§14c), and it is here rather than in either pane because it is what makes the two agree:
   the six states a row can be in, from blank through `--:--` and a plain length to
   `2:58 / 3:15`, including the one order that would otherwise print a separator with nothing
-  after it — scanned before it was measured.
+  after it — scanned before it was measured. `format_tempo` gets the same treatment (§14d): the
+  two kinds of nothing, and a number that is always two decimals — including a round 128, a
+  127.999 that rounds up to it, and a hundredth landing exactly on the boundary.
 - **`cache.rs`** — two halves, and both are needed (§11a). The encoding is pure and is checked
   without a database: a record that survives a round trip *exactly*, since a cached waveform is
   supposed to be the same array a scan produced; a stamp that does not match reading as a miss,
@@ -2046,14 +2070,16 @@ otherwise pure; anything needing a device or a real folder is manual.
   store still usable, since a cleared cache is a cache and not a corpse (§11b). The trim
   encoding gets its own pure test for the halves that matter: "scanned, and this file is
   silent" told apart from "never scanned", and **half a trim** — eight bytes where sixteen
-  belong — thrown away rather than read as a start with no end. The same pass now also asks
-  what the files pane asks (§11c): `prepared` names the file that has both tables and not the
-  one that has only a waveform, and a listing's own size and modified time build the *same*
-  stamp a `stat` does — the equality the whole no-filesystem-work claim rests on, and a silent
-  drift there would show as a folder that is never marked and never explains why. And it now
-  reads the playing time back out of the same answer (§14c): a scanned file gives the seconds
-  between its edges, one scanned and found silent gives a mark with no time, and the one with
-  only a waveform gives neither.
+  belong — thrown away rather than read as a start with no end. The tempo encoding gets the same
+  (§14d), plus the two values that would print as a tempo nobody could act on: a stored `NaN` and
+  a stored negative are misses, so the record is thrown away and the file is scanned again. The same pass now also asks
+  what the files pane asks (§11c): `prepared` names the file that has every table and not the
+  one that has only a waveform and a tempo, and a listing's own size and modified time build the
+  *same* stamp a `stat` does — the equality the whole no-filesystem-work claim rests on, and a
+  silent drift there would show as a folder that is never marked and never explains why. And it
+  reads the playing time and the tempo back out of the same answer (§14c, §14d): a scanned file
+  gives the seconds between its edges and the beats it runs at, one scanned and found silent gives
+  a mark with neither, and the one still missing a table gives nothing at all.
 - **`ui/playlist.rs`** — `running_time`, which is the only thing in that file that is not
   widgets: how many tracks, how long they run, and the `+` that says the total is a floor
   rather than a figure. An empty list says *nothing at all* rather than `0 · 0:00`, because
@@ -2207,8 +2233,10 @@ path, so `/ponytail-debt` can harvest them later.
 - **Video rendering.** v1 decodes the audio track only. Upgrade path: an ffmpeg binding
   and a texture in a custom iced widget — a large C dependency and a licensing question,
   worth paying only when the picture is actually the feature.
-- **Cue points, loops, tempo / pitch, BPM detection.** Real DJ features. Tempo needs a
-  time-stretch stage rodio does not have (`rubato` or a phase vocoder).
+- **Cue points, loops, tempo / pitch *adjustment*.** Real DJ features. Changing a tempo needs a
+  time-stretch stage rodio does not have (`rubato` or a phase vocoder). **BPM detection came off
+  this list** — §14d, because the decode that finds it was already running for the waveform;
+  *playing* a track at a different one is still the hard half.
 - **Headphone cue / pre-listen.** Needs a *second* output device and a second mixer —
   the point at which the "one shared stream" decision in §4 has to be revisited.
 - **Watching the tree.** The files pane watches the folder it shows (§9); the tree does not
@@ -2675,6 +2703,105 @@ around.
 
 ---
 
+## 14d. The tempo (`waveform.rs`, `audio.rs`, `cache.rs`, `ui/browser.rs`, `ui/playlist.rs`)
+
+The third thing one decode can say about a file, after its shape (§14a) and its edges (§14c):
+how fast it beats. It is the number a set is *grouped* by before it is timed, which is why it
+leads both columns it appears in.
+
+### A third accumulator, not a third pass and not a dependency
+
+`Tempo` sits beside `Fold` and `Edges` in the same `for sample in source` loop. Everything
+expensive about this feature was already being paid for by the decode; what is added is one
+branch and one addition per sample, and then some arithmetic on an array a thousandth the size
+of the file.
+
+**Written here rather than pulled in.** The obvious crate for beat detection is `aubio`, which is
+C — and `deny.toml` bans a C toolchain on purpose (§11), because that ban is the whole of the
+"unzip and run" portability promise. So the detector is about a hundred lines of arithmetic in a
+module that already had no dependencies, which is also what makes it testable with no audio
+device and no window (§12).
+
+### How it works, in the order the numbers appear
+
+1. **A loudness envelope.** One number per 512 interleaved samples — the sum of the sample
+   magnitudes in it. That is 11.6 ms of a mono 44.1 kHz file and 5.8 ms of a stereo one: short
+   enough to put a kick drum in a bin of its own, long enough that a five-minute track is a few
+   tens of thousands of bins rather than millions.
+2. **Onsets, not loudness.** A tempo is not in how loud the music is but in *when it gets
+   suddenly louder*, so the envelope becomes the rise in its logarithm from one bin to the next,
+   negatives dropped. The logarithm is what makes a beat in a quiet passage weigh the same as one
+   in a loud passage — an ear hears ratios, and an amplitude difference would let the loudest
+   thirty seconds of a track decide its tempo. The mean is taken back off, leaving a train of
+   spikes around zero, so the search below is about *where* the spikes are and not about the
+   constant they sit on.
+3. **The coarse pass: how well the track agrees with itself.** For every whole-bin lag in the
+   allowed range, multiply the onset track by a copy of itself shifted that far and add it up.
+   The lag that scores highest is the beat. The sum is deliberately **not** divided by the number
+   of terms in it, which is what settles the tie between a lag and its double in favour of the
+   faster reading rather than leaving it to the last bit of a float.
+4. **The fine pass: one bin of a Fourier transform.** This is where the second decimal comes
+   from, and it is the part that took a rewrite. Refining the correlation at a *fractional* lag
+   means reading between two bins, and a straight line between two samples has its maximum at one
+   end or the other — so the refined answer snapped back to whole bins, which at 128 BPM is three
+   BPM wide. A rotating phasor has no such steps: `strength(period)` is smooth in the period, so
+   the peak can sit anywhere between two bins and every beat in the track pulls on where it sits.
+   Two narrowing sweeps of sixty-five candidates reach a thousandth of a bin, and a click track
+   built at 100, 128 and 174 BPM reads back to within a fiftieth of a BPM.
+
+### The range is not folded, and that is a decision about who fixes an octave
+
+65–200 BPM, reported as found. A detector that quietly doubles a 70 and halves a 174 is one that
+cannot be argued with — and it will be wrong sometimes, because half-time and double-time are
+genuinely both true about a lot of music. So the app reports what it measured and the *person*
+overrules it. **Edit BPM** — a right-click menu, a small dialog with `/2` and `×2` — is the other
+half of this decision and is not built yet (Q41).
+
+### Two decimals, and what they are honestly worth
+
+Always two, including on a round 128, because a column of numbers that sometimes has a fractional
+part and sometimes does not has to be read rather than scanned. No `BPM` suffix anywhere: position
+says what it is, and three characters on every row of two panes would cost more width than the
+number does.
+
+`ponytail:` the second decimal is earned on a track with **one** tempo. The phasor's precision
+comes from turning over the whole file, so a live recording that drifts, or a set with a tempo
+change in it, gets the average of the whole thing to two decimals of false precision. The upgrade
+is a tempo per section rather than per file, which is a different feature; the manual editor above
+is the cheaper answer.
+
+`ponytail:` a positive score is the whole confidence test. A recording with no beat in it at all —
+speech, an ambient wash — will still have *some* peak, so it gets a number rather than the `--`
+it deserves. Silence and anything under a few seconds are rejected; the rest is what the editor is
+for.
+
+### Where it appears, and what nothing-known looks like
+
+The same two places §14c chose, for the same reason, and in front of the playing time in both: a
+column of its own before the size in the files pane, and leading a queue row's `128.00  2:58 /
+3:12`. `format_tempo` builds both, so the two panes cannot answer differently.
+
+The two kinds of nothing are the ones §14c already drew. **Blank** is *nobody has scanned this*,
+because a column of placeholders turning into numbers one by one is worse than a column that
+fills in. **`--`** is *scanned, and there is no tempo in it* — an answer, and one worth storing,
+or a spoken word file would be decoded again on every launch to be told the same thing. A queue
+row draws both as blank, because a queue only ever *reads* what a scan left behind and has no way
+to tell the two apart — the same one-layer rule its playing time follows.
+
+### A table of its own, again
+
+`tempos` beside `waveforms`, `durations` and `trims` (§11a). The same argument as the trims table,
+and now with a second use to point at: a build that knows about tempi reads every waveform and
+every trim already on disk, where a fourth field on the waveform record would have needed `FORMAT`
+bumped and the whole library rescanned to add four bytes.
+
+It also pays for the feature that comes next. A hand-edited tempo is *not* a cache fact — deleting
+it loses something no decode can work out again — so it needs a store it can be cleared from on
+its own, with a confirmation, without touching a waveform. A table each is what makes that a small
+change rather than an argument with §11a's first sentence.
+
+---
+
 ## 15. The decision log
 
 | # | Question | Decision | Landed in |
@@ -2722,6 +2849,8 @@ around.
 | Q37 | Which files spin, and what drives them | **Any file with a thread on it, off the counter that was already turning.** One rule for the whole window: a folder scan and a player's own waveform scan are the same work, so a row spins for either and gets the same `✓` after. The phase is §14a's sweep counter — one for everything that turns, or two scans at once drift apart into what looks like a rendering fault — and its subscription grew one clause and no timer. *Which* files are turning has to be kept rather than derived: answers come back out of order, so the four in the air are never `files[done..next]` | §11c, §11b, §14a |
 | Q38 | What to do about `CFUserNotificationDisplayAlert` in the macOS log | **Nothing, and write down why.** It is `rfd`'s parentless path: no parent window means another process draws the alert while this one waits, which is the modal shortcut §7a already took, said out loud by the OS. iced lends a window handle inside `window::run` alone, so **Clear cache** could be parented but `admits` — asked in the middle of three queue edits, answering the code that asked — could not without three continuations and a queue that may change while the question is open. Parenting one of the two would trade a log line for two dialogs that do not look alike | §7a, §11a |
 | Q39 | Where the music's *length* comes from, and what it displaces | **Derived from the edges already stored, and it displaces nothing.** `Trim::music()` is `end - start`: a fourth table would be a number that can disagree with the two it was computed from, and the wrong one would be the one on screen. It reaches the files pane on the query §11c already makes once per listing — the edges were being read for the mark, so the number is free — and a queue row on the trim `cached_facts` was already reading for the handover. In the pane it is a column of its own before the size, because a listing says what a file *is* and this is the first thing that says what it is *for*; in a queue it goes in front of the file's length rather than instead of it, since the music is what the evening is planned against and the file's length is what every other program on the machine agrees with. The footer's running time deliberately stays a sum of *file* lengths: a total that changed meaning when a transition switch was flipped would be worse than one that is occasionally long | §14c, §11c, §9, §7a |
+| Q40 | How a tempo is found, and how far it is trusted | **A third accumulator on the decode that was already happening, reported raw between 65 and 200 BPM.** An onset track from a 512-sample loudness envelope, a whole-bin autocorrelation for the beat, then one bin of a Fourier transform to refine it — the phasor because a correlation read between two bins snaps back to whole bins, which at 128 BPM is three BPM wide, and the column claims two decimals. Written rather than pulled in, because the obvious crate is C and `deny.toml` bans a C toolchain (§11). **Not** folded into a narrower window: half-time and double-time are both genuinely true about a lot of music, so the app reports what it measured and a person overrules it (Q41). The `✓` now means three tables rather than two, which cost every prepared folder one more **Prepare folder** run — the honest price of a mark that means one thing | §14d, §11c, §9, §7a |
+| Q41 | Where a *hand-edited* tempo lives, and when it is built | **Its own store, cleared on its own, and next — not now.** A detected tempo is a cache fact: deleting it costs time. An edited one is not, so **Clear cache** must not take it and a re-scan must not overwrite it, which means a store of its own with a clear of its own behind a confirmation. It also needs the app's first in-app modal — `rfd` draws native dialogs and cannot host a `/2`, a `×2` and a live value — plus a right-click menu, neither of which exists yet. Splitting it from the detection keeps two reviewable commits instead of one large one, and the detection is useful on its own the moment it lands | §14d, §11a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
@@ -2735,7 +2864,7 @@ size were the easy part.
 Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
 the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
 one use of the window's height that was enough to keep the defect alive. Both were settled
-the same way, by looking at a running window. That is now four of the thirty-nine (Q7, Q10,
+the same way, by looking at a running window. That is now four of the forty-one (Q7, Q10,
 Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
 and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
 

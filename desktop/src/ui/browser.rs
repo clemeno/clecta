@@ -5,19 +5,20 @@
 //! background. The layout spike is what settled that; PLAN §9 records why.
 
 use std::path::Path;
-use std::time::Duration;
 
 use iced::widget::{Space, button, checkbox, column, container, mouse_area, row, scrollable, text};
 use iced::{Element, Fill, Left, Right, Theme};
 
 use crate::app::Message;
 use crate::browser::{Browser, Entry};
+use crate::cache::Ready;
 use crate::deck::DeckId;
 use crate::ui;
 
 /// Fixed column widths, in pixels. The name column takes what is left.
 const MARK_WIDTH: f32 = 14.0;
 const GLYPH_WIDTH: f32 = 18.0;
+const TEMPO_WIDTH: f32 = 46.0;
 const MUSIC_WIDTH: f32 = 48.0;
 const SIZE_WIDTH: f32 = 80.0;
 const DATE_WIDTH: f32 = 92.0;
@@ -86,7 +87,7 @@ pub fn view<'a>(
 				entry,
 				browser.is_selected(&entry.path),
 				mark,
-				browser.music(&entry.path),
+				browser.ready(&entry.path),
 			)
 		});
 
@@ -210,15 +211,15 @@ fn preparation(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'
 /// because they are the two ends of the same sentence — this file is being worked out, this file
 /// has been — and a row is only ever in one of those states.
 ///
-/// `music` is how long the file's music runs, which is the same scan's other half and therefore
-/// arrives with the `✓` rather than behind it (PLAN §14c). Before the size, because it is the
-/// question actually being asked of a folder of tracks — the size is what a file *is*, the
-/// playing time is what it is *for*.
+/// `ready` is everything the same scan worked out — the tempo and how long the music runs — which
+/// is why both arrive with the `✓` rather than behind it (PLAN §14c, §14d). Before the size,
+/// because they are the questions actually being asked of a folder of tracks: the size is what a
+/// file *is*, and these two are what it is *for*.
 fn file_row<'a>(
 	entry: &'a Entry,
 	selected: bool,
 	mark: Option<&'static str>,
-	music: Option<Option<Duration>>,
+	ready: Option<Ready>,
 ) -> Element<'a, Message> {
 	// Green for a file that is ready, the same green the waveform draws the music's edges in;
 	// the spinner keeps the row's own colour, since it is saying "wait", not "good".
@@ -234,9 +235,13 @@ fn file_row<'a>(
 		mark,
 		text(entry.kind.glyph()).size(13).width(GLYPH_WIDTH),
 		text(&entry.name).size(13).width(Fill),
+		text(ui::format_tempo(ready.map(|ready| ready.tempo)))
+			.size(12)
+			.width(TEMPO_WIDTH)
+			.align_x(Right),
 		// Only the whole answer is drawn here: the pane has never had a length column, so one
 		// that showed a file's raw length would be a second new column rather than this one.
-		text(ui::format_lengths(None, music))
+		text(ui::format_lengths(None, ready.map(|ready| ready.music)))
 			.size(12)
 			.width(MUSIC_WIDTH)
 			.align_x(Right),

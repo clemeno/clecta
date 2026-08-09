@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::deck::DeckId;
-use crate::waveform::{Edges, Fold, Trim};
+use crate::waveform::{Edges, Fold, Tempo, Trim};
 
 /// The audio output, alive for as long as the app can make a sound.
 pub struct Engine {
@@ -187,11 +187,12 @@ pub fn duration(path: &Path) -> Option<Duration> {
 	decoder(path).ok()?.total_duration()
 }
 
-/// What one decode of a whole file works out about it (PLAN §14a, §14c).
+/// What one decode of a whole file works out about it (PLAN §14a, §14c, §14d).
 ///
-/// Two answers from one pass, because the pass is the expensive part: the array the waveform
-/// draws, and where the music inside the file starts and stops. Splitting them into two
-/// functions would mean decoding every track twice for facts that arrive together.
+/// Three answers from one pass, because the pass is the expensive part: the array the waveform
+/// draws, where the music inside the file starts and stops, and how fast it beats. Splitting them
+/// into three functions would mean decoding every track three times for facts that arrive
+/// together.
 ///
 /// `Clone` because it travels inside a `Message` (PLAN §5), which iced requires to be one —
 /// eight kilobytes of amplitudes copied once per track loaded.
@@ -200,9 +201,13 @@ pub struct Scan {
 	pub peaks: Vec<f32>,
 	/// `None` for a file with nothing above the silence threshold in it (PLAN §14c).
 	pub trim: Option<Trim>,
+	/// Beats per minute, and `None` for a file with no tempo to find: silence, speech, or a
+	/// recording too short to hold a few beats (PLAN §14d).
+	pub tempo: Option<f32>,
 }
 
-/// Scan a whole file: the amplitude array the waveform draws, and the music's two edges.
+/// Scan a whole file: the amplitude array the waveform draws, the music's two edges, and the
+/// tempo it beats at.
 ///
 /// A second, independent decode of a file that is already loaded — the playing one cannot
 /// be read twice, and reading it would move the playhead. It decodes every sample and
@@ -225,14 +230,17 @@ pub fn scan(path: &Path) -> Result<Scan> {
 
 	let mut fold = Fold::default();
 	let mut edges = Edges::default();
+	let mut tempo = Tempo::default();
 	for sample in source {
 		fold.push(sample);
 		edges.push(sample);
+		tempo.push(sample);
 	}
 
 	Ok(Scan {
 		peaks: fold.finish(),
 		trim: edges.finish(rate, channels),
+		tempo: tempo.finish(rate, channels),
 	})
 }
 

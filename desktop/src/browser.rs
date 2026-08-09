@@ -7,8 +7,9 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
+use crate::cache::Ready;
 use crate::select::{self, Click};
 
 /// What a file is, as far as the browser is concerned.
@@ -117,18 +118,18 @@ pub struct Browser {
 	/// Where a Shift-click measures from: the row the last plain or command click landed on.
 	/// `None` when nothing has been clicked yet, which makes a Shift-click a plain one.
 	anchor: Option<PathBuf>,
-	/// Which rows the cache already answers for in full, and how long the music in each runs
-	/// (PLAN §11c, §14c).
+	/// Which rows the cache already answers for in full, and what those answers are
+	/// (PLAN §11c, §14c, §14d).
 	///
 	/// A *copy* of what the store said, not the store itself: `view` runs every frame and the
 	/// cache is a file on disk. It is replaced wholesale each time a listing is asked about, and
 	/// added to one path at a time as scans land — which is why it can only ever be optimistic
 	/// between two listings, never stale in the other direction.
 	///
-	/// One map rather than a set and a map beside it: the mark and the playing time are the same
-	/// fact read from the same two tables, and two containers would be two chances to hold a
-	/// tick for a row with no time or the other way about.
-	prepared: HashMap<PathBuf, Option<Duration>>,
+	/// One map rather than a set and a map beside it: the mark, the playing time and the tempo are
+	/// one fact read from one set of tables, and separate containers would be separate chances to
+	/// hold a tick for a row with no time or the other way about.
+	prepared: HashMap<PathBuf, Ready>,
 	/// Off by default — a *local* media browser is not usually opened to find `.config`
 	/// (PLAN §9).
 	pub show_hidden: bool,
@@ -196,25 +197,26 @@ impl Browser {
 		self.prepared.contains_key(path)
 	}
 
-	/// How long this file's music runs, if anything has worked it out (PLAN §14c).
+	/// What has been worked out about this file, if anything has (PLAN §14c, §14d).
 	///
-	/// Two layers, and both are worth asking: the outer `None` is *nobody has scanned this*, and
-	/// `Some(None)` is *scanned, and there is no music in it* — a file of silence, which is an
-	/// answer rather than a gap. The column says the two differently for the same reason the
+	/// Two layers, and both are worth asking. The outer `None` is *nobody has scanned this* and
+	/// draws nothing at all; inside it, a field's own `None` is *scanned, and there is none* — a
+	/// file of silence has no playing time and a spoken word recording has no tempo, and both are
+	/// answers rather than gaps. The columns say the two differently for the same reason the
 	/// queues do.
-	pub fn music(&self, path: &Path) -> Option<Option<Duration>> {
+	pub fn ready(&self, path: &Path) -> Option<Ready> {
 		self.prepared.get(path).copied()
 	}
 
 	/// What the store said about this listing, replacing whatever was believed before.
-	pub fn marked_prepared(&mut self, prepared: HashMap<PathBuf, Option<Duration>>) {
+	pub fn marked_prepared(&mut self, prepared: HashMap<PathBuf, Ready>) {
 		self.prepared = prepared;
 	}
 
 	/// One more file worked out, while the pane is showing it.
-	pub fn mark_prepared(&mut self, path: &Path, music: Option<Duration>) {
+	pub fn mark_prepared(&mut self, path: &Path, ready: Ready) {
 		if self.entries.iter().any(|entry| entry.path == path) {
-			self.prepared.insert(path.to_path_buf(), music);
+			self.prepared.insert(path.to_path_buf(), ready);
 		}
 	}
 
@@ -382,6 +384,7 @@ fn take_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> u128 {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::time::Duration;
 
 	fn entry(name: &str) -> Entry {
 		Entry::new(PathBuf::from("/music").join(name), 0, None)
@@ -607,19 +610,24 @@ mod tests {
 	#[test]
 	fn a_mark_survives_a_refresh_but_not_the_loss_of_its_file() {
 		// Arrange: the store's answer about the listing on screen. One of them was scanned and
-		// found to hold no music at all, which is an answer and not a gap.
+		// found to hold neither music nor a tempo, which is an answer and not a gap.
 		let mut browser = pane();
+		let scanned = Ready {
+			tempo: Some(128.5),
+			music: Some(Duration::from_secs(215)),
+		};
 		browser.marked_prepared(HashMap::from([
-			(row("1.mp3"), Some(Duration::from_secs(215))),
-			(row("2.mp3"), None),
+			(row("1.mp3"), scanned),
+			(row("2.mp3"), Ready::default()),
 		]));
 		assert!(browser.is_prepared(&row("1.mp3")));
+		assert_eq!(browser.ready(&row("1.mp3")), Some(scanned));
 		assert_eq!(
-			browser.music(&row("1.mp3")),
-			Some(Some(Duration::from_secs(215)))
+			browser.ready(&row("2.mp3")),
+			Some(Ready::default()),
+			"scanned, and silent throughout"
 		);
-		assert_eq!(browser.music(&row("2.mp3")), Some(None), "scanned, silent");
-		assert_eq!(browser.music(&row("3.mp3")), None, "never scanned");
+		assert_eq!(browser.ready(&row("3.mp3")), None, "never scanned");
 
 		// Act: the folder is read again with one of them gone.
 		browser.show(PathBuf::from("/music"), vec![entry("1.mp3")]);
@@ -633,12 +641,16 @@ mod tests {
 		// Act / Assert: a file worked out while the pane is showing it gets marked, and one the
 		// pane has never heard of is not — a scan of a folder the user has navigated away from
 		// must not mark rows by name in whatever folder they are looking at now.
-		browser.mark_prepared(&row("1.mp3"), Some(Duration::from_secs(180)));
-		browser.mark_prepared(&PathBuf::from("/elsewhere/1.mp3"), None);
+		let rescanned = Ready {
+			tempo: Some(174.0),
+			music: Some(Duration::from_secs(180)),
+		};
+		browser.mark_prepared(&row("1.mp3"), rescanned);
+		browser.mark_prepared(&PathBuf::from("/elsewhere/1.mp3"), Ready::default());
 		assert!(browser.is_prepared(&row("1.mp3")));
 		assert_eq!(
-			browser.music(&row("1.mp3")),
-			Some(Some(Duration::from_secs(180))),
+			browser.ready(&row("1.mp3")),
+			Some(rescanned),
 			"the fresh scan's answer, not the old one"
 		);
 		assert!(!browser.is_prepared(Path::new("/elsewhere/1.mp3")));

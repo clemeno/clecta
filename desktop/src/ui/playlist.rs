@@ -247,10 +247,12 @@ fn rows<'a>(
 				text(ui::elide_middle(&item.name, NAME_CHARS))
 					.size(12)
 					.width(Fill),
-				// Blank until it has been measured, rather than a placeholder that would flick
-				// to a number a moment later on every row of a freshly opened list — and the
-				// music's own length in front of the file's once anything has scanned it
-				// (PLAN §14c), which is the number the list is actually planned against.
+				// Both blank until something has worked them out, rather than placeholders that
+				// would flick to numbers a moment later on every row of a freshly opened list.
+				// The tempo leads, because a set is ordered by it before it is timed (PLAN §14d),
+				// and the music's own length goes in front of the file's (PLAN §14c) — the number
+				// the list is actually planned against, then the one everything else agrees with.
+				text(ui::format_tempo(item.tempo.map(Some))).size(11),
 				text(ui::format_lengths(item.music, item.duration)).size(11),
 			]
 			.spacing(4),
@@ -416,6 +418,7 @@ mod tests {
 		list.measured(
 			&PathBuf::from("/m/a.mp3"),
 			Some(Duration::from_secs(215)),
+			None,
 			None,
 		);
 		assert_eq!(running_time(&list), "1 · 3:35", "measured");

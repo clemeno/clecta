@@ -1,8 +1,8 @@
-//! The waveform's arithmetic (PLAN §14a, §14c): folding a file's samples down to a small
-//! array of amplitudes, finding where the music inside the file starts and stops, and
-//! matching the array to the pixel columns drawn from it.
+//! The waveform's arithmetic (PLAN §14a, §14c, §14d): folding a file's samples down to a small
+//! array of amplitudes, finding where the music inside the file starts and stops, working out
+//! how fast it beats, and matching the array to the pixel columns drawn from it.
 //!
-//! Pure — no rodio, no iced, no filesystem. `audio::scan` feeds `Fold` and `Edges` one
+//! Pure — no rodio, no iced, no filesystem. `audio::scan` feeds `Fold`, `Edges` and `Tempo` one
 //! decoded sample at a time and `ui::waveform` reads the result back through `column_peak`,
 //! so the arithmetic both ends depend on sits in one place and can be checked with no audio
 //! device and no window (PLAN §12).
@@ -186,6 +186,234 @@ impl Edges {
 			end: Duration::from_secs_f64(self.last as f64 / per_second),
 		})
 	}
+}
+
+/// How many interleaved samples one envelope bin covers (PLAN §14d).
+///
+/// A power of two for no reason other than habit; what matters is the *time* it works out to,
+/// which is 11.6 ms of a mono 44.1 kHz file and 5.8 ms of a stereo one. Both are short enough
+/// to put a kick drum in a bin of its own — a beat has to be locatable to a few milliseconds or
+/// the tempo it implies is wrong in the first decimal — and long enough that a five-minute
+/// track is a few tens of thousands of bins rather than millions.
+const TEMPO_BIN: u32 = 512;
+
+/// The tempi the search is allowed to answer with, in beats per minute.
+///
+/// Deliberately *not* folded into a narrower window (PLAN §14d): a detector that quietly doubles
+/// a 70 and halves a 174 is one that cannot be argued with, and the answer to an octave that
+/// lands wrong is a person looking at it, not a constant. The range is the range of tempi people
+/// actually mix, and nothing outside it is worth reporting.
+const MIN_BPM: f32 = 65.0;
+const MAX_BPM: f32 = 200.0;
+
+/// Added before taking a logarithm, so a bin of digital silence is a small number rather than
+/// negative infinity — which would make every difference either side of it meaningless.
+const QUIET: f32 = 1e-6;
+
+/// A tempo being worked out, in the same pass that folds the waveform and finds the edges
+/// (PLAN §14d).
+///
+/// The third accumulator on one decode, and the reason it is a third rather than a second pass
+/// is the same reason `Edges` is: the file is already being read a sample at a time, and the only
+/// expensive thing about any of this is the decoding.
+///
+/// What it keeps is a *loudness envelope* — one number per `TEMPO_BIN` samples — because a tempo
+/// is not in the samples themselves but in when they get suddenly louder. Everything else happens
+/// in `finish`, on an array a thousandth the size of the file.
+///
+/// `ponytail:` the envelope is unbounded — one `f32` per 512 samples, so 400 KB for a ten-minute
+/// stereo track, held only while the scan runs. `Fold` halves itself instead, which this cannot
+/// do: halving would coarsen the time resolution the whole answer rests on. Cap the *analysed*
+/// length instead if a two-hour recording ever needs to be scanned.
+#[derive(Debug, Default)]
+pub struct Tempo {
+	bins: Vec<f32>,
+	/// The bin being filled: the sum of the sample magnitudes in it, and how many there are.
+	current: f32,
+	filled: u32,
+}
+
+impl Tempo {
+	/// Add one decoded sample, the same one `Fold` and `Edges` are given.
+	///
+	/// Channels are summed together like the waveform's, because a beat is in both of them and
+	/// the sum is the loudest thing about it.
+	///
+	/// A `NaN` is skipped rather than added: it would poison its bin, and then the two
+	/// differences either side of that bin, and a decoder that emits one must not be able to
+	/// invent an onset.
+	pub fn push(&mut self, sample: f32) {
+		if sample.is_finite() {
+			self.current += sample.abs();
+		}
+		self.filled += 1;
+
+		if self.filled == TEMPO_BIN {
+			self.bins.push(self.current);
+			self.current = 0.0;
+			self.filled = 0;
+		}
+	}
+
+	/// The tempo in beats per minute, or `None` when the file has none to give: silence, a
+	/// recording too short to hold a few beats, or a stream whose rate could not be read.
+	///
+	/// The partly-filled last bin is **dropped**, unlike the waveform's, and the difference is
+	/// what the two arrays are for: a bin holding half as many samples is quieter through no
+	/// fault of the music, and this array is read as a series of loudness *changes*.
+	pub fn finish(self, rate: u32, channels: u16) -> Option<f32> {
+		let per_bin = f64::from(TEMPO_BIN) / (f64::from(rate) * f64::from(channels));
+		if per_bin <= 0.0 {
+			return None;
+		}
+
+		let onsets = onsets(&self.bins);
+		// The slowest tempo asked about, in bins, which is also the shortest useful recording:
+		// a comparison with nothing like two of the longest beats to run over says nothing.
+		let longest = (60.0 / (f64::from(MIN_BPM) * per_bin)).round() as usize;
+		let shortest = (60.0 / (f64::from(MAX_BPM) * per_bin)).round() as usize;
+		// Two bins is the floor, not one: the refining pass sweeps a bin either side of what this
+		// finds, and a period it could walk down to zero is a division by nothing. Reachable only
+		// from a stream of a couple of kilohertz, which is why it is a guard and not a feature.
+		if shortest < 2 || onsets.len() < 2 * longest {
+			return None;
+		}
+
+		// The coarse pass: whole bins, and the first of any equal pair wins, which means the
+		// faster of two tempi that fit the same beats equally well.
+		let mut best = (f32::NEG_INFINITY, shortest);
+		for lag in shortest..=longest {
+			let score = agreement(&onsets, lag);
+			if score > best.0 {
+				best = (score, lag);
+			}
+		}
+		if best.0 <= 0.0 {
+			return None;
+		}
+
+		let period = refine(&onsets, best.1 as f32);
+		let bpm = 60.0 / (f64::from(period) * per_bin);
+
+		// The store keeps whatever comes out of here and the column prints it, so the one number
+		// that must not leave this function is one that could be drawn as a tempo and is not.
+		(bpm.is_finite() && bpm > 0.0).then_some(bpm as f32)
+	}
+}
+
+/// The loudness envelope turned into a track of *onsets*: how much louder each bin is than the
+/// one before it, and nothing at all when it is quieter.
+///
+/// Three things happen here and each earns its line. The logarithm is what makes a beat in a
+/// quiet passage weigh the same as one in a loud passage — an ear hears ratios, and an amplitude
+/// difference would let the loudest thirty seconds of a track decide its tempo. The `max(0.0)`
+/// keeps only the rises, because a note starting is a beat and a note ending is not. And the mean
+/// is taken back off so that what is left is a train of spikes around zero: without that, every
+/// comparison below would be dominated by the constant the spikes sit on rather than by where
+/// they are.
+fn onsets(bins: &[f32]) -> Vec<f32> {
+	let mut rises: Vec<f32> = bins
+		.windows(2)
+		.map(|pair| ((pair[1] + QUIET).ln() - (pair[0] + QUIET).ln()).max(0.0))
+		.collect();
+
+	if rises.is_empty() {
+		return rises;
+	}
+
+	let mean = rises.iter().sum::<f32>() / rises.len() as f32;
+	for rise in &mut rises {
+		*rise -= mean;
+	}
+	rises
+}
+
+/// How well the onset track agrees with itself `lag` bins later — the number the coarse pass
+/// maximises, and the sense in which a file "has" a tempo at all.
+///
+/// Deliberately **not** divided by the number of terms in the sum. The shorter the lag the more
+/// terms there are, so a lag and its double are not weighed equally — the double is worth
+/// slightly less, and that is what settles a tie in favour of the faster tempo rather than
+/// leaving it to the last bit of a float.
+fn agreement(onsets: &[f32], lag: usize) -> f32 {
+	if lag == 0 || lag >= onsets.len() {
+		return 0.0;
+	}
+
+	let sum: f32 = onsets
+		.iter()
+		.zip(&onsets[lag..])
+		.map(|(early, late)| early * late)
+		.sum();
+
+	sum / onsets.len() as f32
+}
+
+/// How much of the onset track beats at exactly this period — one bin of a Fourier transform,
+/// evaluated at one frequency instead of all of them.
+///
+/// This is what the second decimal is made of, and the reason the refining pass is not simply
+/// `agreement` at a fractional lag. A lag that falls between two bins has to be read by
+/// interpolating them, and a straight line between two samples has its maximum at one end or the
+/// other — so a correlation refined that way quietly snaps back to whole bins, which at 128 BPM is
+/// three BPM wide. A rotating phasor has no such steps: it is smooth in the period, so the peak
+/// can sit anywhere between two bins, and every beat in the track pulls on where it sits.
+///
+/// The phasor is turned by one complex multiplication per bin rather than a `cos` and a `sin`,
+/// which is what makes a hundred candidates over a ten-minute track affordable. `f64` for the
+/// turning, because a hundred thousand multiplications of a unit vector by itself is exactly the
+/// place where `f32` drifts off the unit circle.
+fn strength(onsets: &[f32], period: f32) -> f32 {
+	if period <= 1.0 || onsets.is_empty() {
+		return 0.0;
+	}
+
+	let angle = -std::f64::consts::TAU / f64::from(period);
+	let (turn_cos, turn_sin) = (angle.cos(), angle.sin());
+	let (mut phase_cos, mut phase_sin) = (1.0_f64, 0.0_f64);
+	let (mut real, mut imaginary) = (0.0_f64, 0.0_f64);
+
+	for onset in onsets {
+		let onset = f64::from(*onset);
+		real += onset * phase_cos;
+		imaginary += onset * phase_sin;
+
+		let turned = phase_cos * turn_cos - phase_sin * turn_sin;
+		phase_sin = phase_cos * turn_sin + phase_sin * turn_cos;
+		phase_cos = turned;
+	}
+
+	(real.hypot(imaginary) / onsets.len() as f64) as f32
+}
+
+/// The period to a thousandth of a bin, starting from the whole bin the coarse pass found.
+///
+/// Two narrowing passes rather than one fine sweep: there is a single peak within a bin either
+/// side of the coarse answer, so sixty-five candidates twice reach a step of a thousandth of a bin
+/// where one pass at that step would be two thousand candidates — and each of them costs a run
+/// over the whole onset track. A thousandth of a bin is a fortieth of a BPM at 128, which is the
+/// precision the column claims and a little better.
+fn refine(onsets: &[f32], coarse: f32) -> f32 {
+	let mut period = coarse;
+	let mut span = 1.0;
+
+	for _ in 0..2 {
+		let step = span / 32.0;
+		let mut best = (f32::NEG_INFINITY, period);
+
+		for offset in -32..=32 {
+			let candidate = period + offset as f32 * step;
+			let score = strength(onsets, candidate);
+			if score > best.0 {
+				best = (score, candidate);
+			}
+		}
+
+		period = best.1;
+		span = step;
+	}
+
+	period
 }
 
 /// The amplitude to draw at one of `columns` pixel columns.
@@ -408,6 +636,95 @@ mod tests {
 		// a file to re-scan after the threshold moves, which is what the button is for.
 		let trim = edges(&samples, 1_000, 1).expect("a file with a click in it");
 		assert_eq!(trim.start, Duration::from_millis(10));
+	}
+
+	/// A click track at a given tempo: a ten-millisecond decaying tick on every beat and digital
+	/// silence between them. The beats are placed at the *rounded* multiples of a fractional
+	/// period, so the average tempo really is the one asked for rather than the one an integer
+	/// number of samples per beat would round it to.
+	fn clicks(bpm: f32, seconds: f32, rate: u32) -> Vec<f32> {
+		let total = (seconds * rate as f32) as usize;
+		let period = 60.0 / bpm * rate as f32;
+		let tick = rate as usize / 100;
+		let mut samples = vec![0.0_f32; total];
+
+		for beat in 0.. {
+			let at = (beat as f32 * period).round() as usize;
+			if at >= total {
+				break;
+			}
+			for step in 0..tick {
+				if let Some(sample) = samples.get_mut(at + step) {
+					*sample = 0.8 * (1.0 - step as f32 / tick as f32);
+				}
+			}
+		}
+
+		samples
+	}
+
+	/// Push a whole slice through `Tempo`, the way `audio::scan` pushes a whole file.
+	fn tempo(samples: &[f32], rate: u32, channels: u16) -> Option<f32> {
+		let mut tempo = Tempo::default();
+		for sample in samples {
+			tempo.push(*sample);
+		}
+		tempo.finish(rate, channels)
+	}
+
+	#[test]
+	fn a_click_track_reads_back_the_tempo_it_was_built_at() {
+		// Arrange / Act / Assert: three tempi across the range, each to a fiftieth of a BPM —
+		// which is what makes the second decimal worth printing (PLAN §14d). A bin is 11.6 ms
+		// here, so a beat is 43 of them at 128 and this is a *two-thousandth* of a bin: the
+		// precision comes from the phasor turning over the whole track, not from the bins.
+		for asked in [100.0, 128.0, 174.0] {
+			let found = tempo(&clicks(asked, 20.0, 44_100), 44_100, 1)
+				.unwrap_or_else(|| panic!("{asked} BPM of clicks has a tempo"));
+			assert!(
+				(found - asked).abs() < 0.02,
+				"{asked} BPM read back as {found}"
+			);
+		}
+
+		// And 174 is the interesting one: 87 is inside the range too and fits every other click
+		// exactly as well. The faster reading wins because the comparison is not divided by the
+		// number of beats it had to work with (PLAN §14d) — the answer the manual editor then
+		// exists to overrule.
+	}
+
+	#[test]
+	fn a_channel_is_not_a_beat_either() {
+		// Arrange: the same click track read as stereo, where every frame is two samples — so
+		// the file is half as long and the beats are twice as often as the count alone says.
+		let samples = clicks(128.0, 20.0, 44_100);
+
+		// Act / Assert: getting this wrong is a tempo out by a factor of two, which is the one
+		// mistake a detector is not allowed to make quietly.
+		let found = tempo(&samples, 22_050, 2).expect("a click track has a tempo");
+		assert!((found - 128.0).abs() < 0.1, "read back as {found}");
+	}
+
+	#[test]
+	fn a_file_with_nothing_to_count_has_no_tempo() {
+		// Arrange / Act / Assert: silence has no onsets at all, and a `None` here is what puts a
+		// `--` in the column rather than a number somebody would act on.
+		assert_eq!(tempo(&[0.0; 441_000], 44_100, 1), None, "digital silence");
+
+		// Too short to hold two of the slowest beats it is asked about: under two seconds, where
+		// 65 BPM is nearly one beat a second. An answer from that would be a guess.
+		assert_eq!(
+			tempo(&clicks(128.0, 1.0, 44_100), 44_100, 1),
+			None,
+			"a snippet"
+		);
+
+		// And a rate the decoder would not answer for, which divides the whole thing by nothing.
+		assert_eq!(tempo(&clicks(128.0, 20.0, 44_100), 0, 1), None, "no rate");
+
+		// A decoder emitting `NaN` must not invent onsets: the samples are skipped, so this is
+		// the silence it actually is rather than a tempo read off arithmetic.
+		assert_eq!(tempo(&[f32::NAN; 441_000], 44_100, 1), None, "not a number");
 	}
 
 	#[test]

@@ -27,7 +27,7 @@ use notify::{RecursiveMode, Watcher};
 
 use crate::audio::{self, Engine, Scan};
 use crate::browser::{self, Browser, Entry};
-use crate::cache::{self, Cache};
+use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
 use crate::playlist::{self, ListId, Playlist, Transition};
@@ -212,6 +212,9 @@ pub struct Facts {
 	pub path: PathBuf,
 	pub duration: Option<Duration>,
 	pub trim: Option<Trim>,
+	/// Beats per minute (PLAN §14d), read or worked out by the same job that found the edges —
+	/// and `None` under the same rule as `trim`: this job could not say, not there is none.
+	pub tempo: Option<f32>,
 	/// Whether this job left the store holding everything a load would need (PLAN §11c).
 	///
 	/// The same shape as `trim` and for the same reason: `false` means *this job did not work
@@ -380,7 +383,7 @@ pub enum Message {
 	/// Which files of a listing the store already answers for in full, and how long the music in
 	/// each of them runs (PLAN §11c, §14c). The folder comes back with the answer for the same
 	/// reason the listing does: to be thrown away if the user has moved on since.
-	Prepared(PathBuf, HashMap<PathBuf, Option<Duration>>),
+	Prepared(PathBuf, HashMap<PathBuf, Ready>),
 	FoldersListed(PathBuf, Result<Vec<PathBuf>, String>),
 	/// A track's scan finished. Carries the path it was started for, because a player can
 	/// be given another track while the scan runs (PLAN §14a).
@@ -1231,11 +1234,18 @@ impl Clecta {
 				// Recorded before anything is checked: where a file's music sits is true about
 				// the *file*, whatever is loaded in the player by now (PLAN §14c).
 				let trim = result.as_ref().ok().and_then(|scan| scan.trim);
+				let tempo = result.as_ref().ok().and_then(|scan| scan.tempo);
 				self.remember(&path, trim);
 				if result.is_ok() {
 					// Loading a track prepares it, so its row gets the same mark the folder scan
 					// would have given it (PLAN §11c) — one rule, whoever asked for the decode.
-					self.browser.mark_prepared(&path, trim.map(Trim::music));
+					self.browser.mark_prepared(
+						&path,
+						Ready {
+							tempo,
+							music: trim.map(Trim::music),
+						},
+					);
 				}
 
 				// A scan takes a moment, and a player can be given a second track inside it.
@@ -1589,10 +1599,16 @@ impl Clecta {
 		let music = facts.trim.map(Trim::music);
 		self.remember(&facts.path, facts.trim);
 		if facts.prepared {
-			self.browser.mark_prepared(&facts.path, music);
+			self.browser.mark_prepared(
+				&facts.path,
+				Ready {
+					tempo: facts.tempo,
+					music,
+				},
+			);
 		}
 		for queue in &mut self.queues {
-			queue.measured(&facts.path, facts.duration, music);
+			queue.measured(&facts.path, facts.duration, music, facts.tempo);
 		}
 	}
 
@@ -1829,6 +1845,7 @@ impl Clecta {
 							path: path.clone(),
 							duration: None,
 							trim: None,
+							tempo: None,
 							prepared: false,
 						})
 						.collect()
@@ -2632,6 +2649,7 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 				// the next listing asks the store and takes the mark straight back off — and the
 				// alternative is a second lookup per file to learn what the decode already knew.
 				prepared: scan.is_ok(),
+				tempo: scan.as_ref().ok().and_then(|scan| scan.tempo),
 				trim: scan.ok().and_then(|scan| scan.trim),
 				duration: cached_duration(&cache, &path),
 				path,
@@ -2644,6 +2662,7 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 				path: asked.clone(),
 				duration: None,
 				trim: None,
+				tempo: None,
 				prepared: false,
 			}))
 		},
@@ -2659,40 +2678,47 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 /// not stored: the cache holds answers about files, not the fact that one of them would not
 /// open, which is a condition that can change under it.
 ///
-/// Both tables have to answer for it to be a hit. That is what makes the trim table arrive
-/// without a format bump: a file scanned by a build that knew nothing about trims has its
-/// waveform on disk and no edges, so it is decoded once more and both are stored — where
-/// bumping `FORMAT` would have thrown away every waveform in the cache to add a field.
+/// Every table has to answer for it to be a hit. That is what lets a new fact arrive without a
+/// format bump: a file scanned by a build that knew nothing about tempi has its waveform and its
+/// edges on disk and no tempo, so it is decoded once more and all three are stored — where
+/// bumping `FORMAT` would have thrown away every waveform in the cache to add a field. The price
+/// is that fact number three costs the library one more pass, once, and the ready column says so
+/// while it is happening (PLAN §11c).
 fn cached_scan(cache: &Cache, path: &Path) -> anyhow::Result<Scan> {
 	let stamp = cache::stamp(path);
 
 	if let Some(stamp) = stamp
 		&& let Some(peaks) = cache.peaks(path, stamp)
 		&& let Some(trim) = cache.trim(path, stamp)
+		&& let Some(tempo) = cache.tempo(path, stamp)
 	{
-		return Ok(Scan { peaks, trim });
+		return Ok(Scan { peaks, trim, tempo });
 	}
 
 	let scan = audio::scan(path)?;
 	if let Some(stamp) = stamp {
 		cache.store_peaks(path, stamp, &scan.peaks);
 		cache.store_trim(path, stamp, scan.trim);
+		cache.store_tempo(path, stamp, scan.tempo);
 	}
 	Ok(scan)
 }
 
 /// What is already known about a queued track, without decoding it (PLAN §7a, §14c).
 ///
-/// The trim is **read, never worked out**: finding it means decoding the whole file, and a
-/// queue edit that decoded fifty tracks would freeze four threads for half a minute for a
-/// setting the user may not even have switched on. So a queue learns where a track's music
-/// starts only if something has already scanned it — the folder scan, or the track's own turn
-/// in a player — and plays it whole until then.
+/// The trim and the tempo are **read, never worked out**: finding either means decoding the whole
+/// file, and a queue edit that decoded fifty tracks would freeze four threads for half a minute
+/// for a setting the user may not even have switched on. So a queue learns where a track's music
+/// starts and how fast it beats only if something has already scanned it — the folder scan, or the
+/// track's own turn in a player — and shows neither until then.
 fn cached_facts(cache: &Cache, path: &Path) -> Facts {
 	Facts {
 		duration: cached_duration(cache, path),
 		trim: cache::stamp(path)
 			.and_then(|stamp| cache.trim(path, stamp))
+			.flatten(),
+		tempo: cache::stamp(path)
+			.and_then(|stamp| cache.tempo(path, stamp))
 			.flatten(),
 		// This job never *prepares* anything — it reads what is there. Saying so here is what
 		// stops a queue edit taking marks off rows the store is perfectly happy about.
