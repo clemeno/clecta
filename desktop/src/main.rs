@@ -15,6 +15,7 @@ mod fsio;
 mod mixer;
 mod paths;
 mod playlist;
+mod select;
 mod settings;
 mod tree;
 mod ui;

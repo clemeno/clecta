@@ -31,6 +31,7 @@ use crate::cache::{self, Cache};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
 use crate::playlist::{self, ListId, Playlist, Transition};
+use crate::select::Click;
 use crate::settings::Settings;
 use crate::tree::Tree;
 use crate::waveform::Trim;
@@ -189,10 +190,15 @@ impl DropTarget {
 	}
 }
 
+/// What an in-app drag is carrying, and where it came from.
+///
+/// A whole selection rather than one row (PLAN §9a), in the order the rows are on screen — so a
+/// drop puts them down in the order they were looked at. `from` is one list and the rows inside
+/// it, because a drag starts with a press and a press is in one panel.
 #[derive(Debug, Clone)]
 pub struct Drag {
-	item: playlist::Item,
-	from: Option<(ListId, usize)>,
+	items: Vec<playlist::Item>,
+	from: Option<(ListId, Vec<usize>)>,
 }
 
 /// What a background job worked out about one file (PLAN §7a, §11a, §14c).
@@ -206,6 +212,36 @@ pub struct Facts {
 	pub path: PathBuf,
 	pub duration: Option<Duration>,
 	pub trim: Option<Trim>,
+}
+
+/// What the duplicate warning answered (PLAN §9a).
+///
+/// Three, because a batch is what made two too few: a set of twenty where one is already
+/// queued has an answer that is neither "all of them" nor "none of them", and it is the one
+/// most people mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+	/// Queue everything, repeats included.
+	All,
+	/// Queue only the tracks that are not already somewhere.
+	Fresh,
+	/// Queue nothing — the action did not happen.
+	Nothing,
+}
+
+impl Admission {
+	/// Whether the track at this position in the batch survives the answer.
+	///
+	/// A position rather than a path, so a caller can filter rows and tracks together with the
+	/// same test — which is what the `←` / `→` buttons need, since what leaves one list has to
+	/// be exactly what arrives in the other.
+	fn keeps(self, index: usize, duplicates: &[(usize, ListId)]) -> bool {
+		match self {
+			Admission::All => true,
+			Admission::Fresh => !duplicates.iter().any(|(duplicate, _)| *duplicate == index),
+			Admission::Nothing => false,
+		}
+	}
 }
 
 /// A folder scan in flight (PLAN §11b).
@@ -251,8 +287,15 @@ pub enum Message {
 	LoadSelected(DeckId),
 	/// Load a file into the player an unaimed gesture lands on.
 	LoadUnaimed(PathBuf),
-	/// A row was clicked.
+	/// A row was clicked. What that does to the selection depends on what is held (PLAN §9a).
 	RowSelected(PathBuf),
+	/// The modifiers changed. Tracked because a `mouse_area` press does not carry them, and a
+	/// click has to know whether it is a plain one, a toggle or a range.
+	ModifiersChanged(Modifiers),
+	/// ⌘A / Ctrl+A — every row the files pane is showing.
+	SelectAll,
+	/// Escape — nothing selected.
+	SelectionCleared,
 	/// Show a folder in the files pane, from the tree or the dialog.
 	FolderSelected(PathBuf),
 	/// The **Open folder…** button.
@@ -337,6 +380,8 @@ pub enum Message {
 	/// Work out the waveform, the length and the music's edges for every media file in the
 	/// shown folder and everything under it (PLAN §11b).
 	ScanFolderPressed,
+	/// The same, for the files pane's selection and nothing else (PLAN §9a).
+	ScanSelectedPressed,
 	/// The walk came back with the files to work through.
 	ScanFolderFound(Result<Vec<PathBuf>, String>),
 	/// One of them is done. The unit of progress, and one message per file.
@@ -447,6 +492,16 @@ pub struct Clecta {
 	/// The folder scan, while one is running (PLAN §11b). `None` at rest, which is also what
 	/// the Cancel button leaves behind.
 	scanning: Option<Scanning>,
+	/// What is being held on the keyboard right now (PLAN §9a).
+	///
+	/// Kept because a press on a row arrives through a `mouse_area`, which does not carry the
+	/// modifiers — so the only way to know whether a click is a plain one, a toggle or a range
+	/// is to have been listening.
+	///
+	/// `ponytail:` this can go stale if the app loses focus with a key held, since what arrives
+	/// then is a focus event rather than a release. winit sends `ModifiersChanged` on the way
+	/// back in, so the worst case is one click on the way back into the window.
+	modifiers: Modifiers,
 	/// The scanning animation's step counter. A plain integer rather than a timestamp, so
 	/// nothing in `view` has to read the clock — the phase is whatever the last `Sweep`
 	/// left behind.
@@ -522,6 +577,7 @@ impl Clecta {
 			cache: Arc::new(Cache::open(&paths::data_dir().join(CACHE_FILE))),
 			trims: HashMap::new(),
 			scanning: None,
+			modifiers: Modifiers::empty(),
 			sweep: 0,
 		};
 		app.apply_gains();
@@ -665,7 +721,7 @@ impl Clecta {
 			watcher,
 			settle,
 			scrolling,
-			refresh_key(),
+			keyboard(),
 			window::resize_events().map(|(_, size)| Message::WindowResized(size)),
 			window::close_requests().map(|_| Message::CloseRequested),
 			gestures(),
@@ -690,28 +746,51 @@ impl Clecta {
 				}
 			}
 
-			Message::LoadSelected(id) => {
-				if let Some(path) = self.browser.selection().map(|entry| entry.path.clone()) {
-					return self.load(id, path);
-				}
-			}
+			Message::LoadSelected(id) => return self.load_batch(id, self.browser.selected_media()),
 
+			// The double click acts on the **selection** when the row it landed on is part of
+			// one, and on that row alone when it is not (PLAN §9a). Both cases are reachable:
+			// the press before it selects the row, unless it was a command-click that
+			// deselected it — and a gesture that names a file should still do something with
+			// that file.
 			Message::LoadUnaimed(path) => {
 				let id = deck::idle_target(&self.decks[0], &self.decks[1]);
-				return self.load(id, path);
+				let batch = if self.browser.is_selected(&path) {
+					self.browser.selected_media()
+				} else {
+					vec![path]
+				};
+				return self.load_batch(id, batch);
 			}
 
 			Message::RowSelected(path) => {
-				// The press both selects the row and arms a drag with it. A release that
+				// The press both moves the selection and arms a drag with it. A release that
 				// is not over a player disarms it and nothing else happens — which is
 				// exactly what a plain click is (PLAN §10).
-				self.drag = browser::kind_of(&path).is_media().then(|| Drag {
-					item: playlist::Item::new(path.clone()),
-					// From the pane, so a drop *copies*: the file stays in the folder.
-					from: None,
-				});
-				self.browser.selected = Some(path);
+				//
+				// **A plain press on a row that is already selected leaves the selection
+				// alone**, which is what makes a multi-row drag possible at all: collapsing to
+				// one row here would destroy the very selection the drag is about to carry
+				// (PLAN §9a).
+				if !(self.browser.is_selected(&path) && self.click_kind() == Click::Replace) {
+					self.browser.click(&path, self.click_kind());
+				}
+
+				// From the pane, so a drop *copies*: the files stay in the folder.
+				let items: Vec<playlist::Item> = self
+					.browser
+					.selected_media()
+					.into_iter()
+					.map(playlist::Item::new)
+					.collect();
+				self.drag = (!items.is_empty()).then_some(Drag { items, from: None });
 			}
+
+			Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
+
+			Message::SelectAll => self.browser.select_all(),
+
+			Message::SelectionCleared => self.browser.clear_selection(),
 
 			Message::FolderSelected(folder) => return self.select_folder(folder),
 
@@ -737,20 +816,29 @@ impl Clecta {
 			Message::FolderTouched => self.stale = true,
 
 			Message::QueueSelected(id, index) => {
-				// The press both selects the row and arms a drag with it, exactly as a press
-				// in the files pane does (PLAN §10) — and for the same reason: there is no
-				// separate gesture to start a drag with, so the press has to do both jobs.
-				self.drag = self.queues[id.index()].items().get(index).map(|item| Drag {
-					item: item.clone(),
-					// From a list, so a drop *moves*: the row leaves here when it lands.
-					from: Some((id, index)),
+				// The press both moves the selection and arms a drag with it, exactly as a
+				// press in the files pane does (PLAN §10, §9a) — and for the same reason:
+				// there is no separate gesture to start a drag with, so the press has to do
+				// both jobs, and a plain press on an already-selected row leaves the selection
+				// alone so that a multi-row drag has something to carry.
+				let kind = self.click_kind();
+				let list = &mut self.queues[id.index()];
+				if !(list.is_selected(index) && kind == Click::Replace) {
+					list.click(index, kind);
+				}
+
+				let list = &self.queues[id.index()];
+				let rows: Vec<usize> = list.selection().collect();
+				// From a list, so a drop *moves*: the rows leave here when they land.
+				self.drag = (!rows.is_empty()).then(|| Drag {
+					items: list.selected_items(),
+					from: Some((id, rows)),
 				});
-				self.queues[id.index()].select(index);
 			}
 
-			// A double click plays a queued row now, out of turn — the one way from a list to
+			// A double click plays queued rows now, out of turn — the one way from a list to
 			// a player that is neither a drag nor waiting for a track to end (PLAN §7a). It
-			// takes the row with it, exactly as a drag onto a player does and as the handover
+			// takes them with it, exactly as a drag onto a player does and as the handover
 			// itself does: the queue is what is still to come.
 			Message::QueueLoad(list, index) => {
 				// A cue plays on the player it belongs to; the shared list has no player of its
@@ -760,15 +848,27 @@ impl Clecta {
 					ListId::Common => deck::idle_target(&self.decks[0], &self.decks[1]),
 				};
 
-				let Some(item) = self.queues[list.index()].remove(index) else {
-					return Task::none();
+				// The selection when the double-clicked row is part of it, that row alone when
+				// it is not — the same rule the files pane's double click follows (PLAN §9a).
+				let taken = if self.queues[list.index()].is_selected(index) {
+					self.queues[list.index()].take_selected()
+				} else {
+					self.queues[list.index()]
+						.remove(index)
+						.into_iter()
+						.collect()
 				};
-				// The press that opened this double click armed a drag, and the row it was
-				// carrying has just left the list. Disarmed here rather than left to the
-				// release, which would otherwise drop a row that no longer exists.
+				if taken.is_empty() {
+					return Task::none();
+				}
+
+				// The press that opened this double click armed a drag, and the rows it was
+				// carrying have just left the list. Disarmed here rather than left to the
+				// release, which would otherwise drop rows that no longer exist.
 				self.drag = None;
 
-				return Task::batch([self.queued(), self.load(id, item.path)]);
+				let paths = taken.into_iter().map(|item| item.path).collect();
+				return Task::batch([self.queued(), self.load_batch(id, paths)]);
 			}
 
 			// Not persisted and deliberately not `dirty`, exactly like the files pane's own
@@ -818,58 +918,82 @@ impl Clecta {
 			// Every arm below edits a queue, and every queue is persisted, so each ends in
 			// `queued` rather than repeating the `dirty` flag four times.
 			Message::QueueAdd(id, prepend) => {
-				// Read from the *browser*, not from a payload on the message: the button was
-				// drawn from this same selection, so carrying a path would be carrying a copy
+				// Read from the *browser*, not from a payload on the message: the buttons were
+				// drawn from this same selection, so carrying the paths would be carrying a copy
 				// of something that cannot have changed in between.
-				if let Some(entry) = self
+				let items: Vec<playlist::Item> = self
 					.browser
-					.selection()
-					.filter(|entry| entry.kind.is_media())
-				{
-					let item = playlist::Item::new(entry.path.clone());
-					if !self.admits(&item, None) {
-						return Task::none();
-					}
+					.selected_media()
+					.into_iter()
+					.map(playlist::Item::new)
+					.collect();
 
-					let queue = &mut self.queues[id.index()];
-					if prepend {
-						queue.prepend(item);
-					} else {
-						queue.append(item);
-					}
-					return self.queued();
+				let duplicates = playlist::duplicates(&self.queues, &items, &[]);
+				let admission = self.admits(&items, &duplicates);
+				let items: Vec<playlist::Item> = items
+					.into_iter()
+					.enumerate()
+					.filter(|(index, _)| admission.keeps(*index, &duplicates))
+					.map(|(_, item)| item)
+					.collect();
+				if items.is_empty() {
+					return Task::none();
 				}
+
+				let queue = &mut self.queues[id.index()];
+				// Top or end, and either way in the pane's order — top to bottom, so a batch
+				// plays in the order it was looked at.
+				let at = if prepend { 0 } else { queue.items().len() };
+				queue.insert_many(at, items);
+				return self.queued();
 			}
 
 			Message::QueueRemove(id) => {
-				if let Some(index) = self.queues[id.index()].selected() {
-					self.queues[id.index()].remove(index);
+				if self.queues[id.index()].has_selection() {
+					self.queues[id.index()].take_selected();
 					return self.queued();
 				}
 			}
 
 			Message::QueueMove(id, up) => {
-				if let Some(index) = self.queues[id.index()].selected()
-					&& self.queues[id.index()].shift(index, up)
-				{
+				if self.queues[id.index()].shift_selected(up) {
 					return self.queued();
 				}
 			}
 
 			Message::QueueShift(id, right) => {
-				// Both halves or neither: a track taken out of one list and not put into
-				// another is a track the user just lost. Which is also why the row is *looked
-				// at* before it is taken — a warning the user cancels must leave it where it
-				// was, and putting it back afterwards would have to rebuild the selection too.
-				if let Some(target) = id.neighbour(right)
-					&& let Some(index) = self.queues[id.index()].selected()
-					&& let Some(item) = self.queues[id.index()].selected_item().cloned()
-					&& self.admits(&item, Some((id, index)))
-				{
-					self.queues[id.index()].take_selected();
-					self.queues[target.index()].append(item);
-					return self.queued();
+				// Both halves or neither: tracks taken out of one list and not put into
+				// another are tracks the user just lost. Which is also why the rows are *looked
+				// at* before they are taken — a warning the user cancels must leave them where
+				// they were, and putting them back afterwards would have to rebuild the
+				// selection too.
+				let Some(target) = id.neighbour(right) else {
+					return Task::none();
+				};
+
+				let rows: Vec<usize> = self.queues[id.index()].selection().collect();
+				let items = self.queues[id.index()].selected_items();
+				let moving: Vec<(ListId, usize)> = rows.iter().map(|&index| (id, index)).collect();
+
+				// The warning can leave *some* of them standing, so the rows and the tracks are
+				// filtered together — what leaves the list is exactly what arrives in the other.
+				let duplicates = playlist::duplicates(&self.queues, &items, &moving);
+				let admission = self.admits(&items, &duplicates);
+				let (rows, items): (Vec<usize>, Vec<playlist::Item>) = rows
+					.into_iter()
+					.zip(items)
+					.enumerate()
+					.filter(|(index, _)| admission.keeps(*index, &duplicates))
+					.map(|(_, pair)| pair)
+					.unzip();
+				if items.is_empty() {
+					return Task::none();
 				}
+
+				self.queues[id.index()].take_rows(&rows);
+				let at = self.queues[target.index()].items().len();
+				self.queues[target.index()].insert_many(at, items);
+				return self.queued();
 			}
 
 			// The two switches, which are settings rather than edits: `dirty` alone, without
@@ -1033,16 +1157,18 @@ impl Clecta {
 				};
 
 				match target {
-					// Onto a player: it plays now, jumping whatever queue it came from — so a
-					// row dragged out of a list leaves the list, exactly as it would have if
-					// the list had handed it over itself (PLAN §7a).
+					// Onto a player: the first plays now, jumping whatever queue it came from,
+					// and the rest go to the top of that player's cue (PLAN §9a) — so rows
+					// dragged out of a list leave the list, exactly as they would have if the
+					// list had handed them over itself (PLAN §7a).
 					Some(DropTarget::Player(id)) => {
 						let mut tasks = Vec::new();
-						if let Some((list, index)) = drag.from {
-							self.queues[list.index()].remove(index);
+						if let Some((list, rows)) = &drag.from {
+							self.queues[list.index()].take_rows(rows);
 							tasks.push(self.queued());
 						}
-						tasks.push(self.accept_drop(id, drag.item.path, true));
+						let paths = drag.items.into_iter().map(|item| item.path).collect();
+						tasks.push(self.load_batch(id, paths));
 						return Task::batch(tasks);
 					}
 					Some(DropTarget::Row(list, index)) => {
@@ -1121,6 +1247,14 @@ impl Clecta {
 						}))
 					},
 				);
+			}
+
+			// The same work as a folder scan, on the rows the user pointed at instead of on a
+			// walk (PLAN §9a). It goes through the same message, so there is one driver, one
+			// progress line and one Stop button rather than two of each.
+			Message::ScanSelectedPressed => {
+				let files = self.browser.selected_media();
+				return Task::done(Message::ScanFolderFound(Ok(files)));
 			}
 
 			Message::ScanFolderFound(result) => match result {
@@ -1367,6 +1501,37 @@ impl Clecta {
 		loading
 	}
 
+	/// Give a player a batch of tracks: **the first plays, the rest go to the top of its cue**
+	/// (PLAN §9a).
+	///
+	/// Every aimed door comes through here — the two `→ Player` buttons, a double click, and a
+	/// drag onto a panel — so five files selected mean the same thing however they were sent.
+	/// A player holds one track, and the queue in front of it is what plays next, so "load
+	/// these five" already had an answer in the app: it just had to be five separate steps
+	/// before.
+	///
+	/// The **top** of the cue rather than the end, which is the one place this reads the intent
+	/// over the word: the promise is that the batch plays back to back, and appending would let
+	/// whatever was already queued play in the middle of it.
+	///
+	/// No duplicate warning, deliberately — the same silence a single drag onto a player has
+	/// always kept (PLAN §7a). This gesture means *now*, and a modal that appeared after the
+	/// first track had already started would be asking about something that has happened.
+	fn load_batch(&mut self, id: DeckId, paths: Vec<PathBuf>) -> Task<Message> {
+		let mut paths = paths.into_iter();
+		let Some(first) = paths.next() else {
+			return Task::none();
+		};
+
+		let rest: Vec<playlist::Item> = paths.map(playlist::Item::new).collect();
+		if !rest.is_empty() {
+			self.queues[ListId::Cue(id).index()].insert_many(0, rest);
+			return Task::batch([self.load(id, first), self.queued()]);
+		}
+
+		self.load(id, first)
+	}
+
 	/// Remember what a job worked out about one file, and settle every queued row holding it.
 	///
 	/// Applied to all three lists, because a track can be moved between them while the answer
@@ -1420,36 +1585,82 @@ impl Clecta {
 		Task::batch(tasks)
 	}
 
-	/// May this track go into a queue — asking first if it is already in one (PLAN §7a).
+	/// May these tracks go into a queue — asking first about any that are already in one
+	/// (PLAN §7a, §9a).
 	///
-	/// `true` when it is not queued anywhere, which is the ordinary case and costs a scan of
-	/// three short lists. Otherwise the app **asks**, because queueing a track twice is
-	/// sometimes exactly what someone means and sometimes a mistake, and nothing in the app
-	/// can tell those apart. A silent refusal would be the app deciding; a silent accept is
-	/// what left the mistake possible.
+	/// `All` without a word when none of them is queued anywhere, which is the ordinary case
+	/// and costs a scan of three short lists. Otherwise the app **asks**, because queueing a
+	/// track twice is sometimes exactly what someone means and sometimes a mistake, and nothing
+	/// in the app can tell those apart. A silent refusal would be the app deciding; a silent
+	/// accept is what left the mistake possible.
 	///
-	/// `moving` is the row on its way out of a list, so a cross-list move does not warn about
-	/// the track colliding with itself — see `playlist::already_queued`.
+	/// **One dialog for a batch, and three answers**, which is what a batch made necessary: the
+	/// old two — do it, or do not — could not say the thing most people want when nineteen
+	/// tracks are fine and one is a repeat. So *Yes* queues them all again, *No* takes the ones
+	/// that are not repeats and leaves the repeats behind, and *Cancel* does nothing at all.
+	/// Asking once per duplicate was the alternative, and three modals in a row for one button
+	/// press is not an improvement on the mistake it prevents.
 	///
-	/// `ponytail:` a native modal, which blocks the GUI thread while it is open — the playhead
-	/// stops with it, exactly as it does for the **Load…** dialog. That is what a modal *is*,
-	/// and the alternative is an in-app confirmation bar with its own state and its own two
-	/// messages. Worth building the day this needs to say more than yes or no.
-	fn admits(&self, item: &playlist::Item, moving: Option<(ListId, usize)>) -> bool {
-		let Some(list) = playlist::already_queued(&self.queues, &item.path, moving) else {
-			return true;
-		};
+	/// `ponytail:` the buttons are the platform's Yes / No / Cancel with their meaning in the
+	/// text, rather than rfd's custom labels — those need a Cargo feature that is off by
+	/// default and, by rfd's own documentation, work on Windows only with it. A dialog whose
+	/// buttons might be unlabelled on the one target nobody has run is not worth three words.
+	///
+	/// A modal, which blocks the GUI thread while it is open — the playhead stops with it,
+	/// exactly as it does for the **Load…** dialog.
+	fn admits(&self, items: &[playlist::Item], duplicates: &[(usize, ListId)]) -> Admission {
+		if duplicates.is_empty() {
+			return Admission::All;
+		}
 
-		rfd::MessageDialog::new()
+		// Named rather than counted, up to a point: a list of forty names is not a question
+		// anyone reads, and the count is the part that decides the answer.
+		const NAMED: usize = 6;
+		let named: Vec<String> = duplicates
+			.iter()
+			.take(NAMED)
+			.filter_map(|(index, list)| {
+				items
+					.get(*index)
+					.map(|item| format!("    {} ({})", item.name, list.label()))
+			})
+			.collect();
+		let rest = duplicates.len().saturating_sub(named.len());
+
+		let description = format!(
+			"{} of {} already queued:\n\n{}{}\n\nYes — queue them again.\nNo — add only the {} that {} not.\nCancel — add nothing.",
+			duplicates.len(),
+			items.len(),
+			named.join("\n"),
+			if rest > 0 {
+				format!("\n    …and {rest} more")
+			} else {
+				String::new()
+			},
+			items.len() - duplicates.len(),
+			if items.len() - duplicates.len() == 1 {
+				"is"
+			} else {
+				"are"
+			},
+		);
+
+		match rfd::MessageDialog::new()
 			.set_level(rfd::MessageLevel::Warning)
 			.set_title("Already queued")
-			.set_description(format!(
-				"{} is already in {}.\n\nQueue it again?",
-				item.name,
-				list.label()
-			))
-			.set_buttons(rfd::MessageButtons::OkCancel)
-			.show() == rfd::MessageDialogResult::Ok
+			.set_description(description)
+			.set_buttons(rfd::MessageButtons::YesNoCancel)
+			.show()
+		{
+			rfd::MessageDialogResult::Yes => Admission::All,
+			rfd::MessageDialogResult::No => Admission::Fresh,
+			_ => Admission::Nothing,
+		}
+	}
+
+	/// Which of the three a press is, from whatever is being held right now (PLAN §9a).
+	fn click_kind(&self) -> Click {
+		Click::of(self.modifiers.command(), self.modifiers.shift())
 	}
 
 	/// A queue changed: the settings file is out of date, and something in it may not have
@@ -1518,34 +1729,60 @@ impl Clecta {
 		)
 	}
 
-	/// Put what a drag was carrying into a list, above row `index` (PLAN §7a).
+	/// Put what a drag was carrying into a list, above row `index` (PLAN §7a, §9a).
 	///
-	/// Three cases, and the first is the one worth separating: a row dragged **within its own
-	/// list** is a reorder, not a remove followed by an insert. Doing it as two steps would
-	/// need the caret index adjusting for the hole the row left behind, which is what
+	/// Three cases, and the first is the one worth separating: rows dragged **within their own
+	/// list** are a reorder, not a remove followed by an insert. Doing it as two steps would
+	/// need the caret index adjusting for the holes the rows left behind, which is what
 	/// `relocate` exists to get right — so it is called rather than reimplemented here.
 	fn drop_into(&mut self, list: ListId, index: usize, drag: Drag) {
-		// A reorder is the one drop that cannot produce a duplicate: the row is already
-		// somewhere in this list and is only moving inside it. Asked before anything is
+		// A reorder is the one drop that cannot produce a duplicate: the rows are already
+		// somewhere in this list and are only moving inside it. Asked before anything is
 		// touched, because a cancelled drop must leave every list exactly as it was.
-		let reorder = matches!(drag.from, Some((source, _)) if source == list);
-		if !reorder && !self.admits(&drag.item, drag.from) {
+		if let Some((source, rows)) = &drag.from
+			&& *source == list
+		{
+			self.queues[list.index()].relocate(rows, index);
 			return;
 		}
 
-		match drag.from {
-			Some((source, from)) if source == list => {
-				self.queues[list.index()].relocate(from, index);
-			}
-			// Across two lists: taken out of one and put into the other, in that order. The
-			// index is the caret in the *destination*, which the removal cannot have moved.
-			Some((source, from)) => {
-				self.queues[source.index()].remove(from);
-				self.queues[list.index()].insert(index, drag.item);
-			}
-			// From the files pane: a copy, so the folder keeps its file.
-			None => self.queues[list.index()].insert(index, drag.item),
+		// The rows on their way out, so a track dragged from one list to another does not warn
+		// about colliding with itself.
+		let moving: Vec<(ListId, usize)> = match &drag.from {
+			Some((source, rows)) => rows.iter().map(|&row| (*source, row)).collect(),
+			None => Vec::new(),
+		};
+
+		let duplicates = playlist::duplicates(&self.queues, &drag.items, &moving);
+		let admission = self.admits(&drag.items, &duplicates);
+		let items: Vec<playlist::Item> = drag
+			.items
+			.into_iter()
+			.enumerate()
+			.filter(|(position, _)| admission.keeps(*position, &duplicates))
+			.map(|(_, item)| item)
+			.collect();
+		if items.is_empty() {
+			return;
 		}
+
+		// Across two lists: taken out of one and put into the other, in that order. The index
+		// is the caret in the *destination*, which the removal cannot have moved. From the
+		// files pane there is nothing to take out — a drop from there is a copy, so the folder
+		// keeps its files.
+		if let Some((source, rows)) = &drag.from {
+			// Only what the warning left standing, by position, so what leaves is what lands.
+			let rows: Vec<usize> = rows
+				.iter()
+				.copied()
+				.enumerate()
+				.filter(|(position, _)| admission.keeps(*position, &duplicates))
+				.map(|(_, row)| row)
+				.collect();
+			self.queues[source.index()].take_rows(&rows);
+		}
+
+		self.queues[list.index()].insert_many(index, items);
 	}
 
 	/// Apply a transport event to both the model and the audio thread, in that order of
@@ -1740,7 +1977,7 @@ impl Clecta {
 		// Set eagerly, so the header shows the destination while the listing is in
 		// flight and the stale-listing guard above has something to compare against.
 		self.browser.folder = Some(folder.clone());
-		self.browser.selected = None;
+		self.browser.clear_selection();
 		// A new folder is read from the top. Both halves are needed and neither is enough:
 		// the field is what `view` builds rows from, and the `scroll_to` is what moves the
 		// `scrollable` itself, which otherwise keeps the offset it had and would show the
@@ -1902,10 +2139,7 @@ impl Clecta {
 		let ring = self.drop_ring();
 		// Asked once for all three lists: they each draw the same two add buttons, and the
 		// answer is a property of the files pane rather than of any list.
-		let addable = self
-			.browser
-			.selection()
-			.is_some_and(|entry| entry.kind.is_media());
+		let addable = self.browser.has_media_selection();
 
 		let queue = |id: ListId| {
 			ui::playlist::view(
@@ -2050,36 +2284,43 @@ fn divider_drag() -> Subscription<Message> {
 	})
 }
 
-/// The keyboard, for the one shortcut the app has (PLAN §9).
+/// The keyboard: the shortcuts the app has, and what is being held (PLAN §9, §9a).
 ///
-/// Always on, unlike `divider_drag`: a key press is rare where a cursor move is constant,
-/// and this one publishes nothing at all unless the key was the refresh key.
-fn refresh_key() -> Subscription<Message> {
+/// Always on, unlike `divider_drag`: a key press is rare where a cursor move is constant, and
+/// this one publishes nothing at all unless the key was one of the three. The modifiers are
+/// the exception and are published whenever they change — which is on the way down and the way
+/// up of every Shift, and no more often than a person can press one.
+fn keyboard() -> Subscription<Message> {
 	event::listen_with(|event, _status, _window| match event {
-		iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
-			if is_refresh(&key, modifiers) =>
-		{
-			Some(Message::RefreshPressed)
+		iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+			shortcut(&key, modifiers)
+		}
+		iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+			Some(Message::ModifiersChanged(modifiers))
 		}
 		_ => None,
 	})
 }
 
-/// Whether a key press means "list this folder again" (PLAN §9).
+/// What a key press means, or nothing at all (PLAN §9, §9a).
 ///
-/// Two keys, because neither of them travels: **F5** is *the* refresh key on Windows, and
-/// on a Mac laptop it is a system key the app is never sent unless the function-key
-/// preference is flipped; **⌘R** is what a Mac reaches for and means nothing on Windows.
-/// One arm covers both, since `Modifiers::command` is already Cmd on macOS and Ctrl
-/// everywhere else.
+/// Refresh is two keys, because neither of them travels: **F5** is *the* refresh key on
+/// Windows, and on a Mac laptop it is a system key the app is never sent unless the
+/// function-key preference is flipped; **⌘R** is what a Mac reaches for and means nothing on
+/// Windows. One arm covers both, since `Modifiers::command` is already Cmd on macOS and Ctrl
+/// everywhere else — which is what makes **⌘A** one arm too.
 ///
-/// Split out from the subscription because a `Key` can be built in a test and a real key
-/// press cannot.
-fn is_refresh(key: &Key, modifiers: Modifiers) -> bool {
+/// Split out from the subscription because a `Key` can be built in a test and a real key press
+/// cannot.
+fn shortcut(key: &Key, modifiers: Modifiers) -> Option<Message> {
 	match key.as_ref() {
-		Key::Named(Named::F5) => true,
-		Key::Character("r") => modifiers.command(),
-		_ => false,
+		Key::Named(Named::F5) => Some(Message::RefreshPressed),
+		Key::Character("r") if modifiers.command() => Some(Message::RefreshPressed),
+		Key::Character("a") if modifiers.command() => Some(Message::SelectAll),
+		// Bare, and the one key here that is: Escape means "never mind" everywhere, and there
+		// is nothing else in the app for it to mean.
+		Key::Named(Named::Escape) => Some(Message::SelectionCleared),
+		_ => None,
 	}
 }
 
@@ -2475,25 +2716,40 @@ mod tests {
 	}
 
 	#[test]
-	fn the_refresh_key_is_f5_or_the_platform_command_and_r() {
-		// Arrange: the two keys that must work, and the near-misses that must not — an
-		// unmodified `r` above all, since a bare letter that re-listed the folder would fire
-		// on any stray key press.
+	fn the_shortcuts_are_the_three_keys_and_nothing_near_them() {
+		// Arrange: the keys that must work, and the near-misses that must not — an unmodified
+		// `r` above all, since a bare letter that re-listed the folder would fire on any stray
+		// key press. Written in `Modifiers::COMMAND` rather than in `LOGO` or `CTRL`, so the
+		// same table asserts Cmd on macOS and Ctrl on Windows.
 		let command = Modifiers::COMMAND;
+		let refresh = Some(Message::RefreshPressed);
 		let cases = [
-			(Key::Named(Named::F5), Modifiers::empty(), true),
-			(Key::Named(Named::F5), command, true),
-			(Key::Character("r".into()), command, true),
-			(Key::Character("r".into()), Modifiers::empty(), false),
-			(Key::Character("t".into()), command, false),
-			(Key::Named(Named::F4), Modifiers::empty(), false),
+			(Key::Named(Named::F5), Modifiers::empty(), refresh.clone()),
+			(Key::Named(Named::F5), command, refresh.clone()),
+			(Key::Character("r".into()), command, refresh.clone()),
+			(
+				Key::Character("a".into()),
+				command,
+				Some(Message::SelectAll),
+			),
+			(
+				Key::Named(Named::Escape),
+				Modifiers::empty(),
+				Some(Message::SelectionCleared),
+			),
+			(Key::Character("r".into()), Modifiers::empty(), None),
+			(Key::Character("a".into()), Modifiers::empty(), None),
+			(Key::Character("t".into()), command, None),
+			(Key::Named(Named::F4), Modifiers::empty(), None),
 		];
 
-		// Act / Assert
+		// Act / Assert: by name rather than by value, because a `Message` is not `PartialEq` —
+		// and the name is the whole of what this decides.
 		for (key, modifiers, expected) in cases {
+			let got = shortcut(&key, modifiers);
 			assert_eq!(
-				is_refresh(&key, modifiers),
-				expected,
+				format!("{got:?}"),
+				format!("{expected:?}"),
 				"{key:?} with {modifiers:?}"
 			);
 		}

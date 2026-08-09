@@ -234,7 +234,7 @@ fn rows<'a>(
 		.skip(range.start)
 		.take(range.len())
 	{
-		let selected = list.selected() == Some(index);
+		let selected = list.is_selected(index);
 
 		let body = container(
 			row![
@@ -326,8 +326,10 @@ fn caret(lit: bool) -> Element<'static, Message> {
 /// side of a gap reads as one control *between* two lists rather than two controls belonging
 /// to one (PLAN §7a).
 fn footer(id: ListId, list: &Playlist) -> Element<'static, Message> {
-	let selected = list.selected();
 	let count = list.items().len();
+	// The ends of the selection, which is what the two arrows are enabled by: a block already
+	// touching the top cannot go up, however many rows are in it (PLAN §9a).
+	let (first, last) = (list.first_selected(), list.last_selected());
 
 	let edit = |glyph: &'static str, message: Option<Message>| {
 		button(text(glyph).size(12))
@@ -339,7 +341,7 @@ fn footer(id: ListId, list: &Playlist) -> Element<'static, Message> {
 	// at the top, already at the bottom, or no neighbour in that direction.
 	let send = |right: bool| {
 		let glyph = if right { "→" } else { "←" };
-		let allowed = selected.is_some() && id.neighbour(right).is_some();
+		let allowed = list.has_selection() && id.neighbour(right).is_some();
 		edit(glyph, allowed.then_some(Message::QueueShift(id, right)))
 	};
 
@@ -347,17 +349,19 @@ fn footer(id: ListId, list: &Playlist) -> Element<'static, Message> {
 		send(false),
 		edit(
 			"▲",
-			selected
+			first
 				.filter(|index| *index > 0)
 				.map(|_| Message::QueueMove(id, true))
 		),
 		edit(
 			"▼",
-			selected
-				.filter(|index| index + 1 < count)
+			last.filter(|index| index + 1 < count)
 				.map(|_| Message::QueueMove(id, false))
 		),
-		edit("✕", selected.map(|_| Message::QueueRemove(id))),
+		edit(
+			"✕",
+			list.has_selection().then_some(Message::QueueRemove(id))
+		),
 		text(running_time(list))
 			.size(11)
 			.width(Fill)

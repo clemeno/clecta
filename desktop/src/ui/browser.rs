@@ -53,10 +53,7 @@ pub fn view(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, 
 		.visible()
 		.skip(range.start)
 		.take(range.len())
-		.map(|entry| {
-			let selected = browser.selected.as_deref() == Some(entry.path.as_path());
-			file_row(entry, selected)
-		});
+		.map(|entry| file_row(entry, browser.is_selected(&entry.path)));
 
 	// The rows above and below, as their height and nothing else.
 	let above = Space::new().height(range.start as f32 * ROW_HEIGHT);
@@ -82,16 +79,19 @@ fn header(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, Me
 	};
 
 	// Loading needs a media file selected: the buttons say what they will do, and go
-	// dead rather than complaining afterwards.
-	let loadable = browser
-		.selection()
-		.filter(|entry| entry.kind.is_media())
-		.map(|entry| entry.path.clone());
+	// dead rather than complaining afterwards. The *count* is on the button once there is more
+	// than one, because "→ Player 1" with five rows highlighted is a different promise from
+	// the same button with one (PLAN §9a).
+	let selected = browser.selected_media().len();
 
-	let load_into = |id: DeckId, path: &Option<std::path::PathBuf>| {
-		button(text(format!("→ {}", id.label())).size(12))
+	let load_into = move |id: DeckId| {
+		let label = match selected {
+			0 | 1 => format!("→ {}", id.label()),
+			count => format!("→ {} ({count})", id.label()),
+		};
+		button(text(label).size(12))
 			.padding([3, 8])
-			.on_press_maybe(path.clone().map(|_| Message::LoadSelected(id)))
+			.on_press_maybe((selected > 0).then_some(Message::LoadSelected(id)))
 	};
 
 	column![
@@ -112,8 +112,8 @@ fn header(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, Me
 				.size(14)
 				.on_toggle(Message::HiddenToggled),
 			Space::new().width(Fill),
-			load_into(DeckId::One, &loadable),
-			load_into(DeckId::Two, &loadable),
+			load_into(DeckId::One),
+			load_into(DeckId::Two),
 		]
 		.spacing(6)
 		.align_y(iced::Center),
@@ -146,6 +146,13 @@ fn preparation(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'
 
 	row![
 		Space::new().width(Fill),
+		button(text("Prepare selected").size(12))
+			.padding([3, 8])
+			.on_press_maybe(
+				browser
+					.has_media_selection()
+					.then_some(Message::ScanSelectedPressed)
+			),
 		button(text("Prepare folder").size(12))
 			.padding([3, 8])
 			// Dead until there is a folder to walk, like every other control that needs one.

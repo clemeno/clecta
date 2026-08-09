@@ -1152,6 +1152,113 @@ gave 4, and three seconds of an idle folder gave nothing at all.
 
 ---
 
+## 9a. Selecting more than one row (`select.rs`, `browser.rs`, `playlist.rs`)
+
+Every door into a player and every door into a queue used to take one file, because the pane
+could only hold one row selected. Loosening that is one change to a field and a long tail of
+questions about what the *existing* actions then mean — which is the whole of this section.
+
+### One rule, two storages
+
+The gesture is the same everywhere and it has three cases: a plain press **replaces**, a
+command press **toggles**, a shift press takes **everything between** the anchor and the row.
+Both panes obey it, so `select.rs` holds the rule — an enum, the modifier mapping and the
+inclusive range — with no iced in sight so it can be checked with no window.
+
+What the two panes cannot share is the *storage*, and the reason is already in this document.
+The files pane is keyed by **path**, because a refresh renumbers its rows underneath the user
+(§9). A queue is keyed by **index**, because a queue may hold the same track twice and a path
+therefore names no row (§7a). So one rule, two sets.
+
+Both hand their selection back **top to bottom**, and that is not a convenience: it is the
+order the actions run in. The pane reads its order back off the listing rather than out of the
+set, so it is the natural-numeric sort the user is looking at and it cannot drift after a
+re-sort; the queue uses a `BTreeSet`, whose order *is* the row order.
+
+The anchor moves on a plain or command press and **stays put for a range**, which is what lets
+a shift-click be corrected: clicking again re-measures from the same start rather than from
+wherever the last one landed.
+
+### A press has to do two jobs
+
+There is no separate gesture to start a drag with, so a press both moves the selection and arms
+the drag (§10). That collides with multi-select immediately: collapsing to one row on a plain
+press would destroy the selection the drag is about to carry. So **a plain press on a row that
+is already selected leaves the selection alone**, and the drag picks up all of it.
+
+`ponytail:` the other half of that trade is missing — in a file manager, a plain press on a
+selected row collapses the selection *on release*, once it is clear no drag happened. Here it
+does not collapse at all, so narrowing five rows to one means clicking a different row first,
+or Escape. The fix is one remembered path and a branch in the release arm, and it is worth
+writing the day that feels wrong rather than now.
+
+### What each door now means
+
+| door | one file | several |
+|---|---|---|
+| **→ Player 1** | loads it | first loads, **rest go to the top of that player's cue** |
+| double-click a row | loads it into the idle player | the same, for the whole selection |
+| drag onto a player | loads it | the same |
+| **⤒ ⤓** | adds it | adds all of them, in pane order |
+| drag into a list | inserts it at the caret | inserts all of them at the caret, in order |
+| `✕ ▲ ▼ ← →` | acts on the row | acts on every selected row |
+
+The first line is the only one that needed inventing, because a player holds one track and five
+files have no obvious single meaning. The answer was already in the app: the cue in front of a
+player is what plays next, so "load these five" is *load one and queue four*, and the handover
+of §7a does the rest. The **top** of the cue rather than the end, which is this section reading
+the intent over the word: the promise is that the five play back to back, and appending would
+let whatever was already queued play in the middle of them.
+
+A double click and a drag act on the selection when the row they name is part of it, and on
+that row alone when it is not — both are reachable, since a command-click can deselect the very
+row it lands on, and a gesture that names a file should still do something with that file.
+
+`▲` and `▼` move every selected row one place, blocked when the selection already touches the
+end it is moving towards. Blocked **entirely**, scattered rows included: moving some of what
+was asked for and not the rest is worse than moving none, because pressing the other button
+does not undo it.
+
+### The duplicate warning grew a third answer
+
+Asking per file (§7a) does not survive a batch: twenty files with three repeats would be three
+modal dialogs in a row for one button press. One dialog, then — and the moment it names a count
+rather than a file, the old two answers are not enough. Nineteen good tracks and one repeat has
+an answer that is neither *all* nor *none*, and it is the one most people want.
+
+So **Yes** queues them all again, **No** queues only the ones that are not already somewhere,
+and **Cancel** does nothing at all. Cancel keeps meaning what Cancel means; the middle answer
+is a button of its own rather than a Cancel that quietly does something.
+
+The three buttons are the platform's Yes / No / Cancel with their meanings spelled out in the
+text, rather than rfd's custom labels: those need a Cargo feature that is off by default and,
+by rfd's own documentation, work on Windows only with it — and a dialog whose buttons might be
+unlabelled on the one target nobody has run is not worth three words.
+
+Which is why the answer is an `Admission` and not a filtered list: the `←` / `→` buttons have
+to filter the **rows** and the **tracks** by the same test, so what leaves one list is exactly
+what arrives in the other. `Admission::keeps(position)` is that test, and `playlist::duplicates`
+is the pure half that finds them.
+
+### Two more keys, and what they are not
+
+**⌘A / Ctrl+A** selects every row the pane is *showing*, so the hidden filter decides what
+"all" means — the same rule the selection itself follows. **Escape** clears it.
+
+Both act on the files pane and not on the queues, and that is a line rather than an oversight:
+the app has no focus model, so "select all" in a window with four selectable panels would have
+to guess which one was meant. The pane is the one with thousands of rows, which is where
+selecting them all by hand is not an option.
+
+### And one thing that did not change
+
+An **OS drop** of several files still takes the first and declines the rest by name (§10).
+Nothing was learned that changes it: a Finder drop arrives as one event per file with no
+position and no end-of-drop event, so the app cannot know it has them all — where a selection
+in the pane is already a list before anything is dragged.
+
+---
+
 ## 10. Loading a file into a player
 
 ### What cmote actually built, exactly
@@ -1645,8 +1752,18 @@ otherwise pure; anything needing a device or a real folder is manual.
   what is there *now*, while **`reveal`** — opening the ancestors of a folder chosen
   elsewhere — returns *exactly* the ones never listed, because nobody asked for that
   filesystem work. One test each.
+- **`select.rs`** — the click rule (§9a), which is four lines and two of them are wrong in a
+  way nobody notices until a set is half selected: which of the three a press is, including
+  **shift winning over the command key** when both are held, and a range that is inclusive at
+  both ends and does not care which way it was dragged.
 - **`browser.rs`** — extension → category (audio / video / other), the natural-numeric
-  sort, the hidden filter.
+  sort, the hidden filter. Then the selection (§9a): a plain click replacing, a command click
+  adding *and* taking away, a shift-click that can be adjusted by shift-clicking again, and a
+  range with no anchor falling back to a plain click. Two more say what the selection is *for*
+  — it comes back in **row order** however it was clicked, since that is the order the actions
+  run in, and a `.txt` can be selected but is never handed to a player. And the refresh case,
+  rewritten: a listing that lost one of two selected rows keeps the other highlighted rather
+  than clearing both.
 - **`deck.rs`** — the transport state machine as a pure `transition(state, event)`, so
   every edge is checked with no audio device in the room.
 - **Drop policy** (`deck.rs`) — `drop_outcome(...) -> DropOutcome` pulled free of `self`,
@@ -1689,13 +1806,33 @@ otherwise pure; anything needing a device or a real folder is manual.
   `?` in a `match` arm was returning from `remove` itself, so the row was deleted, the
   function said nothing had been, and the selection pointed at a track that was gone.
 
-  `relocate` — a row dragged within its own list — gets four cases and then an exhaustive
+  `relocate` — rows dragged within their own list — gets four cases and then an exhaustive
   one. The four are the off-by-one in both directions, the drop past the last row, and the two
   carets that touch the dragged row itself (its own top and bottom edge, both meaning "leave
   it alone", and both easy to reach with a twitchy hand). The exhaustive one runs every
   `from` × `to` on a four-row list and asserts the *contents* are unchanged as a set: a
   reorder that loses or duplicates a track is the one failure a queue cannot survive, and
   twenty-five cases is cheaper to run than to reason about.
+
+  Multi-row adds a case and then thirty more (§9a). The case is a **block** dragged past a
+  caret with rows of its own above it, which is the same off-by-one as before with a count
+  instead of a one — and it checks the block keeps its own order, which lifting the rows out in
+  the wrong direction would quietly reverse. The thirty are every *pair* of rows to every
+  caret, asserting the contents again and that both rows come out highlighted where they
+  landed — or that the selection is untouched when the move was a no-op, which is the
+  distinction the first version of that assertion got wrong and the test caught.
+
+  The selection itself gets one test per gesture, mirroring the pane's (§9a): a press with
+  each of the three modifiers, and a row that is not there selecting nothing. `shift_selected`
+  gets three — a single row carrying its highlight, a block of two moving as a block, and a
+  *scattered* pair each moving past the row below it — plus the blocking rule, which is that a
+  selection touching the end it is moving towards blocks the whole move rather than part of it.
+  `take_rows` gets the case the duplicate warning makes real: taking **some** of a selection,
+  where the rows left behind keep their highlight and an index handed in twice takes one row
+  rather than whatever slid into its place.
+
+  `duplicates` gets the batch half of the search: the positions of the tracks already queued,
+  in a batch where two of four are, so a caller can filter rows and tracks by the same test.
 
   The running time gets two more (§7a). One walks a list from nothing measured to fully
   measured and checks the *flag* at every step, including the state that is easy to get wrong:
@@ -1786,11 +1923,12 @@ otherwise pure; anything needing a device or a real folder is manual.
   leaves the browser `MIN_PANE`, at every window height from 400 to 2000, which is what
   keeps the divider on screen and grabbable; that a drag above the window's top reads as the
   floor rather than as a panel of nothing; and that an impossible window — zero, shorter than
-  its own chrome, or `NaN` — stores a finite height instead of a `NaN`. The refresh key
-  gets a table: **F5** with and without modifiers, **⌘R**, and the near-misses that must
-  *not* fire — a bare `r` above all, since a plain letter that re-listed the folder would
-  go off on any stray key press. The table is written in `Modifiers::COMMAND` rather than
-  in `LOGO` or `CTRL`, so the same test asserts Cmd on macOS and Ctrl on Windows.
+  its own chrome, or `NaN` — stores a finite height instead of a `NaN`. The keyboard
+  gets a table: **F5** with and without modifiers, **⌘R**, **⌘A** and **Escape** (§9a), and
+  the near-misses that must *not* fire — a bare `r` or `a` above all, since a plain letter
+  that re-listed the folder or selected every row would go off on any stray key press. The
+  table is written in `Modifiers::COMMAND` rather than in `LOGO` or `CTRL`, so the same test
+  asserts Cmd on macOS and Ctrl on Windows.
 
   The folder scan's bookkeeping is the third (§11b), and it is three counters with no timer:
   the `Task`s the driver returns need a window, but the arithmetic deciding how many there are
@@ -2370,6 +2508,10 @@ around.
 | Q29 | How a folder scan is driven | **A chain of messages that refills itself, four files at a time.** No subscription, no timer, no job queue: `scan_step` hands out what the fan-out has room for, each answer calls it again, and it clears itself when the last thread reports — so a scan that is not running costs nothing, which is §4's rule reached without one. Four because a decode is a third of a second a file: one at a time is ten minutes for two thousand tracks, one per core starves the audio callback of whoever is playing a set while it runs. **Stop cuts the list down to what has gone out** rather than dropping the state, because the files in flight are going to finish anyway and a scan dropped mid-air would have them reporting into nothing — and a second scan started before they landed would count them twice and run `running` past zero | §11b |
 | Q30 | How a new kind of cached fact arrives | **As a table, which is what §11a promised and this is the first chance to break.** The music's edges are worked out by the same pass as the waveform, so they could have been two fields on that record — at the price of bumping `FORMAT`, which is a re-scan of every waveform on disk to add a field. A table costs one lookup and keeps them all, and it means a handover asking where a track starts reads sixteen bytes rather than eight kilobytes of amplitudes it has no use for | §11a, §14c |
 
+| Q31 | What "→ Player 1" means with five rows selected | **The first plays, the rest go to the top of that player's cue.** A player holds one track, so the only question was where the other four go — and the app already had the answer in front of it: a cue is what plays next, and the handover of §7a turns four queued rows into four tracks that play back to back. The *top* rather than the end, which is reading the intent over the word: appending would let whatever was already queued play in the middle of the batch. Every aimed door shares it — the buttons, the double click, the drag — so five files mean the same thing however they were sent | §9a, §7a |
+| Q32 | How a duplicate warning survives a batch | **One dialog, three answers.** Per-file asking would be three modals for one button press; and once the question names a count, *all* and *none* are not enough — nineteen good tracks and one repeat wants the middle answer. Yes queues everything, No queues only what is not already somewhere, Cancel does nothing, so Cancel still means Cancel. The answer is an `Admission` rather than a filtered list because the `←` / `→` buttons must filter rows and tracks by the same test. Platform Yes/No/Cancel with the meanings in the text, not rfd's custom labels, which need a Cargo feature that is off by default and work on Windows only with it | §9a, §7a |
+| Q33 | Whether a press may still collapse a selection | **Not on the press, and for now not at all.** A press has to arm the drag as well as select (§10), so collapsing to one row on a plain press would destroy the selection the drag was about to carry. A file manager collapses on *release* instead, once no drag has happened; clecta does not, and the gap is marked rather than filled — narrowing five rows to one means clicking elsewhere or pressing Escape, and the fix is one remembered path and a branch | §9a, §10 |
+
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
 lives in `app.rs` and `ui/browser.rs`, and the reasoning is in §6 and §9. **Q7 is the one
@@ -2382,7 +2524,7 @@ size were the easy part.
 Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
 the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
 one use of the window's height that was enough to keep the defect alive. Both were settled
-the same way, by looking at a running window. That is now four of the thirty (Q7, Q10,
+the same way, by looking at a running window. That is now four of the thirty-three (Q7, Q10,
 Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
 and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
 

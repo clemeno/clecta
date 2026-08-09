@@ -7,11 +7,12 @@
 //! it**: a row that stays highlighted while a different track slides beneath it is worse
 //! than no highlight at all.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::deck::DeckId;
+use crate::select::{self, Click};
 use crate::waveform::Trim;
 
 /// Which of the three lists. The player-owned ones are `Cue`, the shared one is `Common`.
@@ -134,7 +135,14 @@ impl Item {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Playlist {
 	items: Vec<Item>,
-	selected: Option<usize>,
+	/// Which rows are selected (PLAN §9a). A `BTreeSet` because every action on them runs
+	/// **top to bottom**, and a sorted set is that order without anything having to remember
+	/// it — which matters most in the two places the order is load-bearing: the tracks handed
+	/// to a player, and a block of rows moved by a drag.
+	selected: BTreeSet<usize>,
+	/// Where a Shift-click measures from. Kept as an index like the selection, and dropped
+	/// whenever the row it named stops being selected.
+	anchor: Option<usize>,
 	/// Whether this list hands its top track to a player that has just run out (PLAN §7a),
 	/// and whether that track then starts by itself.
 	///
@@ -160,7 +168,8 @@ impl Default for Playlist {
 	fn default() -> Self {
 		Self {
 			items: Vec::new(),
-			selected: None,
+			selected: BTreeSet::new(),
+			anchor: None,
 			// On: a queue is a list of what plays next, and one that had to be switched on
 			// before it did anything would be a list that quietly did nothing.
 			auto_load: true,
@@ -196,14 +205,39 @@ impl Playlist {
 		self.items.is_empty()
 	}
 
-	pub fn selected(&self) -> Option<usize> {
-		self.selected
+	/// The selected rows, top to bottom (PLAN §9a).
+	///
+	/// Double-ended because two callers need it backwards: taking rows out and swapping them
+	/// downwards both have to start at the end, or an index is stale by the time its turn
+	/// comes.
+	pub fn selection(&self) -> impl DoubleEndedIterator<Item = usize> + '_ {
+		self.selected.iter().copied()
 	}
 
-	/// The selected row itself, for a caller that has to look at a track before deciding
-	/// whether to move it.
-	pub fn selected_item(&self) -> Option<&Item> {
-		self.items.get(self.selected?)
+	pub fn is_selected(&self, index: usize) -> bool {
+		self.selected.contains(&index)
+	}
+
+	pub fn has_selection(&self) -> bool {
+		!self.selected.is_empty()
+	}
+
+	/// The topmost and bottommost selected rows, which is what the `▲` and `▼` buttons are
+	/// enabled by: a block already touching the top of the list cannot go up.
+	pub fn first_selected(&self) -> Option<usize> {
+		self.selected.first().copied()
+	}
+
+	pub fn last_selected(&self) -> Option<usize> {
+		self.selected.last().copied()
+	}
+
+	/// The selected rows themselves, in order, for a caller that has to look at the tracks
+	/// before deciding whether to move them.
+	pub fn selected_items(&self) -> Vec<Item> {
+		self.selection()
+			.filter_map(|index| self.items.get(index).cloned())
+			.collect()
 	}
 
 	/// How long everything in the list is, and whether that is the whole truth.
@@ -246,56 +280,93 @@ impl Playlist {
 		}
 	}
 
-	/// Select a row, or clear the selection if the index is not one.
-	pub fn select(&mut self, index: usize) {
-		self.selected = (index < self.items.len()).then_some(index);
-	}
+	/// Apply a press on a row (PLAN §9a) — the same three-way rule the files pane follows, on
+	/// indices rather than paths.
+	pub fn click(&mut self, index: usize, kind: Click) {
+		if index >= self.items.len() {
+			return;
+		}
 
-	/// Add to the end. The selection does not move: rows above it are untouched.
-	pub fn append(&mut self, item: Item) {
-		self.items.push(item);
-	}
-
-	/// Add to the front — "play this next" without a reorder.
-	pub fn prepend(&mut self, item: Item) {
-		self.insert(0, item);
-	}
-
-	/// Add at a position, clamped to the end. The selection follows its row down.
-	pub fn insert(&mut self, index: usize, item: Item) {
-		let index = index.min(self.items.len());
-		self.items.insert(index, item);
-
-		if let Some(selected) = self.selected.as_mut()
-			&& *selected >= index
-		{
-			*selected += 1;
+		match kind {
+			Click::Replace => {
+				self.selected.clear();
+				self.selected.insert(index);
+				self.anchor = Some(index);
+			}
+			Click::Toggle => {
+				if !self.selected.remove(&index) {
+					self.selected.insert(index);
+				}
+				self.anchor = Some(index);
+			}
+			// The anchor stays put, so a range can be adjusted by Shift-clicking again — and
+			// without one there is nothing to measure from, so the press is a plain one.
+			Click::Range => match self.anchor {
+				Some(anchor) if anchor < self.items.len() => {
+					self.selected = select::between(anchor, index).collect();
+				}
+				_ => self.click(index, Click::Replace),
+			},
 		}
 	}
 
-	/// Take a row out, and leave the selection somewhere sensible.
+	/// Re-number the selection after the list has moved under it.
 	///
-	/// Removing the selected row leaves the selection on the row that *slid up into its
-	/// place* — the next track — rather than jumping to the top or vanishing, so pressing
-	/// remove three times removes three consecutive rows.
+	/// One place for the arithmetic every edit needs, because it is the same arithmetic every
+	/// time and it is wrong by one in a way that looks right: `moved` maps an old index to
+	/// where that row is now, or to `None` for a row that has gone. A selection is a set of
+	/// *tracks* the user pointed at, so a track that moves takes its highlight with it and a
+	/// track that leaves takes it away.
+	fn resettle(&mut self, moved: impl Fn(usize) -> Option<usize>) {
+		// Taken rather than borrowed, so the new set is built from the old one without the
+		// assignment fighting the read.
+		let selected = std::mem::take(&mut self.selected);
+		self.selected = selected.into_iter().filter_map(&moved).collect();
+		self.anchor = self
+			.anchor
+			.and_then(&moved)
+			.filter(|_| self.has_selection());
+	}
+
+	/// Add tracks at a position, clamped to the end, keeping their order — a drag of a whole
+	/// selection, the overflow of a batch handed to a player, or one track on its own
+	/// (PLAN §9a).
+	///
+	/// One entry point rather than the `append` / `prepend` / `insert` trio it replaced: every
+	/// caller now arrives with a batch, and the difference between the three was only ever
+	/// which index they passed. The selection follows its rows down.
+	pub fn insert_many(&mut self, index: usize, items: Vec<Item>) {
+		let index = index.min(self.items.len());
+		let count = items.len();
+
+		for (offset, item) in items.into_iter().enumerate() {
+			self.items.insert(index + offset, item);
+		}
+		self.resettle(|selected| {
+			Some(if selected >= index {
+				selected + count
+			} else {
+				selected
+			})
+		});
+	}
+
+	/// Take a row out. Every other row keeps its highlight, shifted to wherever it now is.
 	pub fn remove(&mut self, index: usize) -> Option<Item> {
 		if index >= self.items.len() {
 			return None;
 		}
 		let item = self.items.remove(index);
 
-		self.selected = match self.selected {
-			// Above the hole: unmoved.
-			Some(selected) if selected < index => Some(selected),
-			// Below it: shifted up with everything else.
-			Some(selected) if selected > index => Some(selected - 1),
-			// It *was* the hole. Keep the index if a row slid into it, else the new last row,
-			// else there is nothing left to select. Written out rather than with a `?`,
-			// which would return from `remove` itself and throw the removed item away.
-			Some(_) if self.items.is_empty() => None,
-			Some(_) => Some(index.min(self.items.len() - 1)),
-			None => None,
-		};
+		self.resettle(|selected| match selected.cmp(&index) {
+			std::cmp::Ordering::Less => Some(selected),
+			// The row that went takes its own highlight with it. Where the *selection* lands
+			// afterwards is `remove_selected`'s business, not this one's — the handover also
+			// comes through here, and a track ending must not move a highlight the user put
+			// somewhere else.
+			std::cmp::Ordering::Equal => None,
+			std::cmp::Ordering::Greater => Some(selected - 1),
+		});
 
 		Some(item)
 	}
@@ -305,59 +376,125 @@ impl Playlist {
 		self.remove(0)
 	}
 
-	/// Take the selected row out, for the `←` / `→` buttons and a drag that leaves the list.
-	pub fn take_selected(&mut self) -> Option<Item> {
-		self.remove(self.selected?)
+	/// Take every selected row out, top to bottom, for `✕`, the `←` / `→` buttons and a drag
+	/// that leaves the list.
+	///
+	/// The selection then lands on the row that *slid up into* the topmost hole — the next
+	/// track — rather than jumping to the top or vanishing, so pressing `✕` three times
+	/// removes three consecutive rows. It is the single-row rule unchanged; a block of rows
+	/// leaves one hole as far as the eye is concerned.
+	pub fn take_selected(&mut self) -> Vec<Item> {
+		let Some(top) = self.first_selected() else {
+			return Vec::new();
+		};
+
+		let rows: Vec<usize> = self.selection().collect();
+		let taken = self.take_rows(&rows);
+
+		self.selected.clear();
+		self.anchor = None;
+		if !self.items.is_empty() {
+			let landed = top.min(self.items.len() - 1);
+			self.selected.insert(landed);
+			self.anchor = Some(landed);
+		}
+
+		taken
 	}
 
-	/// Move a row one place up or down, carrying the selection with it — the selection names
-	/// a *track*, so a track that moves must take its highlight along.
+	/// Take exactly these rows out, top to bottom.
 	///
-	/// `false` at either end rather than a silent no-op, so the caller can leave the button
-	/// disabled instead of offering a press that does nothing.
-	pub fn shift(&mut self, index: usize, up: bool) -> bool {
-		let Some(other) = (if up {
-			index.checked_sub(1)
-		} else {
-			(index + 1 < self.items.len()).then_some(index + 1)
-		}) else {
+	/// Separate from `take_selected` because a warning can leave *some* of a selection behind
+	/// (PLAN §7a): what is taken is then a subset of what is highlighted, and the rows that
+	/// stay keep their highlight where `remove` leaves it.
+	pub fn take_rows(&mut self, rows: &[usize]) -> Vec<Item> {
+		// Sorted and deduplicated rather than trusted: the walk below goes high to low so that
+		// every index is still valid when its turn comes, and one repeated index would take a
+		// row nobody asked for.
+		let mut rows = rows.to_vec();
+		rows.sort_unstable();
+		rows.dedup();
+
+		let mut taken: Vec<Item> = rows
+			.iter()
+			.rev()
+			.filter_map(|&index| self.remove(index))
+			.collect();
+		taken.reverse();
+		taken
+	}
+
+	/// Move every selected row one place up or down, carrying the selection with them — the
+	/// selection names *tracks*, so tracks that move take their highlight along.
+	///
+	/// `false` when the block cannot go that way rather than a silent no-op, so the caller can
+	/// leave the button disabled instead of offering a press that does nothing. A selection
+	/// touching the end it is moving towards blocks the **whole** move, scattered rows
+	/// included: moving some of what was asked for and not the rest is worse than moving none,
+	/// because it is not undone by pressing the other button.
+	pub fn shift_selected(&mut self, up: bool) -> bool {
+		let (Some(first), Some(last)) = (self.first_selected(), self.last_selected()) else {
 			return false;
 		};
-		if index >= self.items.len() {
+		if (up && first == 0) || (!up && last + 1 >= self.items.len()) {
 			return false;
 		}
 
-		self.items.swap(index, other);
-		if self.selected == Some(index) {
-			self.selected = Some(other);
-		} else if self.selected == Some(other) {
-			self.selected = Some(index);
+		// Away from the edge being moved towards, so a row never swaps into one that has not
+		// moved yet: upwards from the top, downwards from the bottom.
+		let order: Vec<usize> = if up {
+			self.selection().collect()
+		} else {
+			self.selection().rev().collect()
+		};
+		for index in order {
+			let other = if up { index - 1 } else { index + 1 };
+			self.items.swap(index, other);
 		}
 
+		self.resettle(|selected| Some(if up { selected - 1 } else { selected + 1 }));
 		true
 	}
 
-	/// Move a row to sit **above row `to`**, which is how a drag reads: the caret sits
+	/// Move rows to sit **above row `to`**, which is how a drag reads: the caret sits
 	/// *between* rows, and `to` names the row it is above — `len` meaning past the last one.
 	///
 	/// The whole reason this is a function and not two lines at the call site is the
-	/// off-by-one in the middle: once the row is lifted out, everything below it has already
-	/// shifted up, so a caret that was *below* the row lands one place earlier than its index
-	/// said. Dropping a row just above or just below itself is where it already is, and
-	/// returns `false` rather than performing a move that changes nothing.
+	/// off-by-one in the middle: once the rows are lifted out, everything below them has
+	/// already shifted up, so a caret that was *below* them lands as many places earlier as
+	/// there were rows above it. Dropping a block back where it already is returns `false`
+	/// rather than performing a move that changes nothing.
 	///
-	/// The moved row ends up selected, which is not an extra rule — the press that started
-	/// the drag selected it, and it should still be the selected one when it lands.
-	pub fn relocate(&mut self, from: usize, to: usize) -> bool {
-		if from >= self.items.len() || to > self.items.len() || to == from || to == from + 1 {
+	/// The moved rows end up selected, which is not an extra rule — the press that started the
+	/// drag selected them, and they should still be the selection when they land.
+	pub fn relocate(&mut self, from: &[usize], to: usize) -> bool {
+		if from.is_empty()
+			|| to > self.items.len()
+			|| from.iter().any(|&index| index >= self.items.len())
+		{
 			return false;
 		}
 
-		let item = self.items.remove(from);
-		let to = if to > from { to - 1 } else { to };
-		self.items.insert(to, item);
-		self.selected = Some(to);
+		// Where the block lands once the rows that were above the caret are out of the way.
+		let target = to - from.iter().filter(|&&index| index < to).count();
+		if from.iter().copied().eq(target..target + from.len()) {
+			return false;
+		}
 
+		// High to low on the way out, so every index is still valid when its turn comes.
+		let mut lifted: Vec<Item> = from
+			.iter()
+			.rev()
+			.map(|&index| self.items.remove(index))
+			.collect();
+		lifted.reverse();
+
+		for (offset, item) in lifted.into_iter().enumerate() {
+			self.items.insert(target + offset, item);
+		}
+
+		self.selected = (target..target + from.len()).collect();
+		self.anchor = Some(target);
 		true
 	}
 }
@@ -394,24 +531,45 @@ pub fn to_measure(queues: &[Playlist; 3], in_flight: &HashSet<PathBuf>) -> Vec<P
 /// that plays twice in an evening, and Cue 1 and Cue 2 each holding it does that exactly as
 /// surely as one list holding it twice — the duplicate is in the *set*, not in a list.
 ///
-/// `moving` is the row that is on its way out of a list, and it is the reason this takes a
-/// parameter at all: dragging a row from one list to another, or sending it with `←` / `→`,
-/// finds the row in its old home and would warn about the track colliding with itself.
+/// `moving` is the rows that are on their way out of a list, and it is the reason this takes a
+/// parameter at all: dragging rows from one list to another, or sending them with `←` / `→`,
+/// finds them in their old home and would warn about tracks colliding with themselves.
 ///
 /// Searched in draw order, so the list named is the leftmost one — an arbitrary rule, but a
 /// stable one, and the message names a list rather than counting them.
 pub fn already_queued(
 	queues: &[Playlist; 3],
 	path: &Path,
-	moving: Option<(ListId, usize)>,
+	moving: &[(ListId, usize)],
 ) -> Option<ListId> {
 	ListId::ALL.into_iter().find(|list| {
 		queues[list.index()]
 			.items
 			.iter()
 			.enumerate()
-			.any(|(index, item)| item.path == path && moving != Some((*list, index)))
+			.any(|(index, item)| item.path == path && !moving.contains(&(*list, index)))
 	})
+}
+
+/// Which of a batch of tracks are already queued, and where — as positions into `items`, so a
+/// caller can filter rows and tracks together (PLAN §7a, §9a).
+///
+/// The whole of what the duplicate warning is about, and pure: the dialog only decides what to
+/// do with this answer. A batch is checked one track at a time and against the *lists*, not
+/// against itself — a selection cannot contain the same file twice, because a pane's rows are
+/// a folder's files.
+pub fn duplicates(
+	queues: &[Playlist; 3],
+	items: &[Item],
+	moving: &[(ListId, usize)],
+) -> Vec<(usize, ListId)> {
+	items
+		.iter()
+		.enumerate()
+		.filter_map(|(index, item)| {
+			already_queued(queues, &item.path, moving).map(|list| (index, list))
+		})
+		.collect()
 }
 
 /// Where the track after this one comes from, when a player's track ends (PLAN §7a).
@@ -490,70 +648,90 @@ mod tests {
 		assert_eq!(indices, vec![0, 1, 2]);
 	}
 
+	/// Put tracks into a list at a position, the way every caller does.
+	fn add(list: &mut Playlist, index: usize, names: &[&str]) {
+		let items = names
+			.iter()
+			.map(|name| Item::new(PathBuf::from("/m").join(name)))
+			.collect();
+		list.insert_many(index, items);
+	}
+
+	/// The selected rows, as indices.
+	fn chosen(list: &Playlist) -> Vec<usize> {
+		list.selection().collect()
+	}
+
 	#[test]
-	fn adding_puts_a_track_where_it_was_asked_to_go() {
+	fn adding_puts_tracks_where_they_were_asked_to_go() {
 		// Arrange
-		let mut list = list(&["b.mp3", "c.mp3"]);
+		let mut list = list(&["c.mp3", "d.mp3"]);
 
-		// Act
-		list.append(Item::new(PathBuf::from("/m/d.mp3")));
-		list.prepend(Item::new(PathBuf::from("/m/a.mp3")));
+		// Act: at the end, then at the top — and a whole batch at once, which is what a
+		// selection dropped in is (PLAN §9a).
+		add(&mut list, 2, &["e.mp3"]);
+		add(&mut list, 0, &["a.mp3", "b.mp3"]);
 
-		// Assert
-		assert_eq!(names(&list), ["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
+		// Assert: the batch keeps its own order, top to bottom, rather than arriving reversed
+		// — which is what inserting each one at the same index would do.
+		assert_eq!(names(&list), ["a.mp3", "b.mp3", "c.mp3", "d.mp3", "e.mp3"]);
 	}
 
 	#[test]
 	fn an_insert_above_the_selection_carries_it_down() {
 		// Arrange: the third row selected.
 		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
-		list.select(2);
+		list.click(2, Click::Replace);
 
 		// Act: something arrives at the top.
-		list.prepend(Item::new(PathBuf::from("/m/new.mp3")));
+		add(&mut list, 0, &["new.mp3"]);
 
 		// Assert: the highlight is still on `c.mp3`, which is now row 3. A selection that
 		// stayed on index 2 would be highlighting `b.mp3` — the same row, a different track.
-		assert_eq!(list.selected(), Some(3));
+		assert_eq!(chosen(&list), [3]);
 		assert_eq!(names(&list)[3], "c.mp3");
 
 		// An insert *below* it moves nothing.
-		list.insert(4, Item::new(PathBuf::from("/m/last.mp3")));
-		assert_eq!(list.selected(), Some(3));
+		add(&mut list, 4, &["last.mp3"]);
+		assert_eq!(chosen(&list), [3]);
+
+		// And a batch above it carries the highlight by as many rows as arrived.
+		add(&mut list, 0, &["one.mp3", "two.mp3"]);
+		assert_eq!(chosen(&list), [5]);
+		assert_eq!(names(&list)[5], "c.mp3");
 	}
 
 	#[test]
-	fn removing_the_selected_row_selects_what_slid_into_its_place() {
-		// Arrange
-		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
-		list.select(1);
+	fn removing_the_selected_rows_selects_what_slid_into_their_place() {
+		// Arrange: two rows selected, with more below them.
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
+		list.click(1, Click::Replace);
+		list.click(2, Click::Range);
 
 		// Act
-		let removed = list.remove(1);
+		let removed = list.take_selected();
 
-		// Assert: the next track, so pressing remove repeatedly removes consecutive rows
-		// rather than requiring a re-aim after each one.
-		assert_eq!(removed.map(|item| item.name), Some("b.mp3".to_string()));
-		assert_eq!(list.selected(), Some(1));
-		assert_eq!(names(&list)[1], "c.mp3");
+		// Assert: they come back in the order they were in, and the highlight lands on the
+		// next track — so pressing `✕` repeatedly removes consecutive rows rather than
+		// requiring a re-aim after each one.
+		let taken: Vec<&str> = removed.iter().map(|item| item.name.as_str()).collect();
+		assert_eq!(taken, ["b.mp3", "c.mp3"]);
+		assert_eq!(chosen(&list), [1]);
+		assert_eq!(names(&list)[1], "d.mp3");
 	}
 
 	#[test]
 	fn removing_the_last_row_falls_back_to_the_new_last_row() {
 		// Arrange: the bottom row selected, with nothing below to slide up.
 		let mut list = list(&["a.mp3", "b.mp3"]);
-		list.select(1);
+		list.click(1, Click::Replace);
 
 		// Act / Assert
-		list.remove(1);
-		assert_eq!(
-			list.selected(),
-			Some(0),
-			"the row above takes the highlight"
-		);
+		list.take_selected();
+		assert_eq!(chosen(&list), [0], "the row above takes the highlight");
 
-		list.remove(0);
-		assert_eq!(list.selected(), None, "an empty list has nothing to select");
+		list.take_selected();
+		assert!(chosen(&list).is_empty(), "an empty list selects nothing");
 		assert!(list.is_empty());
 	}
 
@@ -561,14 +739,46 @@ mod tests {
 	fn removing_a_row_above_the_selection_keeps_the_same_track_selected() {
 		// Arrange
 		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
-		list.select(2);
+		list.click(2, Click::Replace);
 
-		// Act: a row above the selection goes.
+		// Act: a row above the selection goes — a handover taking the top track, which must
+		// not move a highlight the user put somewhere else.
 		list.remove(0);
 
 		// Assert: still `c.mp3`, one row higher.
-		assert_eq!(list.selected(), Some(1));
+		assert_eq!(chosen(&list), [1]);
 		assert_eq!(names(&list)[1], "c.mp3");
+	}
+
+	#[test]
+	fn a_press_selects_one_row_or_several_depending_on_what_is_held() {
+		// Arrange
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
+
+		// Act / Assert: the same three-way rule the files pane follows (PLAN §9a), on indices.
+		list.click(1, Click::Replace);
+		assert_eq!(chosen(&list), [1]);
+
+		list.click(3, Click::Toggle);
+		assert_eq!(chosen(&list), [1, 3], "in row order, not click order");
+
+		list.click(1, Click::Toggle);
+		assert_eq!(chosen(&list), [3], "clicked again, and gone");
+
+		// A range measures from the anchor, which the toggle above moved to row 1.
+		list.click(1, Click::Replace);
+		list.click(3, Click::Range);
+		assert_eq!(chosen(&list), [1, 2, 3]);
+
+		// A row that is not there selects nothing rather than a phantom index — the guard the
+		// rest of this module assumes.
+		let mut short = list_of_one();
+		short.click(5, Click::Replace);
+		assert!(chosen(&short).is_empty());
+	}
+
+	fn list_of_one() -> Playlist {
+		list(&["a.mp3"])
 	}
 
 	#[test]
@@ -584,53 +794,64 @@ mod tests {
 	}
 
 	#[test]
-	fn shifting_a_row_takes_its_highlight_with_it() {
+	fn shifting_rows_takes_their_highlight_with_them() {
 		// Arrange
-		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
-		list.select(2);
+		let mut single = list(&["a.mp3", "b.mp3", "c.mp3"]);
+		single.click(2, Click::Replace);
 
 		// Act
-		assert!(list.shift(2, true));
+		assert!(single.shift_selected(true));
 
 		// Assert: the track moved and the highlight went with it. This is the one a
 		// swap-only implementation gets wrong.
-		assert_eq!(names(&list), ["a.mp3", "c.mp3", "b.mp3"]);
-		assert_eq!(list.selected(), Some(1));
+		assert_eq!(names(&single), ["a.mp3", "c.mp3", "b.mp3"]);
+		assert_eq!(chosen(&single), [1]);
+
+		// And a block of two moves as a block, keeping its own order — swapping them one at a
+		// time in the wrong direction would reverse the pair as it went.
+		let mut block = list(&["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
+		block.click(0, Click::Replace);
+		block.click(1, Click::Range);
+		assert!(block.shift_selected(false));
+		assert_eq!(names(&block), ["c.mp3", "a.mp3", "b.mp3", "d.mp3"]);
+		assert_eq!(chosen(&block), [1, 2]);
 	}
 
 	#[test]
-	fn shifting_the_row_a_selection_swaps_with_moves_the_selection_too() {
-		// Arrange: move the row *above* the selected one down onto it.
-		let mut list = list(&["a.mp3", "b.mp3"]);
-		list.select(1);
+	fn a_scattered_selection_still_moves_together() {
+		// Arrange: rows 0 and 2 of four, which is what a pair of command-clicks makes.
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
+		list.click(0, Click::Replace);
+		list.click(2, Click::Toggle);
 
 		// Act
-		assert!(list.shift(0, false));
+		assert!(list.shift_selected(false));
 
-		// Assert: `b.mp3` is now row 0 and is still the selected track.
-		assert_eq!(names(&list), ["b.mp3", "a.mp3"]);
-		assert_eq!(list.selected(), Some(0));
+		// Assert: each moved down one, past the row that was below it.
+		assert_eq!(names(&list), ["b.mp3", "a.mp3", "d.mp3", "c.mp3"]);
+		assert_eq!(chosen(&list), [1, 3]);
 	}
 
 	#[test]
-	fn a_row_cannot_be_shifted_off_either_end() {
+	fn a_selection_cannot_be_shifted_off_either_end() {
 		// Arrange / Act / Assert: `false` rather than a no-op, so the button is drawn dead
 		// instead of offering a press that does nothing.
-		let mut list = list(&["a.mp3", "b.mp3"]);
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
+		assert!(!list.shift_selected(true), "nothing selected");
 
-		assert!(!list.shift(0, true), "up from the top");
-		assert!(!list.shift(1, false), "down from the bottom");
-		assert!(!list.shift(9, true), "a row that is not there");
-		assert_eq!(names(&list), ["a.mp3", "b.mp3"], "nothing moved");
-	}
+		list.click(0, Click::Replace);
+		assert!(!list.shift_selected(true), "up from the top");
 
-	#[test]
-	fn selecting_a_row_that_is_not_there_selects_nothing() {
-		// Arrange / Act / Assert: the guard that keeps every `selected` index valid, which
-		// the rest of this module assumes.
-		let mut list = list(&["a.mp3"]);
-		list.select(5);
-		assert_eq!(list.selected(), None);
+		list.click(2, Click::Replace);
+		assert!(!list.shift_selected(false), "down from the bottom");
+
+		// The whole move is blocked, not part of it: a selection touching the top cannot go up
+		// even though the rows below it could. Moving some of what was asked for and not the
+		// rest is not undone by pressing the other button.
+		list.click(0, Click::Replace);
+		list.click(2, Click::Toggle);
+		assert!(!list.shift_selected(true), "one of them is at the top");
+		assert_eq!(names(&list), ["a.mp3", "b.mp3", "c.mp3"], "nothing moved");
 	}
 
 	#[test]
@@ -641,15 +862,11 @@ mod tests {
 		let mut list = list(&["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
 
 		// Act: `a` to just above `d`.
-		assert!(list.relocate(0, 3));
+		assert!(list.relocate(&[0], 3));
 
 		// Assert: `a` sits between `c` and `d`, not after `d`.
 		assert_eq!(names(&list), ["b.mp3", "c.mp3", "a.mp3", "d.mp3"]);
-		assert_eq!(
-			list.selected(),
-			Some(2),
-			"the dragged row stays the selected one"
-		);
+		assert_eq!(chosen(&list), [2], "the dragged row stays selected");
 	}
 
 	#[test]
@@ -657,11 +874,11 @@ mod tests {
 		// Arrange / Act: the mirror of the case above — the caret is above the row, so
 		// nothing has shifted under it.
 		let mut list = list(&["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
-		assert!(list.relocate(3, 1));
+		assert!(list.relocate(&[3], 1));
 
 		// Assert
 		assert_eq!(names(&list), ["a.mp3", "d.mp3", "b.mp3", "c.mp3"]);
-		assert_eq!(list.selected(), Some(1));
+		assert_eq!(chosen(&list), [1]);
 	}
 
 	#[test]
@@ -669,11 +886,11 @@ mod tests {
 		// Arrange / Act: `len` is the caret past the last row, which is the one index that
 		// does not name a row at all.
 		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
-		assert!(list.relocate(0, 3));
+		assert!(list.relocate(&[0], 3));
 
 		// Assert
 		assert_eq!(names(&list), ["b.mp3", "c.mp3", "a.mp3"]);
-		assert_eq!(list.selected(), Some(2));
+		assert_eq!(chosen(&list), [2]);
 	}
 
 	#[test]
@@ -683,11 +900,33 @@ mod tests {
 		let mut list = list(&["a.mp3", "b.mp3", "c.mp3"]);
 
 		// Act / Assert
-		assert!(!list.relocate(1, 1), "the caret above itself");
-		assert!(!list.relocate(1, 2), "the caret below itself");
-		assert!(!list.relocate(9, 0), "a row that is not there");
-		assert!(!list.relocate(0, 9), "a caret past the end of the list");
+		assert!(!list.relocate(&[1], 1), "the caret above itself");
+		assert!(!list.relocate(&[1], 2), "the caret below itself");
+		assert!(!list.relocate(&[9], 0), "a row that is not there");
+		assert!(!list.relocate(&[0], 9), "a caret past the end of the list");
+		assert!(!list.relocate(&[], 0), "nothing being dragged");
 		assert_eq!(names(&list), ["a.mp3", "b.mp3", "c.mp3"], "nothing moved");
+
+		// And the same for a *block*: the carets either side of it, and every caret inside it,
+		// leave it exactly where it is (PLAN §9a).
+		assert!(!list.relocate(&[0, 1], 0), "above the block");
+		assert!(!list.relocate(&[0, 1], 2), "below the block");
+		assert_eq!(names(&list), ["a.mp3", "b.mp3", "c.mp3"], "still nothing");
+	}
+
+	#[test]
+	fn a_block_of_rows_lands_where_the_caret_was_and_keeps_its_order() {
+		// Arrange: two rows either side of a third, which is the case that shows whether the
+		// block is moved as a block or one row at a time.
+		let mut list = list(&["a.mp3", "b.mp3", "c.mp3", "d.mp3", "e.mp3"]);
+
+		// Act: `a` and `c` to just above `e`. Two rows lie above that caret, so the block
+		// lands two places earlier than the caret's index says.
+		assert!(list.relocate(&[0, 2], 4));
+
+		// Assert: in their own order, together, and selected where they landed.
+		assert_eq!(names(&list), ["b.mp3", "d.mp3", "a.mp3", "c.mp3", "e.mp3"]);
+		assert_eq!(chosen(&list), [2, 3]);
 	}
 
 	#[test]
@@ -700,7 +939,7 @@ mod tests {
 			for to in 0..=original.len() {
 				// Act
 				let mut list = list(&original);
-				list.relocate(from, to);
+				list.relocate(&[from], to);
 
 				// Assert: same set, same length, whatever the move did.
 				let mut got = names(&list);
@@ -708,6 +947,58 @@ mod tests {
 				assert_eq!(got, original, "relocate({from}, {to}) changed the contents");
 			}
 		}
+
+		// And every *pair* of rows to every caret, which is the same failure with a second way
+		// to reach it: 30 more cases, each also checking that both rows end up selected.
+		for first in 0..original.len() {
+			for second in first + 1..original.len() {
+				for to in 0..=original.len() {
+					let mut list = list(&original);
+					let moved = list.relocate(&[first, second], to);
+
+					let mut got = names(&list);
+					got.sort_unstable();
+					assert_eq!(
+						got, original,
+						"relocate([{first}, {second}], {to}) lost a row"
+					);
+
+					// A move that happened leaves both rows highlighted where they landed; one
+					// that did not leaves the selection exactly as it was, which here is
+					// nothing at all.
+					assert_eq!(
+						chosen(&list).len(),
+						usize::from(moved) * 2,
+						"relocate([{first}, {second}], {to}) lost a highlight"
+					);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn taking_some_of_a_selection_leaves_the_rest_highlighted() {
+		// Arrange: three rows selected, of which the duplicate warning will let two through
+		// (PLAN §7a) — so what leaves the list is a subset of what is highlighted.
+		let mut queue = list(&["a.mp3", "b.mp3", "c.mp3", "d.mp3"]);
+		queue.click(0, Click::Replace);
+		queue.click(2, Click::Range);
+
+		// Act: rows 0 and 2 go, row 1 stays behind.
+		let taken = queue.take_rows(&[0, 2]);
+
+		// Assert: the tracks come back in their own order, and the row that stayed keeps its
+		// highlight where the removals left it.
+		let taken: Vec<&str> = taken.iter().map(|item| item.name.as_str()).collect();
+		assert_eq!(taken, ["a.mp3", "c.mp3"]);
+		assert_eq!(names(&queue), ["b.mp3", "d.mp3"]);
+		assert_eq!(chosen(&queue), [0], "b.mp3, still selected and now first");
+
+		// An index handed in twice takes one row, not two — the walk goes high to low and a
+		// repeat would take whatever slid into the place.
+		let mut twice = list(&["a.mp3", "b.mp3"]);
+		assert_eq!(twice.take_rows(&[0, 0]).len(), 1);
+		assert_eq!(names(&twice), ["b.mp3"]);
 	}
 
 	#[test]
@@ -831,17 +1122,31 @@ mod tests {
 		// Act / Assert: found in the list it is actually in, not merely in the one being
 		// added to — a track in both cues plays twice, which is the mistake worth catching.
 		assert_eq!(
-			already_queued(&queues, &path("c.mp3"), None),
+			already_queued(&queues, &path("c.mp3"), &[]),
 			Some(ListId::Cue(DeckId::Two))
 		);
 		assert_eq!(
-			already_queued(&queues, &path("a.mp3"), None),
+			already_queued(&queues, &path("a.mp3"), &[]),
 			Some(ListId::Cue(DeckId::One))
 		);
 		assert_eq!(
-			already_queued(&queues, &path("new.mp3"), None),
+			already_queued(&queues, &path("new.mp3"), &[]),
 			None,
 			"a track nothing holds"
+		);
+
+		// And a whole batch at once, which is what the warning actually asks about: the
+		// positions of the ones already queued, so a caller can filter rows and tracks
+		// together (PLAN §9a).
+		let batch = [
+			Item::new(path("new.mp3")),
+			Item::new(path("c.mp3")),
+			Item::new(path("also-new.mp3")),
+			Item::new(path("a.mp3")),
+		];
+		assert_eq!(
+			duplicates(&queues, &batch, &[]),
+			vec![(1, ListId::Cue(DeckId::Two)), (3, ListId::Cue(DeckId::One))]
 		);
 	}
 
@@ -851,11 +1156,11 @@ mod tests {
 		// would find itself in Cue 1 and warn about colliding with itself, which would make
 		// every single cross-list move ask a question with one honest answer.
 		let queues = [list(&["a.mp3", "b.mp3"]), Playlist::default(), list(&[])];
-		let moving = Some((ListId::Cue(DeckId::One), 1));
+		let moving = [(ListId::Cue(DeckId::One), 1)];
 
 		// Act / Assert
 		assert_eq!(
-			already_queued(&queues, &PathBuf::from("/m/b.mp3"), moving),
+			already_queued(&queues, &PathBuf::from("/m/b.mp3"), &moving),
 			None
 		);
 
@@ -866,7 +1171,7 @@ mod tests {
 			Playlist::default(),
 		];
 		assert_eq!(
-			already_queued(&queues, &PathBuf::from("/m/b.mp3"), moving),
+			already_queued(&queues, &PathBuf::from("/m/b.mp3"), &moving),
 			Some(ListId::Common)
 		);
 	}

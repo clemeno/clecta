@@ -5,8 +5,11 @@
 //! worth testing — the extension table, the sort, the hidden filter.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+use crate::select::{self, Click};
 
 /// What a file is, as far as the browser is concerned.
 ///
@@ -106,7 +109,14 @@ pub struct Browser {
 	/// no filesystem work (PLAN §9).
 	entries: Vec<Entry>,
 	/// Selected by path, not index: a refresh can renumber the rows underneath it.
-	pub selected: Option<PathBuf>,
+	///
+	/// A set rather than one path (PLAN §9a). Unordered on purpose — the *order* of a
+	/// selection is the order of the rows, which `selection` reads back off the listing, so
+	/// this cannot disagree with what is on screen after a re-sort.
+	selected: HashSet<PathBuf>,
+	/// Where a Shift-click measures from: the row the last plain or command click landed on.
+	/// `None` when nothing has been clicked yet, which makes a Shift-click a plain one.
+	anchor: Option<PathBuf>,
 	/// Off by default — a *local* media browser is not usually opened to find `.config`
 	/// (PLAN §9).
 	pub show_hidden: bool,
@@ -132,12 +142,17 @@ impl Browser {
 	pub fn show(&mut self, folder: PathBuf, mut entries: Vec<Entry>) {
 		sort(&mut entries);
 
-		// Drop a selection the new listing does not contain, so "load the selected file"
-		// can never point at something that is no longer there.
-		if let Some(selected) = &self.selected
-			&& !entries.iter().any(|entry| &entry.path == selected)
+		// Drop whatever the new listing does not contain, so "load the selection" can never
+		// point at something that is no longer there. The rows that *are* still there keep
+		// their highlight, which is what makes a refresh mid-selection survivable.
+		self.selected
+			.retain(|path| entries.iter().any(|entry| &entry.path == path));
+		if self
+			.anchor
+			.as_ref()
+			.is_some_and(|path| !self.selected.contains(path))
 		{
-			self.selected = None;
+			self.anchor = None;
 		}
 
 		self.folder = Some(folder);
@@ -151,10 +166,94 @@ impl Browser {
 		self.error = Some(error);
 	}
 
-	/// The entry the user has selected, if it is currently visible.
-	pub fn selection(&self) -> Option<&Entry> {
-		let selected = self.selected.as_ref()?;
-		self.visible().find(|entry| &entry.path == selected)
+	/// Everything selected, **top to bottom** (PLAN §9a).
+	///
+	/// Read off the listing rather than out of the set, which is what makes the order the
+	/// order on screen: a natural-numeric sort, and whatever the hidden filter is showing. A
+	/// selected row that has been hidden since is therefore not in it — every action works on
+	/// what the user can see.
+	pub fn selection(&self) -> impl Iterator<Item = &Entry> {
+		self.visible()
+			.filter(|entry| self.selected.contains(&entry.path))
+	}
+
+	/// The selected media files, in the same order — what every action on the pane operates
+	/// on. Non-media rows are listed so the user can see the folder is the right one
+	/// (PLAN §9) and are simply not part of any of them.
+	pub fn selected_media(&self) -> Vec<PathBuf> {
+		self.selection()
+			.filter(|entry| entry.kind.is_media())
+			.map(|entry| entry.path.clone())
+			.collect()
+	}
+
+	/// Whether anything a player or a queue could take is selected — what every button on the
+	/// pane is enabled by.
+	pub fn has_media_selection(&self) -> bool {
+		self.selection().any(|entry| entry.kind.is_media())
+	}
+
+	pub fn is_selected(&self, path: &Path) -> bool {
+		self.selected.contains(path)
+	}
+
+	/// Apply a press on a row (PLAN §9a).
+	///
+	/// The anchor moves for a plain or command click and **stays put for a range**, which is
+	/// what lets a Shift-click be adjusted: clicking further down again re-measures from the
+	/// same start rather than from wherever the last one ended.
+	///
+	/// A range replaces the selection rather than adding to it. That is the behaviour of the
+	/// pane this one is modelled on, and it is the one that can be corrected by a second
+	/// Shift-click; a range that accumulated would need a plain click to undo, which is the
+	/// gesture people use to *stop* selecting.
+	pub fn click(&mut self, path: &Path, kind: Click) {
+		match kind {
+			Click::Replace => {
+				self.selected.clear();
+				self.selected.insert(path.to_path_buf());
+				self.anchor = Some(path.to_path_buf());
+			}
+			Click::Toggle => {
+				if !self.selected.remove(path) {
+					self.selected.insert(path.to_path_buf());
+				}
+				self.anchor = Some(path.to_path_buf());
+			}
+			// A range needs two rows and a *position* for each, so it is the one case that has
+			// to walk the listing. Without an anchor there is nothing to measure from, and the
+			// press falls back to being a plain one.
+			Click::Range => {
+				let rows: Vec<&Entry> = self.visible().collect();
+				let position = |wanted: &Path| rows.iter().position(|entry| entry.path == wanted);
+
+				let Some((anchor, clicked)) = self
+					.anchor
+					.as_deref()
+					.and_then(position)
+					.zip(position(path))
+				else {
+					return self.click(path, Click::Replace);
+				};
+
+				self.selected = select::between(anchor, clicked)
+					.filter_map(|index| rows.get(index).map(|entry| entry.path.clone()))
+					.collect();
+			}
+		}
+	}
+
+	/// Select every row the pane is showing — so the hidden filter decides what "all" means,
+	/// which is the same rule `selection` follows.
+	pub fn select_all(&mut self) {
+		let shown: Vec<PathBuf> = self.visible().map(|entry| entry.path.clone()).collect();
+		self.anchor = shown.first().cloned();
+		self.selected = shown.into_iter().collect();
+	}
+
+	pub fn clear_selection(&mut self) {
+		self.selected.clear();
+		self.anchor = None;
 	}
 }
 
@@ -310,21 +409,136 @@ mod tests {
 		assert_eq!(browser.visible().count(), 2, "shown on request");
 	}
 
-	#[test]
-	fn a_selection_the_new_listing_lost_is_forgotten() {
-		// Arrange: the folder is refreshed and the selected file is gone from it.
+	/// A pane showing five tracks and a text file, which is the fixture every selection test
+	/// below works on.
+	fn pane() -> Browser {
 		let mut browser = Browser::default();
 		browser.show(
 			PathBuf::from("/music"),
-			vec![entry("a.mp3"), entry("b.mp3")],
+			vec![
+				entry("1.mp3"),
+				entry("2.mp3"),
+				entry("3.mp3"),
+				entry("4.mp3"),
+				entry("notes.txt"),
+			],
 		);
-		browser.selected = Some(PathBuf::from("/music/b.mp3"));
+		browser
+	}
+
+	/// What is selected, by name and in the order the pane hands them out.
+	fn names(browser: &Browser) -> Vec<String> {
+		browser
+			.selection()
+			.map(|entry| entry.name.clone())
+			.collect()
+	}
+
+	fn row(name: &str) -> PathBuf {
+		PathBuf::from("/music").join(name)
+	}
+
+	#[test]
+	fn a_selection_the_new_listing_lost_is_forgotten() {
+		// Arrange: two rows selected, and the folder is refreshed with one of them gone.
+		let mut browser = pane();
+		browser.click(&row("1.mp3"), Click::Replace);
+		browser.click(&row("2.mp3"), Click::Toggle);
 
 		// Act
-		browser.show(PathBuf::from("/music"), vec![entry("a.mp3")]);
+		browser.show(PathBuf::from("/music"), vec![entry("1.mp3")]);
 
-		// Assert: otherwise "load the selection" points at a file that is not there.
-		assert_eq!(browser.selected, None);
+		// Assert: the row that survived keeps its highlight and the one that did not is
+		// forgotten — otherwise "load the selection" points at a file that is not there.
+		assert_eq!(names(&browser), ["1.mp3"]);
+	}
+
+	#[test]
+	fn a_plain_click_replaces_and_a_command_click_adds_or_takes_away() {
+		// Arrange
+		let mut browser = pane();
+
+		// Act / Assert: the plain press is the whole of the old behaviour, kept.
+		browser.click(&row("2.mp3"), Click::Replace);
+		assert_eq!(names(&browser), ["2.mp3"]);
+
+		browser.click(&row("4.mp3"), Click::Replace);
+		assert_eq!(names(&browser), ["4.mp3"], "the other one goes");
+
+		// Command-clicking adds, and adds *in row order* however it was clicked — the order
+		// is the pane's, not the order the rows were picked, because that is the order the
+		// actions run in.
+		browser.click(&row("1.mp3"), Click::Toggle);
+		assert_eq!(names(&browser), ["1.mp3", "4.mp3"], "top to bottom");
+
+		// And clicking a selected row again takes it out rather than leaving it stuck.
+		browser.click(&row("4.mp3"), Click::Toggle);
+		assert_eq!(names(&browser), ["1.mp3"]);
+	}
+
+	#[test]
+	fn a_shift_click_takes_everything_between_and_can_be_adjusted() {
+		// Arrange: an anchor in the middle.
+		let mut browser = pane();
+		browser.click(&row("2.mp3"), Click::Replace);
+
+		// Act / Assert: downwards, then upwards, then further — each measured from the same
+		// anchor, which is what lets a range be corrected without starting again.
+		browser.click(&row("4.mp3"), Click::Range);
+		assert_eq!(names(&browser), ["2.mp3", "3.mp3", "4.mp3"]);
+
+		browser.click(&row("3.mp3"), Click::Range);
+		assert_eq!(names(&browser), ["2.mp3", "3.mp3"], "pulled back in");
+
+		browser.click(&row("1.mp3"), Click::Range);
+		assert_eq!(names(&browser), ["1.mp3", "2.mp3"], "the other way");
+
+		// A range with nothing to measure from is a plain click rather than nothing at all.
+		let mut fresh = pane();
+		fresh.click(&row("3.mp3"), Click::Range);
+		assert_eq!(names(&fresh), ["3.mp3"], "no anchor yet");
+	}
+
+	#[test]
+	fn selecting_everything_means_everything_on_screen() {
+		// Arrange: a hidden file, which is not on screen.
+		let mut browser = Browser::default();
+		browser.show(
+			PathBuf::from("/music"),
+			vec![entry("a.mp3"), entry(".secret.mp3")],
+		);
+
+		// Act / Assert: what is shown, which is what the filter says — an action reaching a
+		// row nobody can see is the thing this rule exists to prevent.
+		browser.select_all();
+		assert_eq!(names(&browser), ["a.mp3"]);
+
+		browser.show_hidden = true;
+		browser.select_all();
+		assert_eq!(names(&browser), [".secret.mp3", "a.mp3"]);
+
+		browser.clear_selection();
+		assert!(names(&browser).is_empty());
+	}
+
+	#[test]
+	fn only_media_is_ever_handed_to_a_player() {
+		// Arrange: everything selected, text file included.
+		let mut browser = pane();
+		browser.select_all();
+
+		// Act / Assert: the `.txt` is listed and selectable — it is how you tell you are in
+		// the right folder (PLAN §9) — and it is not part of any action.
+		assert_eq!(names(&browser).len(), 5, "all five rows");
+		let media: Vec<PathBuf> = browser.selected_media();
+		assert_eq!(media.len(), 4, "four tracks");
+		assert!(!media.contains(&row("notes.txt")));
+		assert!(browser.has_media_selection());
+
+		// A selection of nothing but a text file enables nothing.
+		browser.click(&row("notes.txt"), Click::Replace);
+		assert!(!browser.has_media_selection());
+		assert!(browser.selected_media().is_empty());
 	}
 
 	#[test]
