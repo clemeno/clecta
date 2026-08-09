@@ -17,8 +17,9 @@
 //!   this from inside an `off_thread` job, which is also why `Cache` is `Sync` and shared as
 //!   an `Arc`.
 
-use std::path::Path;
-use std::time::{Duration, UNIX_EPOCH};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
@@ -73,17 +74,22 @@ pub struct Stamp {
 /// Read a file's stamp. `None` when it cannot be stat'd, which is also "do not cache this".
 pub fn stamp(path: &Path) -> Option<Stamp> {
 	let metadata = std::fs::metadata(path).ok()?;
+	Some(stamp_of(metadata.len(), metadata.modified().ok()))
+}
 
-	let modified = metadata
-		.modified()
-		.ok()
-		.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-		.map_or(0, |since| since.as_nanos() as u64);
-
-	Some(Stamp {
-		size: metadata.len(),
-		modified,
-	})
+/// The same stamp, from metadata somebody has already read.
+///
+/// The files pane's rows carry a size and a modified time because they are *shown* — so asking
+/// which of a listing the store already knows costs no `stat` at all (PLAN §11c). It has to be
+/// the same two numbers `stamp` uses or the answer would be wrong rather than merely slow,
+/// which is why the function above is now written in terms of this one.
+pub fn stamp_of(size: u64, modified: Option<SystemTime>) -> Stamp {
+	Stamp {
+		size,
+		modified: modified
+			.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+			.map_or(0, |since| since.as_nanos() as u64),
+	}
 }
 
 /// The store, or nothing at all when there could not be one.
@@ -163,6 +169,29 @@ impl Cache {
 
 	pub fn store_trim(&self, path: &Path, stamp: Stamp, trim: Option<Trim>) {
 		self.write(TRIMS, path, stamp, &encode_trim(trim));
+	}
+
+	/// Which of these files the store already answers for **in full** (PLAN §11c).
+	///
+	/// Full means both tables a load reads: the waveform and the music's edges, for this exact
+	/// version of the file. That is deliberately the same test `cached_scan` uses to decide it
+	/// has a hit, so a marked row is a row that will not be decoded again — a file the queues
+	/// merely measured the length of has an entry here and is still a third of a second of work,
+	/// and saying otherwise would make the mark mean nothing.
+	///
+	/// `ponytail:` two read transactions and an 8 KB copy per file, because it is `read` reused
+	/// rather than a presence check of its own. One folder's listing is hundreds of files and
+	/// this runs on a thread; give it one transaction and a header-only test if a listing of
+	/// tens of thousands ever takes long enough to see.
+	pub fn prepared(&self, files: &[(PathBuf, Stamp)]) -> HashSet<PathBuf> {
+		files
+			.iter()
+			.filter(|(path, stamp)| {
+				self.read(WAVEFORMS, path, *stamp).is_some()
+					&& self.read(TRIMS, path, *stamp).is_some()
+			})
+			.map(|(path, _)| path.clone())
+			.collect()
 	}
 
 	/// Empty the store — every table, every file.
@@ -394,14 +423,14 @@ fn decode_duration(payload: &[u8]) -> Option<Option<Duration>> {
 mod tests {
 	use super::*;
 
-	fn stamp_of(size: u64, modified: u64) -> Stamp {
+	fn stamped(size: u64, modified: u64) -> Stamp {
 		Stamp { size, modified }
 	}
 
 	#[test]
 	fn a_record_survives_a_round_trip() {
 		// Arrange
-		let stamp = stamp_of(1_234, 5_678);
+		let stamp = stamped(1_234, 5_678);
 		let peaks = vec![0.0, 0.5, 1.0, 0.25];
 
 		// Act
@@ -416,17 +445,17 @@ mod tests {
 	#[test]
 	fn a_file_that_changed_reads_as_a_miss() {
 		// Arrange: a record written for one version of a file.
-		let written = stamp_of(1_000, 42);
+		let written = stamped(1_000, 42);
 		let stored = record(written, &encode_peaks(&[1.0]));
 
 		// Act / Assert: the same bytes are only good for the same file.
 		assert!(payload(&stored, written).is_some(), "unchanged");
 		assert!(
-			payload(&stored, stamp_of(1_001, 42)).is_none(),
+			payload(&stored, stamped(1_001, 42)).is_none(),
 			"a different length"
 		);
 		assert!(
-			payload(&stored, stamp_of(1_000, 43)).is_none(),
+			payload(&stored, stamped(1_000, 43)).is_none(),
 			"written again"
 		);
 	}
@@ -434,7 +463,7 @@ mod tests {
 	#[test]
 	fn a_record_this_build_cannot_read_is_a_miss_rather_than_noise() {
 		// Arrange: the same bytes with a different format byte, and a truncated header.
-		let stamp = stamp_of(7, 7);
+		let stamp = stamped(7, 7);
 		let mut stored = record(stamp, &encode_peaks(&[1.0, 0.0]));
 
 		// Act / Assert: an older layout must not be read as this one. Without the version
@@ -558,7 +587,24 @@ mod tests {
 		cache.store_trim(&track, moved, Some(trim));
 		assert_eq!(cache.trim(&track, moved), Some(Some(trim)));
 
+		// Act / Assert: "prepared" is both tables or neither. A file with a waveform and no
+		// edges is still a whole decode away, which is exactly what the mark in the files pane
+		// promises it is not (PLAN §11c).
+		let half = dir.join("half.wav");
+		std::fs::write(&half, b"only a waveform").expect("writing the third fixture");
+		let half_stamp = stamp(&half).expect("stat of the third fixture");
+		cache.store_peaks(&half, half_stamp, &[0.1]);
+
+		let asked = [(track.clone(), moved), (half.clone(), half_stamp)];
+		assert_eq!(cache.prepared(&asked), HashSet::from([track.clone()]));
+
+		// And the listing's own metadata makes the same stamp a `stat` does, which is the whole
+		// reason marking a folder costs no filesystem work.
+		let listed = std::fs::metadata(&track).expect("stat once more");
+		assert_eq!(stamp_of(listed.len(), listed.modified().ok()), moved);
+
 		cache.clear();
+		assert!(cache.prepared(&asked).is_empty(), "cleared");
 		assert_eq!(cache.peaks(&track, moved), None, "cleared");
 		assert_eq!(cache.duration(&track, moved), None, "cleared");
 		assert_eq!(cache.trim(&track, moved), None, "cleared");

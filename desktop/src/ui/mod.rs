@@ -48,6 +48,24 @@ pub fn visible_rows(scroll: f32, total: usize, row_height: f32, built: usize) ->
 	start..(start + built).min(total)
 }
 
+/// The turning glyph for a row whose file is being decoded (PLAN §11c).
+///
+/// Four frames rather than a braille spinner's eight: the phase comes off the same counter the
+/// players' strips sweep on, which takes 1.2 s to go round, and eight frames of 150 ms read as
+/// a flicker where four of 300 ms read as turning.
+const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+
+/// Which frame of the spinner a phase of a turn lands on.
+///
+/// Clamped rather than trusted: the caller's phase is `[0, 1)` by construction today, and this
+/// indexes an array — a phase of exactly 1 from some later caller would be a panic in a
+/// function whose whole job is to draw a character.
+pub fn spinner(phase: f32) -> &'static str {
+	// `as usize` saturates, so a negative phase and a `NaN` both land on the first frame.
+	let frame = (phase.max(0.0) * SPINNER.len() as f32) as usize;
+	SPINNER[frame.min(SPINNER.len() - 1)]
+}
+
 /// Shorten a string to fit, cutting the middle rather than the end.
 ///
 /// The end of a filename is where the disambiguating part usually lives — the track
@@ -173,6 +191,28 @@ mod tests {
 	/// The files pane's row pitch, which is what these cases are written in. The queues use
 	/// 22 and the arithmetic does not care, which is the point of the parameter.
 	const ROW: f32 = 24.0;
+
+	#[test]
+	fn a_turn_of_the_spinner_shows_every_frame_and_never_indexes_past_the_last() {
+		// Arrange: one whole turn at the rate the sweep counter actually ticks.
+		let turn: Vec<&str> = (0..30).map(|step| spinner(step as f32 / 30.0)).collect();
+
+		// Act / Assert: all four frames appear, and in order — a spinner that skipped one
+		// would still animate, which is why this counts them rather than eyeballing it.
+		assert_eq!(turn[0], SPINNER[0]);
+		let mut seen: Vec<&str> = Vec::new();
+		for frame in turn {
+			if seen.last() != Some(&frame) {
+				seen.push(frame);
+			}
+		}
+		assert_eq!(seen, SPINNER, "each frame once, in order");
+
+		// And the values no caller sends today, because this indexes an array.
+		assert_eq!(spinner(1.0), SPINNER[3], "a whole turn");
+		assert_eq!(spinner(-1.0), SPINNER[0], "backwards");
+		assert_eq!(spinner(f32::NAN), SPINNER[0], "not a number");
+	}
 
 	#[test]
 	fn a_short_list_is_built_whole() {

@@ -117,6 +117,13 @@ pub struct Browser {
 	/// Where a Shift-click measures from: the row the last plain or command click landed on.
 	/// `None` when nothing has been clicked yet, which makes a Shift-click a plain one.
 	anchor: Option<PathBuf>,
+	/// Which rows the cache already answers for in full (PLAN §11c).
+	///
+	/// A *copy* of what the store said, not the store itself: `view` runs every frame and the
+	/// cache is a file on disk. It is replaced wholesale each time a listing is asked about, and
+	/// added to one path at a time as scans land — which is why it can only ever be optimistic
+	/// between two listings, never stale in the other direction.
+	prepared: HashSet<PathBuf>,
 	/// Off by default — a *local* media browser is not usually opened to find `.config`
 	/// (PLAN §9).
 	pub show_hidden: bool,
@@ -155,9 +162,50 @@ impl Browser {
 			self.anchor = None;
 		}
 
+		// Same rule as the selection, for the same reason: a mark that outlived its file would
+		// be an answer about a path the pane is no longer showing. The rows that survive keep
+		// their mark, so a refresh does not blink the whole column off while the store is
+		// asked again.
+		self.prepared.retain(|path| {
+			entries
+				.iter()
+				.any(|entry| &entry.path == path && entry.kind.is_media())
+		});
+
 		self.folder = Some(folder);
 		self.entries = entries;
 		self.error = None;
+	}
+
+	/// The whole listing, filter or no filter — what the cache is asked about.
+	///
+	/// `visible` would have been wrong here: the hidden toggle costs no filesystem work by
+	/// design (PLAN §9), so a listing has to be asked about in full or revealing a dotfile
+	/// would show an unmarked row that is in fact prepared.
+	pub fn entries(&self) -> &[Entry] {
+		&self.entries
+	}
+
+	/// Whether the store already holds everything a load of this file would need (PLAN §11c).
+	pub fn is_prepared(&self, path: &Path) -> bool {
+		self.prepared.contains(path)
+	}
+
+	/// What the store said about this listing, replacing whatever was believed before.
+	pub fn marked_prepared(&mut self, prepared: HashSet<PathBuf>) {
+		self.prepared = prepared;
+	}
+
+	/// One more file worked out, while the pane is showing it.
+	pub fn mark_prepared(&mut self, path: &Path) {
+		if self.entries.iter().any(|entry| entry.path == path) {
+			self.prepared.insert(path.to_path_buf());
+		}
+	}
+
+	/// Nothing is prepared any more — what emptying the store means on screen.
+	pub fn forget_prepared(&mut self) {
+		self.prepared.clear();
 	}
 
 	/// Record a listing that failed. The previous contents stay on screen — cmote's
@@ -539,6 +587,35 @@ mod tests {
 		browser.click(&row("notes.txt"), Click::Replace);
 		assert!(!browser.has_media_selection());
 		assert!(browser.selected_media().is_empty());
+	}
+
+	#[test]
+	fn a_mark_survives_a_refresh_but_not_the_loss_of_its_file() {
+		// Arrange: the store's answer about the listing on screen.
+		let mut browser = pane();
+		browser.marked_prepared(HashSet::from([row("1.mp3"), row("2.mp3")]));
+		assert!(browser.is_prepared(&row("1.mp3")));
+
+		// Act: the folder is read again with one of them gone.
+		browser.show(PathBuf::from("/music"), vec![entry("1.mp3")]);
+
+		// Assert: the row that is still there keeps its mark, so a refresh does not blink the
+		// whole column off while the store is asked again — and the row that went takes its
+		// mark with it, or a folder of new files would inherit the last one's answers.
+		assert!(browser.is_prepared(&row("1.mp3")), "still listed");
+		assert!(!browser.is_prepared(&row("2.mp3")), "gone with its file");
+
+		// Act / Assert: a file worked out while the pane is showing it gets marked, and one the
+		// pane has never heard of is not — a scan of a folder the user has navigated away from
+		// must not mark rows by name in whatever folder they are looking at now.
+		browser.mark_prepared(&row("1.mp3"));
+		browser.mark_prepared(&PathBuf::from("/elsewhere/1.mp3"));
+		assert!(browser.is_prepared(&row("1.mp3")));
+		assert!(!browser.is_prepared(Path::new("/elsewhere/1.mp3")));
+
+		// And emptying the store empties the column.
+		browser.forget_prepared();
+		assert!(!browser.is_prepared(&row("1.mp3")));
 	}
 
 	#[test]

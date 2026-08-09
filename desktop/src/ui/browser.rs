@@ -4,6 +4,8 @@
 //! `widget::table`, because `table` has no row element to carry a click or a selected
 //! background. The layout spike is what settled that; PLAN §9 records why.
 
+use std::path::Path;
+
 use iced::widget::{Space, button, checkbox, column, container, mouse_area, row, scrollable, text};
 use iced::{Element, Fill, Left, Right, Theme};
 
@@ -13,9 +15,18 @@ use crate::deck::DeckId;
 use crate::ui;
 
 /// Fixed column widths, in pixels. The name column takes what is left.
+const MARK_WIDTH: f32 = 14.0;
 const GLYPH_WIDTH: f32 = 18.0;
 const SIZE_WIDTH: f32 = 80.0;
 const DATE_WIDTH: f32 = 92.0;
+
+/// A file the store already holds a full scan of (PLAN §11c). Leading the row rather than
+/// trailing it so the marks line up in a column at the pane's edge, which is what makes a
+/// prepared folder readable without reading any of it.
+///
+/// A character, like the `♪` beside it, and it leans on the same font fallback that one
+/// already does on both targets.
+const PREPARED: &str = "✓";
 
 /// Horizontal padding inside a row. Small: the pane is scanned, so more rows on screen
 /// beats a roomier row. There is no vertical padding any more — the row is a fixed
@@ -41,8 +52,14 @@ pub fn scroll_id() -> iced::advanced::widget::Id {
 }
 
 /// `scanning` is how far a folder scan has got, as `(done, total)`, and `None` when none is
-/// running (PLAN §11b).
-pub fn view(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, Message> {
+/// running (PLAN §11b). `working` is the handful of files a thread is decoding this moment and
+/// `sweep` is how far round the animation is, which together are the spinner (PLAN §11c).
+pub fn view<'a>(
+	browser: &'a Browser,
+	scanning: Option<(usize, usize)>,
+	working: &[&Path],
+	sweep: f32,
+) -> Element<'a, Message> {
 	// Counted rather than stored, because `visible` is the hidden filter and the count has
 	// to be of what is *shown*. One pass over a few thousand `bool`s, against the thousands
 	// of widgets this is here to not build.
@@ -53,7 +70,18 @@ pub fn view(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, 
 		.visible()
 		.skip(range.start)
 		.take(range.len())
-		.map(|entry| file_row(entry, browser.is_selected(&entry.path)));
+		// The mark is worked out here, per built row, rather than stored per entry: `working`
+		// is at most six paths and only the rows on screen are ever asked about.
+		.map(|entry| {
+			let mark = if working.contains(&entry.path.as_path()) {
+				Some(ui::spinner(sweep))
+			} else if browser.is_prepared(&entry.path) {
+				Some(PREPARED)
+			} else {
+				None
+			};
+			file_row(entry, browser.is_selected(&entry.path), mark)
+		});
 
 	// The rows above and below, as their height and nothing else.
 	let above = Space::new().height(range.start as f32 * ROW_HEIGHT);
@@ -168,8 +196,28 @@ fn preparation(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'
 
 /// One file. Single click selects, double click loads it into whichever player is idle —
 /// the same rule an unaimed OS drop uses (PLAN §10).
-fn file_row(entry: &Entry, selected: bool) -> Element<'_, Message> {
+///
+/// `mark` is the leading column: a turning glyph while a thread is on this file, a `✓` once the
+/// store holds a full scan of it, and nothing at all otherwise (PLAN §11c). One column for both,
+/// because they are the two ends of the same sentence — this file is being worked out, this file
+/// has been — and a row is only ever in one of those states.
+fn file_row<'a>(
+	entry: &'a Entry,
+	selected: bool,
+	mark: Option<&'static str>,
+) -> Element<'a, Message> {
+	// Green for a file that is ready, the same green the waveform draws the music's edges in;
+	// the spinner keeps the row's own colour, since it is saying "wait", not "good".
+	let prepared = mark == Some(PREPARED);
+	let mark = text(mark.unwrap_or(""))
+		.size(12)
+		.width(MARK_WIDTH)
+		.style(move |theme: &Theme| iced::widget::text::Style {
+			color: prepared.then(|| theme.extended_palette().success.base.color),
+		});
+
 	let cells = row![
+		mark,
 		text(entry.kind.glyph()).size(13).width(GLYPH_WIDTH),
 		text(&entry.name).size(13).width(Fill),
 		text(ui::format_size(entry.size))

@@ -212,6 +212,12 @@ pub struct Facts {
 	pub path: PathBuf,
 	pub duration: Option<Duration>,
 	pub trim: Option<Trim>,
+	/// Whether this job left the store holding everything a load would need (PLAN §11c).
+	///
+	/// The same shape as `trim` and for the same reason: `false` means *this job did not work
+	/// it out*, never "and it is not prepared". A queue measurement only reads, so it says
+	/// `false` and takes no mark away — the listing's own question is what removes one.
+	pub prepared: bool,
 }
 
 /// What the duplicate warning answered (PLAN §9a).
@@ -256,6 +262,13 @@ struct Scanning {
 	done: usize,
 	/// How many threads are out right now, which is what the fan-out is capped against.
 	running: usize,
+	/// *Which* files those threads are on, so the pane can put a spinner on their rows
+	/// (PLAN §11c).
+	///
+	/// A list rather than a range of `files`, because the answers come back out of order: the
+	/// four in the air are never the four between `done` and `next`. At most `SCAN_JOBS` long,
+	/// which is why a `Vec` and a linear scan are the whole of it.
+	busy: Vec<PathBuf>,
 }
 
 impl Scanning {
@@ -364,6 +377,10 @@ pub enum Message {
 	ReconnectPressed,
 	/// A directory listing came back off the GUI thread.
 	FilesListed(PathBuf, Result<Vec<Entry>, String>),
+	/// Which files of a listing the store already answers for in full (PLAN §11c). The folder
+	/// comes back with the answer for the same reason the listing does: to be thrown away if
+	/// the user has moved on since.
+	Prepared(PathBuf, HashSet<PathBuf>),
 	FoldersListed(PathBuf, Result<Vec<PathBuf>, String>),
 	/// A track's scan finished. Carries the path it was started for, because a player can
 	/// be given another track while the scan runs (PLAN §14a).
@@ -673,7 +690,11 @@ impl Clecta {
 
 		// The scanning animation, on the same "only while it is needed" rule as the two
 		// above. Nothing animates once both scans have landed.
-		let sweep = if self.decks.iter().any(|deck| deck.scanning) {
+		//
+		// It drives two things now — the band crossing a player's strip and the spinner on
+		// every files-pane row a thread is decoding (PLAN §11c) — off one counter, so the whole
+		// window turns at the same rate rather than at two rates that beat against each other.
+		let sweep = if self.decks.iter().any(|deck| deck.scanning) || self.scanning.is_some() {
 			time::every(SWEEP).map(|_| Message::Sweep)
 		} else {
 			Subscription::none()
@@ -1077,6 +1098,7 @@ impl Clecta {
 				match result {
 					Ok(entries) => {
 						self.browser.show(folder, entries);
+						let asking = self.ask_prepared();
 						// A listing that arrives is the moment the new folder becomes real,
 						// so it goes to disk now instead of in two seconds — quitting
 						// straight after navigating is exactly when the throttle loses it.
@@ -1090,11 +1112,21 @@ impl Clecta {
 							self.settings().save();
 							self.dirty = false;
 						}
+						return asking;
 					}
 					Err(error) => {
 						self.notice = error.clone();
 						self.browser.fail(error);
 					}
+				}
+			}
+
+			// The store's answer is the authority: it *replaces* what the pane believed rather
+			// than adding to it, which is what makes an optimistic mark self-correcting — a scan
+			// that could not be stored is marked here and unmarked by the next listing.
+			Message::Prepared(folder, prepared) => {
+				if self.browser.folder.as_deref() == Some(folder.as_path()) {
+					self.browser.marked_prepared(prepared);
 				}
 			}
 
@@ -1200,6 +1232,11 @@ impl Clecta {
 				// the *file*, whatever is loaded in the player by now (PLAN §14c).
 				let trim = result.as_ref().ok().and_then(|scan| scan.trim);
 				self.remember(&path, trim);
+				if result.is_ok() {
+					// Loading a track prepares it, so its row gets the same mark the folder scan
+					// would have given it (PLAN §11c) — one rule, whoever asked for the decode.
+					self.browser.mark_prepared(&path);
+				}
 
 				// A scan takes a moment, and a player can be given a second track inside it.
 				// An array that no longer belongs to what is loaded is dropped, or it would
@@ -1268,6 +1305,7 @@ impl Clecta {
 						next: 0,
 						done: 0,
 						running: 0,
+						busy: Vec::new(),
 					});
 					return self.scan_step();
 				}
@@ -1282,6 +1320,9 @@ impl Clecta {
 				if let Some(scanning) = self.scanning.as_mut() {
 					scanning.done += 1;
 					scanning.running -= 1;
+					// The row stops spinning here rather than when the next file goes out, so a
+					// file that is slow to decode is the one still turning.
+					scanning.busy.retain(|path| path != &facts.path);
 				}
 				return self.scan_step();
 			}
@@ -1331,6 +1372,10 @@ impl Clecta {
 			// the *disk*, so the next launch works everything out again — which is what a clean
 			// start means.
 			Message::CacheCleared => {
+				// The marks go, though — they are a report of what is on disk, and there is
+				// nothing on disk any more (PLAN §11c). Leaving them would be the one place in
+				// the app where the screen says work is saved that is not.
+				self.browser.forget_prepared();
 				self.notice = "cache cleared".to_string();
 			}
 		}
@@ -1539,6 +1584,9 @@ impl Clecta {
 	/// row that has been removed in the meantime simply matches nothing.
 	fn learned(&mut self, facts: &Facts) {
 		self.remember(&facts.path, facts.trim);
+		if facts.prepared {
+			self.browser.mark_prepared(&facts.path);
+		}
 		for queue in &mut self.queues {
 			queue.measured(&facts.path, facts.duration);
 		}
@@ -1579,10 +1627,64 @@ impl Clecta {
 			let path = scanning.files[scanning.next].clone();
 			scanning.next += 1;
 			scanning.running += 1;
+			scanning.busy.push(path.clone());
 			tasks.push(scan_file(path, self.cache.clone()));
 		}
 
 		Task::batch(tasks)
+	}
+
+	/// Ask the store which of the listed files it already answers for in full (PLAN §11c).
+	///
+	/// Off the GUI thread like every other touch of the cache, and it costs no `stat`: the rows
+	/// already carry the size and the modified time a stamp is made of, because the pane shows
+	/// them. Media only — nothing ever scans a `.txt`, so asking about one is a lookup that can
+	/// only miss.
+	///
+	/// A thread that dies answers "nothing is prepared", which is the right way round to be
+	/// wrong: the column goes blank rather than promising work that may not be there.
+	fn ask_prepared(&self) -> Task<Message> {
+		let Some(folder) = self.browser.folder.clone() else {
+			return Task::none();
+		};
+
+		let files: Vec<(PathBuf, cache::Stamp)> = self
+			.browser
+			.entries()
+			.iter()
+			.filter(|entry| entry.kind.is_media())
+			.map(|entry| {
+				(
+					entry.path.clone(),
+					cache::stamp_of(entry.size, entry.modified),
+				)
+			})
+			.collect();
+
+		let cache = self.cache.clone();
+		off_thread(
+			move || cache.prepared(&files),
+			move |prepared| Message::Prepared(folder.clone(), prepared.unwrap_or_default()),
+		)
+	}
+
+	/// Every file a thread is decoding this moment, whoever asked for it (PLAN §11c).
+	///
+	/// One list from two places on purpose: a folder scan and a player's own waveform scan are
+	/// the same work, so a row spins for either. Short — at most `SCAN_JOBS` plus the two
+	/// players — which is what makes a linear search per built row the whole of the lookup.
+	fn working(&self) -> Vec<&Path> {
+		let preparing = self
+			.scanning
+			.iter()
+			.flat_map(|scanning| scanning.busy.iter());
+		let loading = self
+			.decks
+			.iter()
+			.filter(|deck| deck.scanning)
+			.filter_map(|deck| deck.track.as_ref().map(|track| &track.path));
+
+		preparing.chain(loading).map(PathBuf::as_path).collect()
 	}
 
 	/// May these tracks go into a queue — asking first about any that are already in one
@@ -1722,6 +1824,7 @@ impl Clecta {
 							path: path.clone(),
 							duration: None,
 							trim: None,
+							prepared: false,
 						})
 						.collect()
 				}))
@@ -2080,6 +2183,8 @@ impl Clecta {
 					self.scanning
 						.as_ref()
 						.map(|scanning| (scanning.done, scanning.files.len())),
+					&self.working(),
+					self.phase(),
 				),
 				Section::Tree => ui::tree::view(&self.tree, self.browser.folder.as_deref()),
 			};
@@ -2186,14 +2291,21 @@ impl Clecta {
 		.into()
 	}
 
+	/// How far round the scanning animation is, as a fraction of one turn.
+	///
+	/// One phase for everything that turns — both players' strips and every spinning row — so
+	/// two scans running at once move together rather than drifting apart into something that
+	/// looks like a rendering fault.
+	fn phase(&self) -> f32 {
+		(self.sweep % SWEEP_STEPS) as f32 / SWEEP_STEPS as f32
+	}
+
 	/// One player, made a drop target only while an in-app drag is in flight.
 	///
 	/// Attached conditionally because `mouse_area` reports every crossing of the panel,
 	/// dragging or not, and outside a drag there is nothing to do with that.
 	fn deck_view(&self, id: DeckId, ring: Option<DeckId>) -> Element<'_, Message> {
-		// One phase for both players, so two scans running at once sweep together rather
-		// than drifting apart into something that looks like a rendering fault.
-		let sweep = (self.sweep % SWEEP_STEPS) as f32 / SWEEP_STEPS as f32;
+		let sweep = self.phase();
 		// Looked up by path rather than kept on the `Deck`, because the same answer is wanted
 		// for tracks that are in no player at all (PLAN §14c).
 		let trim = self.decks[id.index()]
@@ -2506,10 +2618,19 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 	let asked = path.clone();
 
 	off_thread(
-		move || Facts {
-			trim: cached_scan(&cache, &path).ok().and_then(|scan| scan.trim),
-			duration: cached_duration(&cache, &path),
-			path,
+		move || {
+			let scan = cached_scan(&cache, &path);
+			Facts {
+				// `ponytail:` a scan that worked is taken to be a scan that was *stored*, which
+				// is one case out: a file that cannot be stat'd is deliberately never cached
+				// (`cached_scan`), so its row is marked prepared and is not. Self-correcting —
+				// the next listing asks the store and takes the mark straight back off — and the
+				// alternative is a second lookup per file to learn what the decode already knew.
+				prepared: scan.is_ok(),
+				trim: scan.ok().and_then(|scan| scan.trim),
+				duration: cached_duration(&cache, &path),
+				path,
+			}
 		},
 		move |facts| {
 			// A file that would not decode still counts as done, or the progress would stop on
@@ -2518,6 +2639,7 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 				path: asked.clone(),
 				duration: None,
 				trim: None,
+				prepared: false,
 			}))
 		},
 	)
@@ -2567,6 +2689,9 @@ fn cached_facts(cache: &Cache, path: &Path) -> Facts {
 		trim: cache::stamp(path)
 			.and_then(|stamp| cache.trim(path, stamp))
 			.flatten(),
+		// This job never *prepares* anything — it reads what is there. Saying so here is what
+		// stops a queue edit taking marks off rows the store is perfectly happy about.
+		prepared: false,
 		path: path.to_path_buf(),
 	}
 }
@@ -2664,6 +2789,7 @@ mod tests {
 			next: 0,
 			done: 0,
 			running: 0,
+			busy: Vec::new(),
 		};
 
 		// Act / Assert: it fills the fan-out, and never more than the fan-out.
@@ -2697,6 +2823,7 @@ mod tests {
 			next: 4,
 			done: 0,
 			running: 4,
+			busy: (0..4).map(|n| PathBuf::from(format!("{n}.mp3"))).collect(),
 		};
 
 		// Act: Stop, which cuts the list down to what has gone out rather than dropping the
@@ -2707,12 +2834,19 @@ mod tests {
 		assert_eq!(scanning.slots(), 0, "nothing more goes out");
 		assert!(!scanning.is_over(), "four are still decoding");
 
-		for _ in 0..4 {
+		// Out of order, which is the case the busy list exists for: the four in the air are
+		// never `files[done..next]`, so a row keeps spinning until *its own* file reports
+		// (PLAN §11c).
+		for n in [2, 0, 3, 1] {
+			let reported = PathBuf::from(format!("{n}.mp3"));
 			scanning.running -= 1;
 			scanning.done += 1;
+			scanning.busy.retain(|path| path != &reported);
+			assert_eq!(scanning.busy.len(), scanning.running, "one row each");
 		}
 		assert!(scanning.is_over(), "the last one landed");
 		assert_eq!(scanning.done, scanning.files.len(), "counted once each");
+		assert!(scanning.busy.is_empty(), "nothing still spinning");
 	}
 
 	#[test]

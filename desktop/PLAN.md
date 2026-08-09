@@ -1724,6 +1724,98 @@ what a clean start means: the next launch works everything out again.
 
 ---
 
+## 11c. Saying which files are ready (`cache.rs`, `browser.rs`, `ui/browser.rs`)
+
+§11b built the work and a count of it. What it did not build was an answer to the question the
+count makes people ask: *which* files. "Prepared 412 files" is a receipt for a folder, not for a
+track — and a fortnight later, after a relaunch, there is no receipt at all. The store knows,
+and nothing on screen said so.
+
+So the files pane grew one column, on the left, before the `♪`:
+
+| Column | Meaning |
+| --- | --- |
+| `◐ ◓ ◑ ◒`, turning | a thread is decoding this file **now** |
+| `✓`, green | the store holds a full scan of **this version** of the file |
+| blank | neither |
+
+One column for both, because they are the two ends of one sentence — this file is being worked
+out, this file has been — and a row is never in both states at once. A leading column rather
+than a trailing one so the marks line up at the pane's edge, which is what makes a prepared
+folder readable without reading any of it.
+
+### "Prepared" is both tables or neither
+
+The mark tests exactly what `cached_scan` tests when it decides it has a hit: the waveform *and*
+the music's edges, for this exact stamp (§11a). Not "there is an entry for this file" — a track
+the queues merely measured the length of has a row in `durations` and is still a third of a
+second of decoding away. A mark that included it would be true about the database and a lie
+about the thing the user cares about, which is whether loading this track will be instant.
+
+That also makes the column a picture of §11a's staleness rule: edit a file and its mark goes,
+because the stamp moved and the store no longer answers for what is on disk.
+
+### Asked once per listing, off the thread, for no `stat` at all
+
+`view` runs every frame; the store is a file. So the pane holds a **copy** of the answer, and
+the answer is asked for once — when a listing lands, on a thread, like every other touch of the
+cache.
+
+The nice part is that it costs no filesystem work. A stamp is a size and a modified time, and
+every row in the pane is *showing* both, because that is what the listing read them for. So
+`cache::stamp_of` builds the same stamp `cache::stamp` would have stat'd for, and a folder of
+four hundred files is asked about with zero `stat` calls. `stamp` is now written in terms of
+`stamp_of` rather than beside it, because two functions computing "the same" stamp differently
+would be a bug that looks like a cold cache.
+
+The whole listing is asked about, not the visible rows: the hidden filter costs no filesystem
+work by design (§9), so revealing a dotfile has to reveal its mark with it.
+
+### Optimistic between two listings, never stale the other way
+
+Marks are added as work lands — a folder scan reports a file, or a track is loaded into a player
+and scanned, which is the same work and gets the same mark. That is one rule for the whole
+window: *a file with a thread on it spins, a file the store holds spins no more and gets a tick,
+whoever asked for the decode.*
+
+Adding on the way is one `ponytail:`-marked approximation: a successful scan is taken to be a
+**stored** scan, and a file that cannot be stat'd is deliberately never cached, so its row is
+marked and should not be. The alternative was a second store lookup per file to learn what the
+decode had already established. It is self-correcting, because the listing's own question
+*replaces* the set rather than adding to it — so the next refresh takes a wrong mark straight
+back off, and a job that dies answers "nothing is prepared", which is the right way round to be
+wrong. **Clear cache** empties the column for the same reason: it is a report of what is on
+disk, and there is nothing on disk.
+
+A refresh keeps the marks of the rows that survive it, rather than blinking the whole column off
+while the store is asked again — the same `retain` the selection uses (§9a), for the same
+reason. A row that the new listing lost takes its mark with it, or a folder of new files would
+inherit the last one's answers.
+
+### The spinner is one counter, already there
+
+The turning glyph is driven by the same counter that sweeps the band across a player's strip
+(§14a) — one phase for the whole window, so two scans running at once turn together instead of
+drifting apart into something that looks like a rendering fault. Its subscription grew one
+clause and no timer.
+
+Four frames rather than a braille spinner's eight, because that counter takes 1.2 s to go round:
+eight frames of 150 ms read as a flicker where four of 300 ms read as turning.
+
+Which files are turning has to be **kept**, not derived. The four in the air are never
+`files[done..next]` — answers come back out of order — so `Scanning` carries the paths as well
+as the counts, and a row keeps spinning until its own file reports rather than until the next
+one goes out.
+
+### What did not get marks
+
+The three queues. It was considered and declined: a queue row is a name and a length in a narrow
+list, the readiness of a queued track is already visible on the player it is waiting behind, and
+it would be a fourth place the set has to be kept right. The files pane is where files are
+chosen, so the files pane is where they are marked.
+
+---
+
 ## 12. Testing
 
 Rust's built-in `#[test]` / `#[cfg(test)]`, AAA pattern, no framework — same as cmote.
@@ -1763,7 +1855,11 @@ otherwise pure; anything needing a device or a real folder is manual.
   — it comes back in **row order** however it was clicked, since that is the order the actions
   run in, and a `.txt` can be selected but is never handed to a player. And the refresh case,
   rewritten: a listing that lost one of two selected rows keeps the other highlighted rather
-  than clearing both.
+  than clearing both. The prepared marks (§11c) follow the same rule and get the same test in
+  one: a refresh keeps the mark of a row it still lists and drops the one it lost, a file worked
+  out while the pane shows it is marked, a path the pane has never heard of is *not* — so a scan
+  of a folder the user navigated away from cannot mark rows by name in the folder they are
+  looking at now — and emptying the store empties the column.
 - **`deck.rs`** — the transport state machine as a pure `transition(state, event)`, so
   every edge is checked with no audio device in the room.
 - **Drop policy** (`deck.rs`) — `drop_outcome(...) -> DropOutcome` pulled free of `self`,
@@ -1876,7 +1972,11 @@ otherwise pure; anything needing a device or a real folder is manual.
   still names real rows, which is the `as usize` saturation this leans on being pinned rather
   than assumed. One case exists only because the function is shared: the same offset names a
   different row at a pitch of 22 than at 24, which is what a hard-coded constant in a shared
-  helper would have got quietly wrong.
+  helper would have got quietly wrong. `spinner(phase)` is the other pure thing here (§11c):
+  one whole turn at the rate the sweep counter actually ticks shows **all four frames, in
+  order** — a spinner that skipped one would still animate, which is why this counts them —
+  and the values no caller sends today are pinned too, because this indexes an array and a
+  phase of exactly 1 would be a panic inside a `draw`.
 - **`cache.rs`** — two halves, and both are needed (§11a). The encoding is pure and is checked
   without a database: a record that survives a round trip *exactly*, since a cached waveform is
   supposed to be the same array a scan produced; a stamp that does not match reading as a miss,
@@ -1893,7 +1993,11 @@ otherwise pure; anything needing a device or a real folder is manual.
   store still usable, since a cleared cache is a cache and not a corpse (§11b). The trim
   encoding gets its own pure test for the halves that matter: "scanned, and this file is
   silent" told apart from "never scanned", and **half a trim** — eight bytes where sixteen
-  belong — thrown away rather than read as a start with no end.
+  belong — thrown away rather than read as a start with no end. The same pass now also asks
+  what the files pane asks (§11c): `prepared` names the file that has both tables and not the
+  one that has only a waveform, and a listing's own size and modified time build the *same*
+  stamp a `stat` does — the equality the whole no-filesystem-work claim rests on, and a silent
+  drift there would show as a folder that is never marked and never explains why.
 - **`ui/playlist.rs`** — `running_time`, which is the only thing in that file that is not
   widgets: how many tracks, how long they run, and the `+` that says the total is a floor
   rather than a figure. An empty list says *nothing at all* rather than `0 · 0:00`, because
@@ -1936,7 +2040,10 @@ otherwise pure; anything needing a device or a real folder is manual.
   never exceeded, every file goes out exactly once, and no thread is left unaccounted for. The
   other is **Stop**: nothing more goes out, the scan is not over until the four already
   decoding report, and each of them is counted once — the case that would otherwise underflow
-  `running` the moment a second scan was started on top of a cancelled one.
+  `running` the moment a second scan was started on top of a cancelled one. That second test
+  now reports its four **out of order**, which is the case the busy list exists for (§11c): the
+  files in the air are never `files[done..next]`, so the assertion is that exactly one row stops
+  spinning per answer and none is left turning at the end.
 - **`audio.rs`** — one test, and the only one this module can have: everything else here
   needs an output device. A *scan* does not, so the decode path is checked for real, from a
   file on disk to the array the widget draws. The fixture is generated rather than
@@ -2512,6 +2619,11 @@ around.
 | Q32 | How a duplicate warning survives a batch | **One dialog, three answers.** Per-file asking would be three modals for one button press; and once the question names a count, *all* and *none* are not enough — nineteen good tracks and one repeat wants the middle answer. Yes queues everything, No queues only what is not already somewhere, Cancel does nothing, so Cancel still means Cancel. The answer is an `Admission` rather than a filtered list because the `←` / `→` buttons must filter rows and tracks by the same test. Platform Yes/No/Cancel with the meanings in the text, not rfd's custom labels, which need a Cargo feature that is off by default and work on Windows only with it | §9a, §7a |
 | Q33 | Whether a press may still collapse a selection | **Not on the press, and for now not at all.** A press has to arm the drag as well as select (§10), so collapsing to one row on a plain press would destroy the selection the drag was about to carry. A file manager collapses on *release* instead, once no drag has happened; clecta does not, and the gap is marked rather than filled — narrowing five rows to one means clicking elsewhere or pressing Escape, and the fix is one remembered path and a branch | §9a, §10 |
 
+| Q34 | What a row's `✓` promises | **A full scan on disk for this exact version of the file — the same test a load uses to skip decoding.** Not "there is an entry for this path": a track the queues measured the length of has a row in `durations` and is still a third of a second of decoding away, so counting it would make the mark true about the database and false about the only thing anyone reads it for. Both tables or neither, which also makes the column a live picture of §11a's staleness rule — edit a file and its mark goes, because the stamp moved | §11c, §11a |
+| Q35 | How the pane learns what the store holds, without touching disk on every frame | **Asked once per listing, on a thread, for zero `stat` calls.** A copy of the answer rather than the store itself, because `view` runs every frame and the store is a file. The nice part is free: a stamp is a size and a modified time, and every row is already *showing* both — so `stamp_of` builds from what the listing read, and `stamp` is now written in terms of it rather than beside it, since two functions computing "the same" stamp differently would be a bug that looks like a cold cache. The whole listing is asked about, not the visible rows, because §9's hidden filter costs no filesystem work and revealing a dotfile has to reveal its mark | §11c, §11a, §9 |
+| Q36 | Whether a mark may be added without asking the store | **Yes, optimistically, because the listing's answer replaces it.** A scan that succeeded is taken to be a scan that was stored, which is one case out — a file that cannot be stat'd is deliberately never cached — against a second lookup per file to learn what the decode already established. It is safe only because the set is *replaced* by the next listing rather than added to, so a wrong mark lives until the next refresh and no longer; a dead job answers "nothing prepared", which is the right way round to be wrong; and **Clear cache** empties the column, since it is a report of what is on disk. A `ponytail:` names it | §11c |
+| Q37 | Which files spin, and what drives them | **Any file with a thread on it, off the counter that was already turning.** One rule for the whole window: a folder scan and a player's own waveform scan are the same work, so a row spins for either and gets the same `✓` after. The phase is §14a's sweep counter — one for everything that turns, or two scans at once drift apart into what looks like a rendering fault — and its subscription grew one clause and no timer. *Which* files are turning has to be kept rather than derived: answers come back out of order, so the four in the air are never `files[done..next]` | §11c, §11b, §14a |
+
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
 lives in `app.rs` and `ui/browser.rs`, and the reasoning is in §6 and §9. **Q7 is the one
@@ -2524,7 +2636,7 @@ size were the easy part.
 Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
 the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
 one use of the window's height that was enough to keep the defect alive. Both were settled
-the same way, by looking at a running window. That is now four of the thirty-three (Q7, Q10,
+the same way, by looking at a running window. That is now four of the thirty-seven (Q7, Q10,
 Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
 and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
 
