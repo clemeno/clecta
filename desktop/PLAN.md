@@ -651,6 +651,24 @@ it — exactly as it does for the **Load…** dialog (§10), and exactly what a 
 in-app confirmation bar would cost its own state and its own two messages, and is worth
 building the day this has to say more than yes or no.
 
+macOS says so out loud, once per dialog, and the line is worth writing down because it reads
+like a defect and is not one:
+
+```
+CFUserNotificationDisplayAlert: called from main application thread, will block waiting for a
+response.
+```
+
+That is `rfd` taking its **parentless** path. Given a parent window it builds an `NSAlert`
+owned by the app; given none it asks `CFUserNotification`, which is another process drawing
+the alert while this one waits — hence both halves of the warning, the blocking one being the
+shortcut above, already taken deliberately. iced lends a window handle inside `window::run`
+alone, which is a `Task`: **Clear cache** could take one, but `admits` is asked in the middle
+of three queue edits and hands its answer back to the code that asked, so parenting *it* means
+three continuations and a queue that can change while the question is open. Parenting one and
+not the other would trade a log line for two dialogs that do not look alike, so both stay as
+they are (Q38).
+
 ### Playing a queued track now
 
 A **double click** on a queued row loads it into a player immediately, taking it out of the
@@ -2623,6 +2641,7 @@ around.
 | Q35 | How the pane learns what the store holds, without touching disk on every frame | **Asked once per listing, on a thread, for zero `stat` calls.** A copy of the answer rather than the store itself, because `view` runs every frame and the store is a file. The nice part is free: a stamp is a size and a modified time, and every row is already *showing* both — so `stamp_of` builds from what the listing read, and `stamp` is now written in terms of it rather than beside it, since two functions computing "the same" stamp differently would be a bug that looks like a cold cache. The whole listing is asked about, not the visible rows, because §9's hidden filter costs no filesystem work and revealing a dotfile has to reveal its mark | §11c, §11a, §9 |
 | Q36 | Whether a mark may be added without asking the store | **Yes, optimistically, because the listing's answer replaces it.** A scan that succeeded is taken to be a scan that was stored, which is one case out — a file that cannot be stat'd is deliberately never cached — against a second lookup per file to learn what the decode already established. It is safe only because the set is *replaced* by the next listing rather than added to, so a wrong mark lives until the next refresh and no longer; a dead job answers "nothing prepared", which is the right way round to be wrong; and **Clear cache** empties the column, since it is a report of what is on disk. A `ponytail:` names it | §11c |
 | Q37 | Which files spin, and what drives them | **Any file with a thread on it, off the counter that was already turning.** One rule for the whole window: a folder scan and a player's own waveform scan are the same work, so a row spins for either and gets the same `✓` after. The phase is §14a's sweep counter — one for everything that turns, or two scans at once drift apart into what looks like a rendering fault — and its subscription grew one clause and no timer. *Which* files are turning has to be kept rather than derived: answers come back out of order, so the four in the air are never `files[done..next]` | §11c, §11b, §14a |
+| Q38 | What to do about `CFUserNotificationDisplayAlert` in the macOS log | **Nothing, and write down why.** It is `rfd`'s parentless path: no parent window means another process draws the alert while this one waits, which is the modal shortcut §7a already took, said out loud by the OS. iced lends a window handle inside `window::run` alone, so **Clear cache** could be parented but `admits` — asked in the middle of three queue edits, answering the code that asked — could not without three continuations and a queue that may change while the question is open. Parenting one of the two would trade a log line for two dialogs that do not look alike | §7a, §11a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
@@ -2636,7 +2655,7 @@ size were the easy part.
 Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
 the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
 one use of the window's height that was enough to keep the defect alive. Both were settled
-the same way, by looking at a running window. That is now four of the thirty-seven (Q7, Q10,
+the same way, by looking at a running window. That is now four of the thirty-eight (Q7, Q10,
 Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
 and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
 

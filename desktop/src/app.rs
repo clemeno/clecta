@@ -1347,7 +1347,10 @@ impl Clecta {
 			Message::ClearCachePressed => {
 				// Asked first, with the same modal the duplicate warning uses: this is the one
 				// button in the app that throws work away, and it is next to the one that makes
-				// it. `ponytail:` modal, so the playhead stops while it is open (PLAN §7a).
+				// it. `ponytail:` modal, so the playhead stops while it is open; and parentless,
+				// so macOS draws it from another process and logs
+				// `CFUserNotificationDisplayAlert: called from main application thread` — the
+				// warning the shortcut earns rather than a fault (PLAN §7a).
 				let confirmed = rfd::MessageDialog::new()
 					.set_level(rfd::MessageLevel::Warning)
 					.set_title("Clear the cache")
@@ -1709,7 +1712,8 @@ impl Clecta {
 	/// buttons might be unlabelled on the one target nobody has run is not worth three words.
 	///
 	/// A modal, which blocks the GUI thread while it is open — the playhead stops with it,
-	/// exactly as it does for the **Load…** dialog.
+	/// exactly as it does for the **Load…** dialog. Parentless, like every dialog in the app,
+	/// which is what puts `CFUserNotificationDisplayAlert` in the macOS log (PLAN §7a).
 	fn admits(&self, items: &[playlist::Item], duplicates: &[(usize, ListId)]) -> Admission {
 		if duplicates.is_empty() {
 			return Admission::All;
