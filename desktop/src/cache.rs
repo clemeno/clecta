@@ -22,13 +22,27 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
+use crate::waveform::Trim;
+
 /// One table per kind of fact, keyed by the same file. Separate rather than one record with
 /// optional fields because they are worked out at different moments by different jobs — a
 /// waveform when a track is loaded, a length when it is queued — and a table each means a
 /// write touches only what it knows. It is also where the *next* kind of fact goes: a table,
 /// not a migration.
+///
+/// `trims` is that promise being kept, and it is the interesting case: the music's two edges
+/// (PLAN §14c) are worked out by the *same* pass as the waveform, so they could have been two
+/// more fields on that record. A table of their own costs one lookup and buys two things —
+/// every waveform already on disk stays readable, where a changed layout would have needed
+/// `FORMAT` bumped and every one of them rescanned, and a handover that wants a track's start
+/// reads sixteen bytes rather than eight kilobytes of amplitudes it has no use for.
 const WAVEFORMS: TableDefinition<&str, &[u8]> = TableDefinition::new("waveforms");
 const DURATIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("durations");
+const TRIMS: TableDefinition<&str, &[u8]> = TableDefinition::new("trims");
+
+/// All of them, for the two operations that are about the store rather than about a file:
+/// pruning what the library no longer has, and emptying it on request.
+const TABLES: [TableDefinition<&str, &[u8]>; 3] = [WAVEFORMS, DURATIONS, TRIMS];
 
 /// The record layout's version, in the first byte of every value.
 ///
@@ -134,6 +148,49 @@ impl Cache {
 		self.write(DURATIONS, path, stamp, &encode_duration(length));
 	}
 
+	/// Where the music inside a track starts and stops, if it has already been scanned for
+	/// (PLAN §14c).
+	///
+	/// Two layers again, and for the same reason as a duration: *was this scanned* on the
+	/// outside, *did the file have any music in it* on the inside. A file of pure silence is
+	/// worth remembering as such, or every launch would decode it again to be told the same
+	/// thing — and the two answers mean different things to the handover, which trims to a
+	/// known start and leaves an unknown one at 0:00.
+	pub fn trim(&self, path: &Path, stamp: Stamp) -> Option<Option<Trim>> {
+		let payload = self.read(TRIMS, path, stamp)?;
+		decode_trim(&payload)
+	}
+
+	pub fn store_trim(&self, path: &Path, stamp: Stamp, trim: Option<Trim>) {
+		self.write(TRIMS, path, stamp, &encode_trim(trim));
+	}
+
+	/// Empty the store — every table, every file.
+	///
+	/// The one destructive thing in this module, and it is safe for the reason the whole file
+	/// rests on: this is a cache. What it costs is the scans it was holding, which is time and
+	/// nothing else, and that is exactly what the button asking for it means by a clean start.
+	///
+	/// The tables are dropped rather than walked: redb takes the whole table out in one commit
+	/// and recreates it empty on the next write, where a `retain` that kept nothing would still
+	/// be one pass over every entry.
+	pub fn clear(&self) {
+		let Some(db) = self.db.as_ref() else {
+			return;
+		};
+		let Ok(transaction) = db.begin_write() else {
+			return;
+		};
+
+		for definition in TABLES {
+			// A table that was never created is not an error: nothing has been stored in it,
+			// which is the state being asked for.
+			let _ = transaction.delete_table(definition);
+		}
+
+		let _ = transaction.commit();
+	}
+
 	/// Drop every entry whose file is no longer there, and say how many went.
 	///
 	/// The whole growth policy, and it needs no number in it: the cache is bounded by the
@@ -148,7 +205,7 @@ impl Cache {
 		};
 
 		let mut dropped = 0;
-		for definition in [WAVEFORMS, DURATIONS] {
+		for definition in TABLES {
 			let Ok(mut table) = transaction.open_table(definition) else {
 				continue;
 			};
@@ -288,6 +345,35 @@ fn encode_duration(length: Option<Duration>) -> Vec<u8> {
 	}
 }
 
+/// Two lengths in nanoseconds, or **no bytes at all** for a file with no music in it — the
+/// same shape as a duration, and told apart from "never scanned" the same way.
+fn encode_trim(trim: Option<Trim>) -> Vec<u8> {
+	match trim {
+		Some(trim) => {
+			let mut out = Vec::with_capacity(16);
+			out.extend((trim.start.as_nanos() as u64).to_le_bytes());
+			out.extend((trim.end.as_nanos() as u64).to_le_bytes());
+			out
+		}
+		None => Vec::new(),
+	}
+}
+
+fn decode_trim(payload: &[u8]) -> Option<Option<Trim>> {
+	match payload.len() {
+		0 => Some(None),
+		16 => {
+			let start = u64::from_le_bytes(payload[..8].try_into().ok()?);
+			let end = u64::from_le_bytes(payload[8..].try_into().ok()?);
+			Some(Some(Trim {
+				start: Duration::from_nanos(start),
+				end: Duration::from_nanos(end),
+			}))
+		}
+		_ => None,
+	}
+}
+
 fn decode_duration(payload: &[u8]) -> Option<Option<Duration>> {
 	match payload.len() {
 		0 => Some(None),
@@ -378,6 +464,28 @@ mod tests {
 	}
 
 	#[test]
+	fn a_trim_and_the_absence_of_music_are_different_answers() {
+		// Arrange / Act / Assert: the same two-layer rule the durations follow. "Scanned, and
+		// there is no music in this file" has to be told from "never scanned", or a track of
+		// silence is decoded again on every launch.
+		let trim = Trim {
+			start: Duration::from_millis(1_200),
+			end: Duration::from_millis(214_800),
+		};
+		assert_eq!(decode_trim(&encode_trim(Some(trim))), Some(Some(trim)));
+		assert_eq!(
+			decode_trim(&encode_trim(None)),
+			Some(None),
+			"scanned, and silent throughout"
+		);
+
+		// A payload of the wrong shape is neither — including one that is exactly half a
+		// trim, which would otherwise read as a start with no end.
+		assert_eq!(decode_trim(&[0; 8]), None, "half a trim");
+		assert_eq!(decode_trim(&[1, 2, 3]), None);
+	}
+
+	#[test]
 	fn a_malformed_waveform_is_not_half_a_waveform() {
 		// Arrange / Act / Assert: an array of floats is four bytes a column, and a payload
 		// that is not a whole number of them is a record to throw away rather than to
@@ -439,6 +547,28 @@ mod tests {
 			cache.peaks(&orphan, orphan_stamp),
 			None,
 			"gone with its file"
+		);
+
+		// Act / Assert: the trims table answers like the other two, and `clear` empties every
+		// one of them — the whole of what the button next to the folder scan promises.
+		let trim = Trim {
+			start: Duration::from_millis(500),
+			end: Duration::from_secs(9),
+		};
+		cache.store_trim(&track, moved, Some(trim));
+		assert_eq!(cache.trim(&track, moved), Some(Some(trim)));
+
+		cache.clear();
+		assert_eq!(cache.peaks(&track, moved), None, "cleared");
+		assert_eq!(cache.duration(&track, moved), None, "cleared");
+		assert_eq!(cache.trim(&track, moved), None, "cleared");
+
+		// And an emptied store is still a store: what goes in after comes back out.
+		cache.store_trim(&track, moved, None);
+		assert_eq!(
+			cache.trim(&track, moved),
+			Some(None),
+			"usable after clearing"
 		);
 
 		drop(cache);

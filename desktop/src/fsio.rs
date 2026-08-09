@@ -81,6 +81,49 @@ pub fn list_folders(folder: &Path) -> Result<Vec<PathBuf>, String> {
 	Ok(folders)
 }
 
+/// Every media file in a folder and everything under it, for the folder scan (PLAN §11b).
+///
+/// The one recursive read in the app, and it is deliberately not what the files pane does:
+/// the pane shows one folder because that is where the user is, and this walks the tree
+/// because "prepare this folder" means the evening's music, which lives in a folder of
+/// albums.
+///
+/// **Symbolic links to folders are not followed**, which is what makes the walk terminate: a
+/// link pointing at its own ancestor is a loop, and `DirEntry::file_type` reports a link as a
+/// link rather than as the folder it points at. A link to a *file* is still collected, because
+/// that is what the pane already lists and playing one works.
+pub fn media_tree(root: &Path) -> Result<Vec<PathBuf>, String> {
+	// The root is read here so that an unreadable *root* is reported: it is the folder the
+	// user is looking at, and a scan that found nothing there must not look like a folder with
+	// nothing in it. Everything deeper is skipped in silence by `collect` — one locked
+	// subfolder cancelling a scan of four hundred readable ones would be the wrong trade.
+	let mut found = Vec::new();
+	collect(read_dir(root)?, &mut found);
+
+	// In the order the pane would show them, folder by folder, so the count that ticks past
+	// while the scan runs matches what the eye expects.
+	found.sort_by(|a, b| crate::browser::natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
+	Ok(found)
+}
+
+/// One folder's entries, and everything under whichever of them are folders.
+fn collect(entries: impl Iterator<Item = std::fs::DirEntry>, found: &mut Vec<PathBuf>) {
+	for item in entries {
+		let Ok(kind) = item.file_type() else {
+			continue;
+		};
+		let path = item.path();
+
+		if kind.is_dir() {
+			if let Ok(children) = read_dir(&path) {
+				collect(children, found);
+			}
+		} else if crate::browser::kind_of(&path).is_media() {
+			found.push(path);
+		}
+	}
+}
+
 /// Read a directory, turning both the open error and any per-entry error into something
 /// a notice line can show.
 fn read_dir(folder: &Path) -> Result<impl Iterator<Item = std::fs::DirEntry>, String> {
@@ -98,4 +141,44 @@ pub fn name_of(path: &Path) -> String {
 	path.file_name()
 		.map(|name| name.to_string_lossy().into_owned())
 		.unwrap_or_else(|| path.display().to_string())
+}
+
+/// The one thing in this module worth a test: everything else is a `read_dir` with the
+/// errors turned into strings, and the walk is the one place a rule lives (PLAN §11b).
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn the_walk_finds_media_at_every_depth_and_nothing_else() {
+		// Arrange: an album inside a folder, with a sleeve and a text file to be ignored.
+		let root = std::env::temp_dir().join("clecta-tree-test");
+		let _ = std::fs::remove_dir_all(&root);
+		let album = root.join("album");
+		std::fs::create_dir_all(&album).expect("making the test tree");
+
+		for (folder, name) in [
+			(&root, "top.mp3"),
+			(&root, "notes.txt"),
+			(&album, "02-second.flac"),
+			(&album, "10-tenth.flac"),
+			(&album, "sleeve.jpg"),
+		] {
+			std::fs::write(folder.join(name), b"x").expect("writing a fixture");
+		}
+
+		// Act
+		let found = media_tree(&root).expect("a readable root");
+
+		// Assert: media only, at both depths, in the order the pane would list them — and the
+		// numbers compared as numbers, since the walk sorts the way the browser does.
+		let names: Vec<String> = found.iter().map(|path| name_of(path)).collect();
+		assert_eq!(names, ["02-second.flac", "10-tenth.flac", "top.mp3"]);
+
+		// And an unreadable root is an error rather than an empty answer, which would be
+		// indistinguishable from a folder with no music in it.
+		assert!(media_tree(&root.join("nowhere")).is_err());
+
+		let _ = std::fs::remove_dir_all(&root);
+	}
 }

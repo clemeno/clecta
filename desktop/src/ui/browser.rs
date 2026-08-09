@@ -40,7 +40,9 @@ pub fn scroll_id() -> iced::advanced::widget::Id {
 	iced::advanced::widget::Id::new(FILES_SCROLL)
 }
 
-pub fn view(browser: &Browser) -> Element<'_, Message> {
+/// `scanning` is how far a folder scan has got, as `(done, total)`, and `None` when none is
+/// running (PLAN §11b).
+pub fn view(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, Message> {
 	// Counted rather than stored, because `visible` is the hidden filter and the count has
 	// to be of what is *shown*. One pass over a few thousand `bool`s, against the thousands
 	// of widgets this is here to not build.
@@ -61,7 +63,7 @@ pub fn view(browser: &Browser) -> Element<'_, Message> {
 	let below = Space::new().height((total - range.end) as f32 * ROW_HEIGHT);
 
 	column![
-		header(browser),
+		header(browser, scanning),
 		scrollable(column![above, column(rows), below])
 			.id(scroll_id())
 			.on_scroll(Message::Scrolled)
@@ -73,7 +75,7 @@ pub fn view(browser: &Browser) -> Element<'_, Message> {
 }
 
 /// Where we are, and everything that can be done to the listing as a whole.
-fn header(browser: &Browser) -> Element<'_, Message> {
+fn header(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, Message> {
 	let folder = match &browser.folder {
 		Some(folder) => folder.display().to_string(),
 		None => "no folder".to_string(),
@@ -115,8 +117,45 @@ fn header(browser: &Browser) -> Element<'_, Message> {
 		]
 		.spacing(6)
 		.align_y(iced::Center),
+		preparation(browser, scanning),
 	]
 	.spacing(6)
+	.into()
+}
+
+/// Working the folder out ahead of time, and throwing all of it away again (PLAN §11b, §11a).
+///
+/// A row of its own under the two that are about *this listing*, because these two are about
+/// the tree under it and about the cache — the same folder, a different scope. While a scan
+/// runs the row becomes the count and a way to stop, since starting a second one over the
+/// first is the only thing the buttons could otherwise do.
+fn preparation(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, Message> {
+	if let Some((done, total)) = scanning {
+		return row![
+			text(format!("preparing {done} of {total} files…"))
+				.size(12)
+				.width(Fill),
+			button(text("Stop").size(12))
+				.padding([3, 8])
+				.on_press(Message::ScanFolderCancelled),
+		]
+		.spacing(6)
+		.align_y(iced::Center)
+		.into();
+	}
+
+	row![
+		Space::new().width(Fill),
+		button(text("Prepare folder").size(12))
+			.padding([3, 8])
+			// Dead until there is a folder to walk, like every other control that needs one.
+			.on_press_maybe(browser.folder.as_ref().map(|_| Message::ScanFolderPressed)),
+		button(text("Clear cache").size(12))
+			.padding([3, 8])
+			.on_press(Message::ClearCachePressed),
+	]
+	.spacing(6)
+	.align_y(iced::Center)
 	.into()
 }
 

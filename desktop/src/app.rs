@@ -6,7 +6,7 @@
 //! three sections are arranged. That is deliberate — an `update` that is only ever a
 //! dispatch table stays readable as the app grows.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,14 +25,15 @@ use iced::{
 };
 use notify::{RecursiveMode, Watcher};
 
-use crate::audio::{self, Engine};
+use crate::audio::{self, Engine, Scan};
 use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
-use crate::playlist::{self, ListId, Playlist};
+use crate::playlist::{self, ListId, Playlist, Transition};
 use crate::settings::Settings;
 use crate::tree::Tree;
+use crate::waveform::Trim;
 use crate::{fsio, paths, ui};
 
 /// The playhead poll (PLAN §4). 20 Hz: fast enough that a time readout never looks stuck,
@@ -99,6 +100,14 @@ const CHROME: f32 = 2.0 * WINDOW_PADDING + STATUS_GAP + STATUS_HEIGHT;
 /// Width of the mixer strip. Fixed, because the two players should keep the width they
 /// are given as the window resizes; the mixer's controls do not grow usefully.
 const MIXER_WIDTH: f32 = 240.0;
+
+/// How many files a folder scan decodes at once (PLAN §11b).
+///
+/// Four, and the number is the whole trade: a scan is a decode of an entire file, so one
+/// thread at a time leaves a folder of two thousand tracks running for ten minutes, and one
+/// thread per core leaves nothing for the audio callback while somebody is playing a set.
+/// Four is fast enough to be worth pressing and still short of every machine's core count.
+const SCAN_JOBS: usize = 4;
 
 /// The cache's name inside `clecta-data/` (PLAN §11a). Beside `settings.json` rather than in a
 /// per-user cache folder, so a portable install carries what it has already worked out with
@@ -186,6 +195,50 @@ pub struct Drag {
 	from: Option<(ListId, usize)>,
 }
 
+/// What a background job worked out about one file (PLAN §7a, §11a, §14c).
+///
+/// One type for two jobs that answer the same question at different depths: measuring a queue
+/// *reads* what is known, and a folder scan *works it out*. The arm that receives them does
+/// the same thing either way, which is the point — the app does not care which job found out
+/// how long a track is or where its music starts.
+#[derive(Debug, Clone)]
+pub struct Facts {
+	pub path: PathBuf,
+	pub duration: Option<Duration>,
+	pub trim: Option<Trim>,
+}
+
+/// A folder scan in flight (PLAN §11b).
+///
+/// `next` and `done` are separate counters because the files go out ahead of the answers:
+/// `SCAN_JOBS` of them are always in the air, so the number on screen has to be the one that
+/// has come *back*, and the scan is over when the last thread reports rather than when the
+/// last file is handed out.
+struct Scanning {
+	files: Vec<PathBuf>,
+	next: usize,
+	done: usize,
+	/// How many threads are out right now, which is what the fan-out is capped against.
+	running: usize,
+}
+
+impl Scanning {
+	/// How many more files may go out this moment: whatever the fan-out has free, or whatever
+	/// is left of the list, whichever is smaller.
+	fn slots(&self) -> usize {
+		SCAN_JOBS
+			.saturating_sub(self.running)
+			.min(self.files.len() - self.next)
+	}
+
+	/// Whether the scan is over — when the last *thread* has reported, not when the last file
+	/// went out. That is also what makes **Stop** work without a flag: it cuts the list down to
+	/// what has already gone out, and this then becomes true as those last answers land.
+	fn is_over(&self) -> bool {
+		self.next == self.files.len() && self.running == 0
+	}
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
 	/// The playhead poll.
@@ -226,9 +279,10 @@ pub enum Message {
 	ScrollEdge(ListId, bool, bool),
 	/// One step of that scroll. Sent only while an edge is armed.
 	ScrollStep,
-	/// Track lengths, looked up off the GUI thread. A batch rather than one message per file,
-	/// because they are asked for as a batch and none of them is interesting alone.
-	Measured(Vec<(PathBuf, Option<Duration>)>),
+	/// What the queues' tracks turned out to be, looked up off the GUI thread. A batch rather
+	/// than one message per file, because they are asked for as a batch and none of them is
+	/// interesting alone.
+	Measured(Vec<Facts>),
 	/// Add the browser's selection to a queue — at the top when `true`, at the end when
 	/// `false`.
 	QueueAdd(ListId, bool),
@@ -243,6 +297,9 @@ pub enum Message {
 	QueueAutoLoad(ListId, bool),
 	/// Its **Auto-play** switch: whether a track handed over that way then starts by itself.
 	QueueAutoPlay(ListId, bool),
+	/// Its **transition**: whether the track it hands over waits for the file to run out, or
+	/// takes over when the music stops (PLAN §7b).
+	QueueTransition(ListId, Transition),
 	/// A disclosure arrow in the tree.
 	FolderToggled(PathBuf),
 	/// The tree's fold button.
@@ -265,14 +322,30 @@ pub enum Message {
 	/// A directory listing came back off the GUI thread.
 	FilesListed(PathBuf, Result<Vec<Entry>, String>),
 	FoldersListed(PathBuf, Result<Vec<PathBuf>, String>),
-	/// A waveform scan finished. Carries the path it was started for, because a player can
+	/// A track's scan finished. Carries the path it was started for, because a player can
 	/// be given another track while the scan runs (PLAN §14a).
-	PeaksScanned(DeckId, PathBuf, Result<Vec<f32>, String>),
+	Scanned(DeckId, PathBuf, Result<Scan, String>),
 	/// Advance the scanning animation one step. Sent only while a scan is running.
 	Sweep,
 	/// The waveform was clicked, at this fraction of the track. Moves the playhead and
 	/// nothing else — a playing player keeps playing, a paused one stays paused (PLAN §14).
 	Seeked(DeckId, f32),
+	/// One of the two buttons above a waveform: the top of the file, or the top of the music
+	/// (PLAN §14c). The same seek as a click on the strip, aimed at a place rather than a
+	/// fraction — which is what makes it exact.
+	Jumped(DeckId, Duration),
+	/// Work out the waveform, the length and the music's edges for every media file in the
+	/// shown folder and everything under it (PLAN §11b).
+	ScanFolderPressed,
+	/// The walk came back with the files to work through.
+	ScanFolderFound(Result<Vec<PathBuf>, String>),
+	/// One of them is done. The unit of progress, and one message per file.
+	ScanFolderStepped(Facts),
+	/// Stop handing out files. Whatever is already on a thread finishes and is kept.
+	ScanFolderCancelled,
+	/// Throw away everything the app has worked out about other people's files (PLAN §11a).
+	ClearCachePressed,
+	CacheCleared,
 	/// The window was resized. Recorded, then saved with everything else once the app has
 	/// been still for `SAVE_AFTER`.
 	WindowResized(Size),
@@ -360,6 +433,20 @@ pub struct Clecta {
 	/// that the cache is touched *there* rather than on the GUI thread, where a commit is an
 	/// `fsync`.
 	cache: Arc<Cache>,
+	/// Where the music sits inside the files this run has been told about (PLAN §14c).
+	///
+	/// Filled by every job that finds out — a track's own scan, a queue measurement reading
+	/// the cache, a folder scan working it out — and read by the three places that need it:
+	/// the handover's early cut, the track it starts next, and the button above the strip.
+	///
+	/// A map rather than a field on `Deck` and another on `playlist::Item`, because the same
+	/// answer serves a loaded track and a queued one and a track that is neither yet. A miss
+	/// is the ordinary state and means *play this whole*: nothing here is required for the app
+	/// to work, which is what makes the folder scan an optimization rather than a step.
+	trims: HashMap<PathBuf, Trim>,
+	/// The folder scan, while one is running (PLAN §11b). `None` at rest, which is also what
+	/// the Cancel button leaves behind.
+	scanning: Option<Scanning>,
 	/// The scanning animation's step counter. A plain integer rather than a timestamp, so
 	/// nothing in `view` has to read the clock — the phase is whatever the last `Sweep`
 	/// left behind.
@@ -400,13 +487,10 @@ impl Clecta {
 			Playlist::from_paths(settings.common.clone()),
 			Playlist::from_paths(settings.cues[1].clone()),
 		];
-		for ((queue, auto_load), auto_play) in queues
-			.iter_mut()
-			.zip(settings.auto_load)
-			.zip(settings.auto_play)
-		{
-			queue.auto_load = auto_load;
-			queue.auto_play = auto_play;
+		for (index, queue) in queues.iter_mut().enumerate() {
+			queue.auto_load = settings.auto_load[index];
+			queue.auto_play = settings.auto_play[index];
+			queue.transition = settings.transition[index];
 		}
 
 		let mut app = Self {
@@ -436,6 +520,8 @@ impl Clecta {
 			// before the window exists: it is one small file, once, and everything after it
 			// wants to know whether there is a cache to ask (PLAN §11a).
 			cache: Arc::new(Cache::open(&paths::data_dir().join(CACHE_FILE))),
+			trims: HashMap::new(),
+			scanning: None,
 			sweep: 0,
 		};
 		app.apply_gains();
@@ -483,6 +569,7 @@ impl Clecta {
 			// above, which is per player.
 			auto_load: std::array::from_fn(|index| self.queues[index].auto_load),
 			auto_play: std::array::from_fn(|index| self.queues[index].auto_play),
+			transition: std::array::from_fn(|index| self.queues[index].transition),
 		}
 	}
 
@@ -718,19 +805,13 @@ impl Clecta {
 				}
 			}
 
-			Message::Measured(lengths) => {
-				// Applied to all three lists, because a track can be moved between them while
-				// the lengths are being looked up — and by path, so one answer settles every
-				// row holding that file. A row that has been removed in the meantime simply
-				// matches nothing.
-				for (path, length) in lengths {
+			Message::Measured(measured) => {
+				for facts in measured {
 					// Let go of it first: this batch is done with the file whatever the lists
 					// have done with it, and a path left behind here would never be looked up
 					// again. Every path that went out comes back, so the set empties.
-					self.measuring.remove(&path);
-					for queue in &mut self.queues {
-						queue.measured(&path, length);
-					}
+					self.measuring.remove(&facts.path);
+					self.learned(&facts);
 				}
 			}
 
@@ -801,6 +882,13 @@ impl Clecta {
 
 			Message::QueueAutoPlay(id, on) => {
 				self.queues[id.index()].auto_play = on;
+				self.dirty = true;
+			}
+
+			// The third of them, and the same kind of thing: it changes what happens at the end
+			// of a track, not what is in the list.
+			Message::QueueTransition(id, transition) => {
+				self.queues[id.index()].transition = transition;
 				self.dirty = true;
 			}
 
@@ -981,7 +1069,12 @@ impl Clecta {
 				Err(error) => self.notice = error,
 			},
 
-			Message::PeaksScanned(id, path, result) => {
+			Message::Scanned(id, path, result) => {
+				// Recorded before anything is checked: where a file's music sits is true about
+				// the *file*, whatever is loaded in the player by now (PLAN §14c).
+				let trim = result.as_ref().ok().and_then(|scan| scan.trim);
+				self.remember(&path, trim);
+
 				// A scan takes a moment, and a player can be given a second track inside it.
 				// An array that no longer belongs to what is loaded is dropped, or it would
 				// draw the previous track under this one's playhead. `scanning` is left
@@ -996,7 +1089,7 @@ impl Clecta {
 				}
 				self.decks[id.index()].scanning = false;
 				match result {
-					Ok(peaks) => self.decks[id.index()].peaks = peaks,
+					Ok(scan) => self.decks[id.index()].peaks = scan.peaks,
 					// Odd but reachable: playback opened the file and the scan did not,
 					// because it was replaced or unmounted between the two reads.
 					Err(error) => self.notice = format!("{}: {error}", id.label()),
@@ -1008,6 +1101,104 @@ impl Clecta {
 			Message::Sweep => self.sweep = self.sweep.wrapping_add(1),
 
 			Message::Seeked(id, fraction) => self.seek(id, fraction),
+
+			Message::Jumped(id, to) => self.seek_to(id, to),
+
+			Message::ScanFolderPressed => {
+				let Some(folder) = self.browser.folder.clone() else {
+					return Task::none();
+				};
+				self.notice = format!("looking for media under {}…", folder.display());
+
+				// The walk before the work: the count on screen has to be a real total rather
+				// than one that grows as folders are discovered, or the progress would run
+				// backwards on a deep folder.
+				return off_thread(
+					move || fsio::media_tree(&folder),
+					|found| {
+						Message::ScanFolderFound(found.unwrap_or_else(|| {
+							Err("the folder walk stopped unexpectedly".to_string())
+						}))
+					},
+				);
+			}
+
+			Message::ScanFolderFound(result) => match result {
+				Ok(files) if files.is_empty() => {
+					self.notice =
+						"nothing to prepare — no media files under that folder".to_string();
+				}
+				Ok(files) => {
+					self.scanning = Some(Scanning {
+						files,
+						next: 0,
+						done: 0,
+						running: 0,
+					});
+					return self.scan_step();
+				}
+				Err(error) => self.notice = error,
+			},
+
+			Message::ScanFolderStepped(facts) => {
+				// Kept whatever the scan is doing by now: the work is done and the answer is
+				// true, so a cancel that arrived while this file was on a thread does not throw
+				// its answer away.
+				self.learned(&facts);
+				if let Some(scanning) = self.scanning.as_mut() {
+					scanning.done += 1;
+					scanning.running -= 1;
+				}
+				return self.scan_step();
+			}
+
+			// The threads already out are left to finish — they are decoding a file each, and
+			// there is no way to interrupt a decode that does not also mean checking a flag in
+			// the sample loop. What stops is the *handing out*, which is the part that would
+			// otherwise run for another nine minutes.
+			//
+			// Cutting the list down to what has already gone out, rather than dropping the scan
+			// where it stands, is what keeps the counters honest: the four answers still coming
+			// belong to this scan and are counted by it, and the state clears itself when the
+			// last of them lands. Dropping it here would leave four jobs reporting into a scan
+			// that no longer exists — and starting another one before they landed would count
+			// their files twice and run `running` past zero.
+			Message::ScanFolderCancelled => {
+				if let Some(scanning) = self.scanning.as_mut() {
+					scanning.files.truncate(scanning.next);
+				}
+			}
+
+			Message::ClearCachePressed => {
+				// Asked first, with the same modal the duplicate warning uses: this is the one
+				// button in the app that throws work away, and it is next to the one that makes
+				// it. `ponytail:` modal, so the playhead stops while it is open (PLAN §7a).
+				let confirmed = rfd::MessageDialog::new()
+					.set_level(rfd::MessageLevel::Warning)
+					.set_title("Clear the cache")
+					.set_description(
+						"Throw away every waveform, length and music-start clecta has worked out?\n\n\
+						 Nothing is lost but the time to work them out again.",
+					)
+					.set_buttons(rfd::MessageButtons::OkCancel)
+					.show() == rfd::MessageDialogResult::Ok;
+				if !confirmed {
+					return Task::none();
+				}
+
+				// Off the GUI thread like every other touch of the store: a commit is an
+				// `fsync` (PLAN §11a).
+				let cache = self.cache.clone();
+				return off_thread(move || cache.clear(), |_| Message::CacheCleared);
+			}
+
+			// The in-memory answers are deliberately kept: they are still true, and throwing
+			// them away would blank the waveform of a track that is playing. What was cleared is
+			// the *disk*, so the next launch works everything out again — which is what a clean
+			// start means.
+			Message::CacheCleared => {
+				self.notice = "cache cleared".to_string();
+			}
 		}
 
 		Task::none()
@@ -1057,13 +1248,59 @@ impl Clecta {
 				deck.position = Duration::ZERO;
 				ended.push(id);
 			} else {
-				self.decks[id.index()].position = engine.position(id);
+				let position = engine.position(id);
+				self.decks[id.index()].position = position;
+
+				// The *other* end of a track (PLAN §7b): the music has stopped, and the list
+				// waiting behind this player asked not to sit through the run-out.
+				if self.cuts_early(id, position) {
+					// Stopped rather than re-appended, which is the whole difference from the
+					// branch above: nothing has been consumed here — the file is still in the
+					// player and still playing — so it is rewound and paused, and the handover
+					// replaces it a moment later. Doing nothing would leave the tail audible
+					// under the next track if the load failed.
+					if let Err(error) = engine.stop(id) {
+						self.notice = format!("{}: {error:#}", id.label());
+					}
+
+					let deck = &mut self.decks[id.index()];
+					deck.transport = deck::transition(deck.transport, deck::Event::Ended);
+					deck.position = Duration::ZERO;
+					ended.push(id);
+				}
 			}
 		}
 
 		// After the loop, not inside it: `advance` loads, and loading is a `&mut self` call
 		// that would fight the engine borrow above.
 		Task::batch(ended.into_iter().map(|id| self.advance(id)))
+	}
+
+	/// Whether the track playing on this player should give way now rather than at the end of
+	/// its file (PLAN §7b).
+	///
+	/// Asked of the list that would *supply* the next track, which is the same rule the two
+	/// switches follow (PLAN §7a): the list waiting behind a player is what says how it wants
+	/// to take over. And it is asked at all only when there is something to take over — the
+	/// last track of the evening plays its run-out, because cutting it short would leave a
+	/// player stopped early for nothing.
+	fn cuts_early(&self, id: DeckId, position: Duration) -> bool {
+		let Some(track) = &self.decks[id.index()].track else {
+			return false;
+		};
+		let Some(source) = playlist::next_source(
+			id,
+			&self.queues[ListId::Cue(id).index()],
+			&self.queues[ListId::Common.index()],
+		) else {
+			return false;
+		};
+
+		playlist::hands_over_early(
+			self.queues[source.index()].transition,
+			position,
+			self.trims.get(&track.path).copied(),
+		)
 	}
 
 	/// Give a player that has just finished the next track from a queue (PLAN §7a).
@@ -1096,7 +1333,8 @@ impl Clecta {
 		// 0:00 and audible only when someone presses Play — unless this list was told to
 		// start it. On a mixer an unrequested fade-in is a mistake that cannot be taken back,
 		// which is why that is a switch and not the default.
-		let auto_play = self.queues[source.index()].auto_play;
+		let list = &self.queues[source.index()];
+		let (auto_play, transition) = (list.auto_play, list.transition);
 		let path = item.path;
 		let loading = Task::batch([self.queued(), self.load(id, path.clone())]);
 
@@ -1104,16 +1342,82 @@ impl Clecta {
 		// the player and says so in the notice (PLAN §7), and pressing Play on that would be
 		// the app restarting a track nobody queued — the one way an automatic start could
 		// play the wrong thing.
-		if auto_play
-			&& self.decks[id.index()]
-				.track
-				.as_ref()
-				.is_some_and(|track| track.path == path)
+		if !self.decks[id.index()]
+			.track
+			.as_ref()
+			.is_some_and(|track| track.path == path)
 		{
+			return loading;
+		}
+
+		// The other half of the transition setting (PLAN §7b): a list that skips the blanks at
+		// the end of one track also skips them at the start of the next. Silently 0:00 for a
+		// track nobody has scanned — the folder scan is what makes this exact, and until then
+		// the app plays the file it was given from the top.
+		if transition == Transition::Trimmed
+			&& let Some(start) = self.trims.get(&path).map(|trim| trim.start)
+		{
+			self.seek_to(id, start);
+		}
+
+		if auto_play {
 			self.transport(id, deck::Event::Play);
 		}
 
 		loading
+	}
+
+	/// Remember what a job worked out about one file, and settle every queued row holding it.
+	///
+	/// Applied to all three lists, because a track can be moved between them while the answer
+	/// is being looked up — and by path, so one answer settles every row holding that file. A
+	/// row that has been removed in the meantime simply matches nothing.
+	fn learned(&mut self, facts: &Facts) {
+		self.remember(&facts.path, facts.trim);
+		for queue in &mut self.queues {
+			queue.measured(&facts.path, facts.duration);
+		}
+	}
+
+	/// Where a file's music sits, if the job that looked found any (PLAN §14c).
+	///
+	/// A `None` is *not* stored as "there is no trim", and the distinction matters: it means
+	/// this job could not say, and another one still might — a queue measurement only reads the
+	/// cache, where a folder scan decodes. Overwriting a known answer with silence would make
+	/// queueing a track un-learn what scanning it taught.
+	fn remember(&mut self, path: &Path, trim: Option<Trim>) {
+		if let Some(trim) = trim {
+			self.trims.insert(path.to_path_buf(), trim);
+		}
+	}
+
+	/// Hand files to threads until the fan-out is full, and notice when the last one lands
+	/// (PLAN §11b).
+	///
+	/// The whole driver, and it is called from exactly two places: the moment the walk comes
+	/// back, and every time a file reports. There is no timer and no subscription — a scan is a
+	/// chain of messages that refills itself, so it stops costing anything the moment it ends.
+	fn scan_step(&mut self) -> Task<Message> {
+		let Some(scanning) = self.scanning.as_mut() else {
+			return Task::none();
+		};
+
+		if scanning.is_over() {
+			let total = scanning.files.len();
+			self.scanning = None;
+			self.notice = format!("prepared {total} files");
+			return Task::none();
+		}
+
+		let mut tasks = Vec::new();
+		for _ in 0..scanning.slots() {
+			let path = scanning.files[scanning.next].clone();
+			scanning.next += 1;
+			scanning.running += 1;
+			tasks.push(scan_file(path, self.cache.clone()));
+		}
+
+		Task::batch(tasks)
 	}
 
 	/// May this track go into a queue — asking first if it is already in one (PLAN §7a).
@@ -1190,10 +1494,7 @@ impl Clecta {
 			move || {
 				paths
 					.into_iter()
-					.map(|path| {
-						let length = cached_duration(&cache, &path);
-						(path, length)
-					})
+					.map(|path| cached_facts(&cache, &path))
 					.collect::<Vec<_>>()
 			},
 			// A job can only fail to answer by panicking. Its batch is then reported as
@@ -1203,10 +1504,16 @@ impl Clecta {
 			// on every edit for ever. The footer already says what this looks like — the
 			// running time keeps its `+`.
 			move |measured| {
-				Message::Measured(
-					measured
-						.unwrap_or_else(|| asked.iter().map(|path| (path.clone(), None)).collect()),
-				)
+				Message::Measured(measured.unwrap_or_else(|| {
+					asked
+						.iter()
+						.map(|path| Facts {
+							path: path.clone(),
+							duration: None,
+							trim: None,
+						})
+						.collect()
+				}))
 			},
 		)
 	}
@@ -1269,8 +1576,22 @@ impl Clecta {
 		if !(0.0..=1.0).contains(&fraction) {
 			return;
 		}
-		let to = total.mul_f32(fraction);
 
+		self.seek_to(id, total.mul_f32(fraction));
+	}
+
+	/// Move a player's playhead to a place, which is what both gestures come down to: the
+	/// strip works in fractions of a width, the two buttons above it work in seconds
+	/// (PLAN §14c).
+	///
+	/// A stopped player that is asked to move **becomes paused**, and that is the one thing
+	/// here that touches the transport. Q14 said a seek changes nothing about it, and that is
+	/// still right for `Playing` and `Paused` — but `Stopped` in this app means *at the top of
+	/// the track*, which is what Stop rewinds to and what every load lands on. A player
+	/// labelled "stopped" sitting at 1:30 is the label lying about where Play would start,
+	/// which was already true of a click on the strip and is why the rule lives here rather
+	/// than on the buttons that made it obvious.
+	fn seek_to(&mut self, id: DeckId, to: Duration) {
 		if let Some(engine) = self.engine.as_ref()
 			&& let Err(error) = engine.seek(id, to)
 		{
@@ -1284,7 +1605,11 @@ impl Clecta {
 		// Set here rather than left to the tick, which runs only while something plays: a
 		// paused player would otherwise keep drawing its old playhead until it was started
 		// again, and clicking a strip that visibly does nothing is worse than not clicking.
-		self.decks[id.index()].position = to;
+		let deck = &mut self.decks[id.index()];
+		deck.position = to;
+		if deck.transport == deck::Transport::Stopped {
+			deck.transport = deck::Transport::Paused;
+		}
 	}
 
 	fn transport(&mut self, id: DeckId, event: deck::Event) {
@@ -1355,7 +1680,7 @@ impl Clecta {
 					duration,
 				});
 
-				scan_peaks(id, path, self.cache.clone())
+				scan_track(id, path, self.cache.clone())
 			}
 			// `{error:#}` prints the anyhow chain on one line, which is what turns
 			// "cannot decode x.mp4" into "cannot decode x.mp4: unsupported codec".
@@ -1510,7 +1835,15 @@ impl Clecta {
 	fn view(&self) -> Element<'_, Message> {
 		let panes = pane_grid(&self.panes, |_pane, section, _maximized| {
 			let body = match section {
-				Section::Files => ui::browser::view(&self.browser),
+				// How far the folder scan has got, and `None` when none is running — which is
+				// what turns the pane's progress line back into the two buttons that start one
+				// (PLAN §11b).
+				Section::Files => ui::browser::view(
+					&self.browser,
+					self.scanning
+						.as_ref()
+						.map(|scanning| (scanning.done, scanning.files.len())),
+				),
 				Section::Tree => ui::tree::view(&self.tree, self.browser.folder.as_deref()),
 			};
 			pane_grid::Content::new(body).style(container::bordered_box)
@@ -1627,7 +1960,14 @@ impl Clecta {
 		// One phase for both players, so two scans running at once sweep together rather
 		// than drifting apart into something that looks like a rendering fault.
 		let sweep = (self.sweep % SWEEP_STEPS) as f32 / SWEEP_STEPS as f32;
-		let panel = ui::deck::view(id, &self.decks[id.index()], ring == Some(id), sweep);
+		// Looked up by path rather than kept on the `Deck`, because the same answer is wanted
+		// for tracks that are in no player at all (PLAN §14c).
+		let trim = self.decks[id.index()]
+			.track
+			.as_ref()
+			.and_then(|track| self.trims.get(&track.path))
+			.copied();
+		let panel = ui::deck::view(id, &self.decks[id.index()], trim, ring == Some(id), sweep);
 
 		if self.drag.is_none() {
 			return panel;
@@ -1899,43 +2239,95 @@ fn list_folders(folder: PathBuf) -> Task<Message> {
 /// its answer arrives as a `fsync`-shaped write, so it belongs on the same side of the thread
 /// boundary as the decode it is replacing — and the app above is unchanged either way, because
 /// a hit and a scan produce the same message.
-fn scan_peaks(id: DeckId, path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
+fn scan_track(id: DeckId, path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 	let scanned = path.clone();
 
 	off_thread(
-		move || cached_peaks(&cache, &scanned).map_err(|error| format!("{error:#}")),
+		move || cached_scan(&cache, &scanned).map_err(|error| format!("{error:#}")),
 		move |result| {
 			// Reported rather than swallowed: a strip that stays flat for ever with no line
 			// in the status bar is the one outcome worse than a slow scan.
 			let result =
 				result.unwrap_or_else(|| Err("the waveform scan stopped unexpectedly".to_string()));
-			Message::PeaksScanned(id, path.clone(), result)
+			Message::Scanned(id, path.clone(), result)
 		},
 	)
 }
 
-/// A track's waveform: from the cache if it is there, from the file if it is not, and into the
-/// cache on the way past (PLAN §11a).
+/// The same decode, for a file nobody is playing (PLAN §11b).
+///
+/// The unit of the folder scan, and the reason it is worth a function of its own is what it
+/// throws away: the peak array goes into the cache and is dropped on the way out, because the
+/// point of preparing a folder is what will be *there* when a track is loaded, not what is on
+/// screen now. The length comes along for the ride — it is a header parse next to a full
+/// decode, and the queues want it.
+fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
+	let asked = path.clone();
+
+	off_thread(
+		move || Facts {
+			trim: cached_scan(&cache, &path).ok().and_then(|scan| scan.trim),
+			duration: cached_duration(&cache, &path),
+			path,
+		},
+		move |facts| {
+			// A file that would not decode still counts as done, or the progress would stop on
+			// the first broken track in a folder and never reach the end.
+			Message::ScanFolderStepped(facts.unwrap_or_else(|| Facts {
+				path: asked.clone(),
+				duration: None,
+				trim: None,
+			}))
+		},
+	)
+}
+
+/// A track's waveform and the edges of its music: from the cache if they are there, from the
+/// file if they are not, and into the cache on the way past (PLAN §11a, §14c).
 ///
 /// The two halves of the stamp rule live here and nowhere else. **No stamp, no caching** — a
 /// file that cannot be stat'd is scanned every time, which is the behaviour there was before
 /// the cache and is right for a path that is behaving strangely. And a scan that *fails* is
 /// not stored: the cache holds answers about files, not the fact that one of them would not
 /// open, which is a condition that can change under it.
-fn cached_peaks(cache: &Cache, path: &Path) -> anyhow::Result<Vec<f32>> {
+///
+/// Both tables have to answer for it to be a hit. That is what makes the trim table arrive
+/// without a format bump: a file scanned by a build that knew nothing about trims has its
+/// waveform on disk and no edges, so it is decoded once more and both are stored — where
+/// bumping `FORMAT` would have thrown away every waveform in the cache to add a field.
+fn cached_scan(cache: &Cache, path: &Path) -> anyhow::Result<Scan> {
 	let stamp = cache::stamp(path);
 
 	if let Some(stamp) = stamp
 		&& let Some(peaks) = cache.peaks(path, stamp)
+		&& let Some(trim) = cache.trim(path, stamp)
 	{
-		return Ok(peaks);
+		return Ok(Scan { peaks, trim });
 	}
 
-	let peaks = audio::peaks(path)?;
+	let scan = audio::scan(path)?;
 	if let Some(stamp) = stamp {
-		cache.store_peaks(path, stamp, &peaks);
+		cache.store_peaks(path, stamp, &scan.peaks);
+		cache.store_trim(path, stamp, scan.trim);
 	}
-	Ok(peaks)
+	Ok(scan)
+}
+
+/// What is already known about a queued track, without decoding it (PLAN §7a, §14c).
+///
+/// The trim is **read, never worked out**: finding it means decoding the whole file, and a
+/// queue edit that decoded fifty tracks would freeze four threads for half a minute for a
+/// setting the user may not even have switched on. So a queue learns where a track's music
+/// starts only if something has already scanned it — the folder scan, or the track's own turn
+/// in a player — and plays it whole until then.
+fn cached_facts(cache: &Cache, path: &Path) -> Facts {
+	Facts {
+		duration: cached_duration(cache, path),
+		trim: cache::stamp(path)
+			.and_then(|stamp| cache.trim(path, stamp))
+			.flatten(),
+		path: path.to_path_buf(),
+	}
 }
 
 /// The same, for a track's length (PLAN §7a, §11a).
@@ -2017,6 +2409,69 @@ mod tests {
 				"window {window} stored a height of {stored}"
 			);
 		}
+	}
+
+	/// The folder scan's bookkeeping, walked through a whole run (PLAN §11b). It is three
+	/// counters and no timer, and the only way to see that they add up is to run one — the
+	/// `Task`s the driver returns need a window, but the arithmetic that decides how many
+	/// there are does not.
+	#[test]
+	fn a_folder_scan_hands_out_exactly_what_it_finishes() {
+		// Arrange: ten files and a fan-out of four.
+		let mut scanning = Scanning {
+			files: (0..10).map(|n| PathBuf::from(format!("{n}.mp3"))).collect(),
+			next: 0,
+			done: 0,
+			running: 0,
+		};
+
+		// Act / Assert: it fills the fan-out, and never more than the fan-out.
+		assert!(!scanning.is_over(), "nothing has been done yet");
+		assert_eq!(scanning.slots(), SCAN_JOBS);
+
+		// The whole run, one answer at a time: hand out what there is room for, take one back.
+		let mut handed = 0;
+		while !scanning.is_over() {
+			let slots = scanning.slots();
+			assert!(scanning.running + slots <= SCAN_JOBS, "over the fan-out");
+			scanning.next += slots;
+			scanning.running += slots;
+			handed += slots;
+
+			scanning.running -= 1;
+			scanning.done += 1;
+		}
+
+		// Assert: every file went out exactly once, and every one came back.
+		assert_eq!(handed, 10, "every file, once");
+		assert_eq!(scanning.done, 10);
+		assert_eq!(scanning.running, 0, "no thread left unaccounted for");
+	}
+
+	#[test]
+	fn stopping_a_scan_still_waits_for_the_files_already_out() {
+		// Arrange: four files out on threads, six still to come.
+		let mut scanning = Scanning {
+			files: (0..10).map(|n| PathBuf::from(format!("{n}.mp3"))).collect(),
+			next: 4,
+			done: 0,
+			running: 4,
+		};
+
+		// Act: Stop, which cuts the list down to what has gone out rather than dropping the
+		// scan — the four answers still coming belong to it and have to be counted by it.
+		scanning.files.truncate(scanning.next);
+
+		// Assert: nothing more goes out, and it is not over until the four report.
+		assert_eq!(scanning.slots(), 0, "nothing more goes out");
+		assert!(!scanning.is_over(), "four are still decoding");
+
+		for _ in 0..4 {
+			scanning.running -= 1;
+			scanning.done += 1;
+		}
+		assert!(scanning.is_over(), "the last one landed");
+		assert_eq!(scanning.done, scanning.files.len(), "counted once each");
 	}
 
 	#[test]

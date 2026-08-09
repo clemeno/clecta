@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::deck::DeckId;
+use crate::waveform::Trim;
 
 /// Which of the three lists. The player-owned ones are `Cue`, the shared one is `Common`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,6 +60,42 @@ impl ListId {
 		let index = self.index() as isize + step;
 
 		ListId::ALL.get(usize::try_from(index).ok()?).copied()
+	}
+}
+
+/// When one track gives way to the next (PLAN §7b).
+///
+/// Two positions, and the difference between them is entirely about the silence a file
+/// carries at either end: the encoder's padding, the engineer's run-out, the two seconds of
+/// room tone somebody left on the master. `Whole` waits for the file; `Trimmed` waits for the
+/// *music*, and starts the next one where its own music starts.
+///
+/// `Serialize`/`Deserialize` because it is persisted per list (PLAN §11), and `Display`
+/// because it is drawn in a `pick_list` — the same pair `mixer::Curve` needs for the same
+/// reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Transition {
+	/// Hand over when the file runs out, wherever the music stopped. The app's behaviour
+	/// before this setting existed, and the default for the same reason every load lands on
+	/// `Stopped`: cutting a track short is not something to start doing unasked.
+	#[default]
+	Whole,
+	/// Hand over when the *music* stops, and start the next track where its music starts.
+	/// Silent about a track whose edges have never been scanned, which simply plays whole
+	/// (PLAN §14c).
+	Trimmed,
+}
+
+impl Transition {
+	pub const ALL: [Transition; 2] = [Transition::Whole, Transition::Trimmed];
+}
+
+impl std::fmt::Display for Transition {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter.write_str(match self {
+			Transition::Whole => "Whole track",
+			Transition::Trimmed => "Skip blanks",
+		})
 	}
 }
 
@@ -110,6 +147,13 @@ pub struct Playlist {
 	/// that is one setting each rather than a mode the whole app is in.
 	pub auto_load: bool,
 	pub auto_play: bool,
+	/// When the handover happens, and where the track it hands over starts (PLAN §7b).
+	///
+	/// The third setting on the same list and read at the same moment as the other two, which
+	/// is what keeps it one question rather than two: *this* list decides when its own track
+	/// takes over, so Cue 1 can run an evening back to back while **Next up** stays a shelf
+	/// that plays whatever it is handed, whole.
+	pub transition: Transition,
 }
 
 impl Default for Playlist {
@@ -124,6 +168,7 @@ impl Default for Playlist {
 			// audio nobody asked for is a mistake that cannot be taken back. Someone who wants
 			// the evening to run itself says so once, per list.
 			auto_play: false,
+			transition: Transition::default(),
 		}
 	}
 }
@@ -387,6 +432,21 @@ pub fn next_source(id: DeckId, cue: &Playlist, common: &Playlist) -> Option<List
 	} else {
 		None
 	}
+}
+
+/// Whether the track playing now should give way already (PLAN §7b).
+///
+/// Three things have to be true at once, and each of them is a reason not to cut: the list
+/// that would supply the next track has to be set to skip the blanks, this track's edges have
+/// to have been scanned, and the playhead has to have reached the second one. A track nobody
+/// has scanned plays whole — silently, because the alternative is a notice line every four
+/// minutes about a setting the user already knows they turned on.
+///
+/// The caller has already asked `next_source` whether there *is* a next track. That is the
+/// fourth condition and it is deliberately not here: cutting the run-out off the last track of
+/// the evening would leave a player stopped early for no benefit at all.
+pub fn hands_over_early(transition: Transition, position: Duration, trim: Option<Trim>) -> bool {
+	transition == Transition::Trimmed && trim.is_some_and(|trim| position >= trim.end)
 }
 
 #[cfg(test)]
@@ -861,5 +921,35 @@ mod tests {
 		// switches at all.
 		assert!(Playlist::default().auto_load, "on unless it is turned off");
 		assert!(!Playlist::default().auto_play, "loading is not playing");
+	}
+
+	#[test]
+	fn a_track_gives_way_early_only_when_all_three_things_are_true() {
+		// Arrange: a four-minute file whose music stops twelve seconds before it does.
+		let trim = Some(Trim {
+			start: Duration::from_secs(2),
+			end: Duration::from_secs(228),
+		});
+		let early =
+			|transition, seconds| hands_over_early(transition, Duration::from_secs(seconds), trim);
+
+		// Act / Assert: the run-out is what gets skipped, and only for a list that asked.
+		assert!(!early(Transition::Trimmed, 227), "still playing music");
+		assert!(early(Transition::Trimmed, 228), "the music has stopped");
+		assert!(early(Transition::Trimmed, 239), "seeked into the run-out");
+		assert!(
+			!early(Transition::Whole, 239),
+			"this list plays files whole"
+		);
+
+		// A track nobody has scanned plays whole, whatever the setting says: there is no
+		// second edge to reach, so there is nothing to cut to (PLAN §14c).
+		assert!(
+			!hands_over_early(Transition::Trimmed, Duration::from_secs(600), None),
+			"never scanned"
+		);
+
+		// And a fresh list plays whole, which is what the app did before the setting existed.
+		assert_eq!(Playlist::default().transition, Transition::Whole);
 	}
 }

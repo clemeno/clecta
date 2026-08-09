@@ -1,12 +1,15 @@
 //! One player's panel (PLAN §6, §7): what is loaded, where the playhead is, and the
 //! three transport buttons.
 
+use std::time::Duration;
+
 use iced::widget::{button, column, container, row, text};
 use iced::{Center, Element, Fill, Theme};
 
 use crate::app::Message;
 use crate::deck::{self, Deck, DeckId, Transport};
 use crate::ui;
+use crate::waveform::Trim;
 
 /// How much of a track name fits before it is elided. Fixed rather than measured: a
 /// responsive elide needs the widget's real width, which only `advanced` gives (PLAN §3).
@@ -19,8 +22,15 @@ const RING_WIDTH: f32 = 2.0;
 /// `ring` lights this player as the one a release would land on — under the cursor for an
 /// in-app drag, derived for an OS drop, and never on both (PLAN §10). `sweep` is the
 /// scanning animation's phase, which the strip uses only while this player is being
-/// scanned (PLAN §14a).
-pub fn view(id: DeckId, deck: &Deck, ring: bool, sweep: f32) -> Element<'_, Message> {
+/// scanned (PLAN §14a). `trim` is where the music inside the loaded track sits, if anything
+/// has worked it out — the two jump buttons and the strip's two marks (PLAN §14c).
+pub fn view(
+	id: DeckId,
+	deck: &Deck,
+	trim: Option<Trim>,
+	ring: bool,
+	sweep: f32,
+) -> Element<'_, Message> {
 	let loaded = deck.transport.has_track();
 
 	// Disabled rather than hidden: buttons that come and go make the panel jump, and the
@@ -39,14 +49,26 @@ pub fn view(id: DeckId, deck: &Deck, ring: bool, sweep: f32) -> Element<'_, Mess
 			]
 			.spacing(8),
 			text(ui::elide_middle(deck.title(), TITLE_CHARS)).size(16),
-			text(ui::format_transport(
-				deck.position,
-				deck.track.as_ref().and_then(|track| track.duration)
-			))
-			.size(13),
+			row![
+				text(ui::format_transport(
+					deck.position,
+					deck.track.as_ref().and_then(|track| track.duration)
+				))
+				.size(13)
+				.width(Fill),
+				jump("⇤ 0:00", loaded.then_some(Duration::ZERO), id),
+				jump(
+					"⇥ music",
+					trim.map(|trim| trim.start).filter(|_| loaded),
+					id
+				),
+			]
+			.spacing(6)
+			.align_y(Center),
 			ui::waveform::view(
 				&deck.peaks,
 				progress(deck),
+				music(deck, trim),
 				deck.scanning.then_some(sweep),
 				move |fraction| Message::Seeked(id, fraction),
 			),
@@ -89,6 +111,36 @@ fn panel_style(theme: &Theme, ring: bool) -> container::Style {
 			.width(RING_WIDTH),
 		..base
 	}
+}
+
+/// One of the two places above the strip a playhead can be sent (PLAN §14c).
+///
+/// Dead when there is nowhere to go: no track at all, or a track nothing has found the music
+/// in yet. Dead rather than absent, like every other control in this panel — a button that
+/// came and went as scans landed would make the row jump under the pointer.
+fn jump(label: &'static str, to: Option<Duration>, id: DeckId) -> Element<'static, Message> {
+	button(text(label).size(11))
+		.padding([2, 6])
+		.on_press_maybe(to.map(|to| Message::Jumped(id, to)))
+		.into()
+}
+
+/// The music's two edges as fractions of the track, for the marks on the strip.
+///
+/// `None` unless everything needed is there — a track, a length to divide by, and a trim —
+/// because a mark drawn against a length the app had to guess at would be a line in the wrong
+/// place, which is worse than no line.
+fn music(deck: &Deck, trim: Option<Trim>) -> Option<(f32, f32)> {
+	let total = deck.track.as_ref()?.duration?.as_secs_f32();
+	let trim = trim?;
+	if total <= 0.0 {
+		return None;
+	}
+
+	Some((
+		(trim.start.as_secs_f32() / total).clamp(0.0, 1.0),
+		(trim.end.as_secs_f32() / total).clamp(0.0, 1.0),
+	))
 }
 
 /// How far through the track the playhead is, for the waveform's playhead line.

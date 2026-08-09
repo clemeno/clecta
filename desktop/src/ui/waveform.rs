@@ -32,6 +32,11 @@ const HEIGHT: f32 = 56.0;
 /// The playhead's width in pixels. One is invisible against a dense waveform.
 const PLAYHEAD: f32 = 2.0;
 
+/// The width of a music-edge mark. One pixel, and thinner than the playhead on purpose: these
+/// two are landmarks, and one of them sits at the very start of most tracks, where anything
+/// thicker would read as the playhead parked there (PLAN §14c).
+const EDGE: f32 = 1.0;
+
 /// The shortest bar drawn for a column that has *any* signal in it. Digital silence stays
 /// flat, but a quiet passage still reads as "there is a track here", which is the
 /// difference between a fade-out and a scan that has not landed yet.
@@ -55,6 +60,11 @@ struct Waveform<'a, Message> {
 	/// Doubles as the answer to "is this strip clickable?", which is not a coincidence: a
 	/// strip with no total to place a playhead against has no total to seek within either.
 	progress: Option<f32>,
+	/// Where the music starts and stops inside the track, as fractions of it, or `None` for a
+	/// track nothing has scanned for its edges yet (PLAN §14c). Drawn as two marks, which is
+	/// what makes the **⇥ music** button above the strip land somewhere visible rather than
+	/// somewhere the user has to take on trust.
+	music: Option<(f32, f32)>,
 	/// The scanning animation's phase, `0.0..=1.0`, or `None` when no scan is running —
 	/// which covers an empty player and a scan that failed as well as a finished one.
 	sweep: Option<f32>,
@@ -134,12 +144,14 @@ fn scrub(event: &Event, over: bool, scrubbing: bool) -> Scrub {
 pub fn view<'a, Message: 'a>(
 	peaks: &'a [f32],
 	progress: Option<f32>,
+	music: Option<(f32, f32)>,
 	sweep: Option<f32>,
 	on_seek: impl Fn(f32) -> Message + 'a,
 ) -> Element<'a, Message> {
 	Element::new(Waveform {
 		peaks,
 		progress,
+		music,
 		sweep,
 		on_seek: Box::new(on_seek),
 	})
@@ -380,6 +392,26 @@ where
 				},
 				colour,
 			);
+		}
+
+		// The music's two edges, under the playhead and over the bars: a full-height hairline
+		// at each, in the same green the drop ring and the drag caret use, because it answers
+		// the same kind of question — this is the place a control is talking about (PLAN §14c).
+		if let Some((start, end)) = self.music {
+			for edge in [start, end] {
+				renderer.fill_quad(
+					renderer::Quad {
+						bounds: Rectangle {
+							x: bounds.x + (edge * bounds.width).clamp(0.0, bounds.width - EDGE),
+							y: bounds.y,
+							width: EDGE,
+							height: bounds.height,
+						},
+						..Default::default()
+					},
+					palette.success.strong.color,
+				);
+			}
 		}
 
 		// Last, so it is never buried under a loud bar — and only when there is a length to

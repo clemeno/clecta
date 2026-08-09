@@ -5,11 +5,13 @@
 //! in which `ListId` they carry — so this is one function and not three, and a rule added
 //! here is added to all of them.
 
-use iced::widget::{Space, button, checkbox, column, container, mouse_area, row, scrollable, text};
+use iced::widget::{
+	Space, button, checkbox, column, container, mouse_area, pick_list, row, scrollable, text,
+};
 use iced::{Center, Element, Fill, Theme};
 
 use crate::app::{DropTarget, Message, Zone};
-use crate::playlist::{ListId, Playlist};
+use crate::playlist::{ListId, Playlist, Transition};
 use crate::ui;
 
 /// One row's height, pinned for the same reason the files pane pins its own (PLAN §9): a
@@ -174,19 +176,35 @@ fn header(id: ListId, addable: bool) -> Element<'static, Message> {
 /// start — the same "dead rather than absent, and dead for a reason" rule the footer's buttons
 /// follow. Dead rather than silently ignored: a ticked box that does nothing is a lie about
 /// what the app will do at the end of the track.
+/// …and *when* it does it (PLAN §7b), which is the third answer to the same question and
+/// therefore sits with the other two rather than in the mixer or in a settings window.
+///
+/// A `pick_list` rather than a third checkbox, for the reason the crossfader's curve is one:
+/// the two positions are not "on" and "off" but two different behaviours, both of which want
+/// naming. It goes dead with the other switch for the same reason **Auto-play** does — a list
+/// that hands nothing over has no transition to make.
 fn switches(id: ListId, list: &Playlist) -> Element<'static, Message> {
 	let auto_load = list.auto_load;
 
 	let switch =
 		|on: bool, label: &'static str| checkbox(on).label(label).text_size(11).size(12).spacing(4);
 
-	row![
-		switch(auto_load, "Auto-load").on_toggle(move |on| Message::QueueAutoLoad(id, on)),
-		switch(list.auto_play, "Auto-play")
-			.on_toggle_maybe(auto_load.then_some(move |on| Message::QueueAutoPlay(id, on))),
+	column![
+		row![
+			switch(auto_load, "Auto-load").on_toggle(move |on| Message::QueueAutoLoad(id, on)),
+			switch(list.auto_play, "Auto-play")
+				.on_toggle_maybe(auto_load.then_some(move |on| Message::QueueAutoPlay(id, on))),
+		]
+		.spacing(10)
+		.align_y(Center),
+		pick_list(Transition::ALL, Some(list.transition), move |transition| {
+			Message::QueueTransition(id, transition)
+		})
+		.text_size(11)
+		.padding([1, 5])
+		.width(Fill),
 	]
-	.spacing(10)
-	.align_y(Center)
+	.spacing(4)
 	.into()
 }
 

@@ -1,10 +1,13 @@
-//! The waveform's arithmetic (PLAN §14a): folding a file's samples down to a small array
-//! of amplitudes, and matching that array to the pixel columns drawn from it.
+//! The waveform's arithmetic (PLAN §14a, §14c): folding a file's samples down to a small
+//! array of amplitudes, finding where the music inside the file starts and stops, and
+//! matching the array to the pixel columns drawn from it.
 //!
-//! Pure — no rodio, no iced, no filesystem. `audio::peaks` feeds `Fold` one decoded sample
-//! at a time and `ui::waveform` reads the result back through `column_peak`, so the
-//! arithmetic both ends depend on sits in one place and can be checked with no audio
+//! Pure — no rodio, no iced, no filesystem. `audio::scan` feeds `Fold` and `Edges` one
+//! decoded sample at a time and `ui::waveform` reads the result back through `column_peak`,
+//! so the arithmetic both ends depend on sits in one place and can be checked with no audio
 //! device and no window (PLAN §12).
+
+use std::time::Duration;
 
 /// The most amplitudes a scan keeps. A finished scan holds between half this and this, so
 /// the array is always at least as detailed as the widest panel anyone will drag the
@@ -87,6 +90,85 @@ impl Fold {
 			self.columns.push(self.current);
 		}
 		self.columns
+	}
+}
+
+/// The quietest sample that still counts as music, as a fraction of full scale.
+///
+/// −50 dBFS. Digital silence is 0 and a mastered track sits within a few dB of 1, so
+/// anything in between is a judgement — and this is the knob for it. Low enough that a fade
+/// is not clipped and a quiet intro is not mistaken for the leader; high enough to sit above
+/// the dither and the tape hiss a rip carries, which are the two things that would otherwise
+/// make every file's music start at sample zero.
+///
+/// `ponytail:` one threshold for every file, rather than one derived from the track's own
+/// noise floor. A vinyl rip with a loud floor reads as music throughout and simply gets no
+/// trim, which is the same answer as not having scanned it. The upgrade is a percentile of
+/// the file's own amplitudes, which needs the whole array kept rather than a running pair.
+const SILENCE: f32 = 0.003_162_3;
+
+/// Where the music actually sits inside a file (PLAN §14c).
+///
+/// Both ends are measured from the start of the file, so `start` is what to seek to and
+/// `end` is when the track is over as far as anybody listening is concerned. A file with no
+/// leader and no run-out gives `0` and its full length, which is why there is no separate
+/// "this file needs no trimming" state — the numbers say it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trim {
+	pub start: Duration,
+	pub end: Duration,
+}
+
+/// The two edges of the music, found in the same pass that folds the waveform.
+///
+/// Sample-exact rather than read off the finished peak array, which is the whole reason this
+/// is a second accumulator instead of two lines in `column_peak`'s caller: a scan holds at
+/// most 2048 columns however long the file, so one column of a five-minute track is a sixth
+/// of a second. Trimming to a *column* would clip the first transient or leave a sixth of a
+/// second of leader — audible either way, and this costs one comparison per sample.
+#[derive(Debug, Default)]
+pub struct Edges {
+	/// How many samples have been pushed, which is also the index of the next one.
+	seen: u64,
+	/// The first sample above the threshold, and one past the last.
+	first: Option<u64>,
+	last: u64,
+}
+
+impl Edges {
+	/// Add one decoded sample, the same one `Fold::push` is given.
+	///
+	/// `>` and not `>=`, so a file of digital silence has no edges at all rather than edges
+	/// at its two ends. A `NaN` fails the comparison and therefore reads as silence, which is
+	/// the same answer `Fold` gives it.
+	pub fn push(&mut self, sample: f32) {
+		self.seen += 1;
+
+		if sample.abs() > SILENCE {
+			self.first.get_or_insert(self.seen - 1);
+			self.last = self.seen;
+		}
+	}
+
+	/// The edges as times, or `None` for a file with no music in it at all — which is a real
+	/// answer worth storing rather than a failure: it is what stops the app trimming a track
+	/// of pure silence down to nothing.
+	///
+	/// `rate` and `channels` are the stream's, and the product is how many samples a second
+	/// of the file holds: the decoder interleaves channels, so a stereo second is twice the
+	/// sample rate. Zero for either is impossible from rodio (both are `NonZero`) and is
+	/// guarded anyway, because this divides by it.
+	pub fn finish(self, rate: u32, channels: u16) -> Option<Trim> {
+		let per_second = f64::from(rate) * f64::from(channels);
+		let first = self.first?;
+		if per_second <= 0.0 {
+			return None;
+		}
+
+		Some(Trim {
+			start: Duration::from_secs_f64(first as f64 / per_second),
+			end: Duration::from_secs_f64(self.last as f64 / per_second),
+		})
 	}
 }
 
@@ -219,6 +301,74 @@ mod tests {
 
 		// Assert
 		assert_eq!(peaks, vec![0.4, 0.0, 0.2]);
+	}
+
+	/// Push a whole slice through `Edges`, the way `audio::scan` pushes a whole file.
+	fn edges(samples: &[f32], rate: u32, channels: u16) -> Option<Trim> {
+		let mut edges = Edges::default();
+		for sample in samples {
+			edges.push(*sample);
+		}
+		edges.finish(rate, channels)
+	}
+
+	#[test]
+	fn the_music_starts_after_the_leader_and_stops_before_the_run_out() {
+		// Arrange: a tenth of a second of digital silence, two tenths of music, a tenth of
+		// silence again — at a rate that makes the answer readable.
+		let mut samples = vec![0.0_f32; 400];
+		samples[100..300].fill(0.8);
+
+		// Act
+		let trim = edges(&samples, 1_000, 1).expect("a file with music in it");
+
+		// Assert: exactly, because the whole reason this is measured per sample rather than
+		// per waveform column is that a sixth of a second either way is audible (PLAN §14c).
+		assert_eq!(trim.start, Duration::from_millis(100));
+		assert_eq!(trim.end, Duration::from_millis(300));
+	}
+
+	#[test]
+	fn a_channel_is_not_a_second() {
+		// Arrange / Act: the same samples read as stereo, where the decoder interleaves two
+		// channels into every frame — so the file is half as long as its sample count says.
+		let mut samples = vec![0.0_f32; 400];
+		samples[100..300].fill(0.8);
+
+		// Assert: getting this wrong is a trim that lands twice as far in as the music does,
+		// which on a handover means the next track starts halfway through its first verse.
+		let trim = edges(&samples, 1_000, 2).expect("a file with music in it");
+		assert_eq!(trim.start, Duration::from_millis(50));
+		assert_eq!(trim.end, Duration::from_millis(150));
+	}
+
+	#[test]
+	fn a_file_with_no_music_in_it_has_no_edges() {
+		// Arrange / Act / Assert: silence, and near-silence under the threshold. `None` is an
+		// answer rather than a failure — it is what stops a track of pure silence being
+		// trimmed away to nothing.
+		assert_eq!(edges(&[0.0; 100], 1_000, 1), None, "digital silence");
+		assert_eq!(edges(&[0.0005; 100], 1_000, 1), None, "under the threshold");
+		assert_eq!(edges(&[], 1_000, 1), None, "no samples at all");
+
+		// And a `NaN` is silence, the same answer `Fold` gives it: a decoder that emits one
+		// must not make a file's music appear to start there.
+		assert_eq!(edges(&[f32::NAN; 100], 1_000, 1), None, "not a number");
+	}
+
+	#[test]
+	fn one_loud_sample_is_enough_to_be_the_edge() {
+		// Arrange / Act: a click in the leader, which is what a rip of a scratched record
+		// puts there.
+		let mut samples = vec![0.0_f32; 400];
+		samples[10] = 0.9;
+		samples[200] = 0.9;
+
+		// Assert: the click wins, and it is the ceiling named on `SILENCE` — no hold time, so
+		// a lone tick before the music reads as the start of it. A file that trims wrongly is
+		// a file to re-scan after the threshold moves, which is what the button is for.
+		let trim = edges(&samples, 1_000, 1).expect("a file with a click in it");
+		assert_eq!(trim.start, Duration::from_millis(10));
 	}
 
 	#[test]

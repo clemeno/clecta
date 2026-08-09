@@ -3,7 +3,7 @@
 //!
 //! This is the only module that knows rodio exists. Everything it exposes is either a
 //! command to the audio thread or a poll of it — there is no channel back, because rodio
-//! does not offer one (PLAN §4) — with one exception at the bottom: `peaks`, which decodes
+//! does not offer one (PLAN §4) — with one exception at the bottom: `scan`, which decodes
 //! a file for its shape rather than for its sound and needs no device at all (PLAN §14a).
 //!
 //! Every claim encoded here was checked by the audio spike before this file existed, so
@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::deck::DeckId;
-use crate::waveform::Fold;
+use crate::waveform::{Edges, Fold, Trim};
 
 /// The audio output, alive for as long as the app can make a sound.
 pub struct Engine {
@@ -187,22 +187,53 @@ pub fn duration(path: &Path) -> Option<Duration> {
 	decoder(path).ok()?.total_duration()
 }
 
-/// Scan a whole file into the amplitude array the waveform draws (PLAN §14a).
+/// What one decode of a whole file works out about it (PLAN §14a, §14c).
+///
+/// Two answers from one pass, because the pass is the expensive part: the array the waveform
+/// draws, and where the music inside the file starts and stops. Splitting them into two
+/// functions would mean decoding every track twice for facts that arrive together.
+///
+/// `Clone` because it travels inside a `Message` (PLAN §5), which iced requires to be one —
+/// eight kilobytes of amplitudes copied once per track loaded.
+#[derive(Debug, Clone)]
+pub struct Scan {
+	pub peaks: Vec<f32>,
+	/// `None` for a file with nothing above the silence threshold in it (PLAN §14c).
+	pub trim: Option<Trim>,
+}
+
+/// Scan a whole file: the amplitude array the waveform draws, and the music's two edges.
 ///
 /// A second, independent decode of a file that is already loaded — the playing one cannot
 /// be read twice, and reading it would move the playhead. It decodes every sample and
-/// throws them all away as it goes, keeping only what `Fold` folds, so the memory cost is
-/// the array and nothing else however long the track.
+/// throws them all away as it goes, keeping only what `Fold` folds and what `Edges` counts,
+/// so the memory cost is the array and nothing else however long the track.
 ///
 /// A free function rather than a method: a scan needs no output device, so the waveform
 /// still appears while the app is saying "no audio" (PLAN §11). It takes **seconds** for a
-/// long track, which is why the only caller runs it off the GUI thread (PLAN §4).
-pub fn peaks(path: &Path) -> Result<Vec<f32>> {
+/// long track, which is why every caller runs it off the GUI thread (PLAN §4).
+///
+/// `ponytail:` the rate and the channel count are read once, before the first sample. rodio
+/// allows both to change at a span boundary, which a chained or variable-rate stream can do;
+/// a file that did would have its trim scaled by the ratio. Every container the app offers
+/// (PLAN §3) is one span, and the fix if that stops being true is to accumulate seconds
+/// rather than samples.
+pub fn scan(path: &Path) -> Result<Scan> {
+	let source = decoder(path)?;
+	let rate = source.sample_rate().get();
+	let channels = source.channels().get();
+
 	let mut fold = Fold::default();
-	for sample in decoder(path)? {
+	let mut edges = Edges::default();
+	for sample in source {
 		fold.push(sample);
+		edges.push(sample);
 	}
-	Ok(fold.finish())
+
+	Ok(Scan {
+		peaks: fold.finish(),
+		trim: edges.finish(rate, channels),
+	})
 }
 
 #[cfg(test)]
@@ -212,7 +243,8 @@ mod tests {
 	/// The one test in this module, and the only one that can be: everything else here
 	/// needs an output device (PLAN §12). A scan does not — it decodes and throws away —
 	/// so the decode path can be checked for real, from a file on disk to the array the
-	/// waveform draws, with nothing plugged in and nobody clicking.
+	/// waveform draws and the two edges the handover trims to, with nothing plugged in and
+	/// nobody clicking.
 	///
 	/// The fixture is generated rather than committed: a binary in the repo is a fixture
 	/// nobody can read a diff of, and sixteen-bit PCM is a header and some numbers.
@@ -229,12 +261,13 @@ mod tests {
 		std::fs::write(&path, wav(&samples, RATE)).expect("writing the fixture");
 
 		// Act
-		let peaks = peaks(&path).expect("scanning the fixture");
+		let scanned = scan(&path).expect("scanning the fixture");
 		let _ = std::fs::remove_file(&path);
 
 		// Assert: silent through the first half, loud through the second. The halves are
 		// compared a little inside their edges, because the column straddling the join
 		// legitimately contains both.
+		let peaks = scanned.peaks;
 		let half = peaks.len() / 2;
 		let quietest_loud = peaks[half + 1..].iter().copied().fold(1.0, f32::min);
 		let loudest_quiet = peaks[..half - 1].iter().copied().fold(0.0, f32::max);
@@ -244,6 +277,13 @@ mod tests {
 			quietest_loud > 0.9,
 			"the loud second reads as {quietest_loud}"
 		);
+
+		// And the same join, read as a time rather than as a column: the music starts one
+		// second in and runs to the end (PLAN §14c). This is the whole point of measuring the
+		// edges per sample — the array above could only say "somewhere in this column".
+		let trim = scanned.trim.expect("the fixture is not silent");
+		assert_eq!(trim.start, Duration::from_secs(1), "the leader");
+		assert_eq!(trim.end, Duration::from_secs(2), "runs to the end");
 	}
 
 	/// The other thing that needs no output device: asking a file how long it is (PLAN §7a).

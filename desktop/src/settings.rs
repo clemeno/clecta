@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::MIN_PANE;
 use crate::mixer::Curve;
 use crate::paths;
+use crate::playlist::Transition;
 
 const FILE: &str = "settings.json";
 
@@ -74,6 +75,11 @@ pub struct Settings {
 	/// which is what the app did before the switches existed.
 	pub auto_load: [bool; 3],
 	pub auto_play: [bool; 3],
+	/// When each list's track takes over from the one playing (PLAN §7b). Same order and same
+	/// reasoning as the two switches above, and nothing sanitizes it for the same reason: serde
+	/// has already rejected anything that is not one of the two variants, and a file that
+	/// predates the field reads as `Whole` — what the app did before there was a choice.
+	pub transition: [Transition; 3],
 }
 
 impl Default for Settings {
@@ -92,6 +98,7 @@ impl Default for Settings {
 			common: Vec::new(),
 			auto_load: [true; 3],
 			auto_play: [false; 3],
+			transition: [Transition::Whole; 3],
 		}
 	}
 }
@@ -228,6 +235,7 @@ mod tests {
 			common: vec![queued("clecta-common.wav")],
 			auto_load: [false, true, false],
 			auto_play: [true, false, true],
+			transition: [Transition::Trimmed, Transition::Whole, Transition::Trimmed],
 		}
 	}
 
@@ -278,6 +286,11 @@ mod tests {
 		// behaving exactly as it did — handing tracks over, never starting them (PLAN §7a).
 		assert_eq!(settings.auto_load, [true; 3], "a file that predates them");
 		assert_eq!(settings.auto_play, [false; 3]);
+		assert_eq!(
+			settings.transition,
+			[Transition::Whole; 3],
+			"and files play whole until someone says otherwise"
+		);
 	}
 
 	#[test]

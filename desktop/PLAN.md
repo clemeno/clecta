@@ -822,6 +822,80 @@ that exists to be planned against must not do that.
 
 ---
 
+## 7b. The transition (`playlist.rs`, `app.rs`)
+
+A track ends twice. The file runs out, which is what §7a's handover waits for — and before
+that, somewhere earlier, the *music* stops. In between sits whatever the encoder padded, the
+engineer faded into, or nobody trimmed off the master: two seconds of room tone, eight seconds
+of run-out groove, the silence an MP3 encoder adds because its frames do not divide evenly.
+Played back to back, that gap is the difference between a set and a sequence of files.
+
+So each list gets a third setting beside **Auto-load** and **Auto-play**:
+
+| | **Whole track** | **Skip blanks** |
+|---|---|---|
+| when the next track takes over | when the file runs out | when the music stops |
+| where the next track starts | 0:00 | where *its* music starts |
+
+**Per list, and read from the list that supplies the next track**, which is Q26's rule
+unchanged: the list waiting behind a player is what says how it wants to take over, so Cue 1
+can run an evening back to back while **Next up** stays a shelf that plays what it is handed,
+whole. A `pick_list` rather than a third checkbox, for the same reason the crossfader's curve
+is one — the two positions are not on and off but two behaviours, and both want naming.
+
+`Whole` is the default and has to be: cutting a track short is not a thing to start doing
+unasked, the same reasoning that keeps every load on `Stopped` (§7).
+
+### Two ends, one handover
+
+The tick already reads the playhead 20 times a second (§4), which means the second end costs
+no new machinery at all — only a comparison next to the one already there:
+
+```rust
+if engine.finished(id) { /* the file ran out (§7) */ }
+else if self.cuts_early(id, position) { /* the music stopped */ }
+```
+
+Both push the player onto the same `ended` list, so `advance` is reached by two roads and
+knows about neither. What the two branches must *not* share is what they do to the player, and
+the difference is the one the last fix in §7 turned up: `empty()` means rodio has consumed the
+source, so a finished track has to be re-appended before anything can play it again. An early
+cut has consumed nothing — the file is still in the player and still sounding — so it is
+`stop`ped instead, rewound and paused. Re-appending there would be a wasted decode, and doing
+nothing at all would leave the tail audible under the next track if the load failed.
+
+Three conditions, and each of them is a reason not to cut:
+
+1. **The list waiting behind asked for it.** Off by default, per list.
+2. **This track's edges are known** (§14c). A file nobody has scanned plays whole, silently —
+   a notice every four minutes about a setting the user turned on themselves is noise.
+3. **There is something to hand over to.** `next_source` is asked first, so the last track of
+   the evening plays its run-out: stopping a player early with nothing to follow is worse than
+   the silence it saves.
+
+The third is why `cuts_early` lives in `app.rs` and `hands_over_early` — the pure part, and the
+tested one — lives in `playlist.rs`. The rule is arithmetic; knowing whether a queue has
+anything left is the app's business.
+
+The 50 ms tick puts the cut up to a tick late, which is a twentieth of a second of run-out that
+still plays. Nobody has ever heard that. Making it exact would mean a callback rodio does not
+offer, which is the same wall §7 hits at the other end of the track.
+
+### The other half of the same setting
+
+A list that skips the blanks at the end of one track also skips them at the start of the next:
+`advance` seeks the freshly loaded track to where *its* music starts before pressing Play. Same
+setting, same list, both ends — a handover that trimmed one end and not the other would leave
+the gap it just removed.
+
+That seek is the only thing that has to know the *incoming* track's edges, and it needs them
+**at load time**, not two seconds later when a scan lands: a jump three seconds into a track
+that is already playing is exactly the artefact this feature exists to remove. So it uses what
+is already known and nothing else (§14c), and a track nobody has prepared starts at 0:00. That
+is the whole reason the folder scan of §11b has a button.
+
+---
+
 ## 8. The mixer (`mixer.rs`)
 
 The whole of it is one pure function, and that is the point.
@@ -1473,6 +1547,76 @@ was chosen for.
 
 ---
 
+## 11b. Preparing a folder (`fsio.rs`, `app.rs`, `ui/browser.rs`)
+
+The cache of §11a fills itself as the app is used: a track is loaded, it is scanned, the answer
+is kept. That is enough while the only thing waiting on it is a picture — a waveform arriving a
+second late is a waveform arriving.
+
+§7b broke that. Where a track's music starts has to be known **before** the track is loaded,
+because the seek that uses it happens at the handover; and a queue measurement deliberately
+does not work it out, because working it out means decoding the whole file and a queue edit
+that decoded fifty tracks would freeze four threads for half a minute. So there has to be a way
+to say *do all of this now*, and it is two buttons under the files pane:
+
+- **Prepare folder** — every media file in the shown folder and everything under it, waveform,
+  length and music edges, into the cache.
+- **Clear cache** — throw all of it away, for every file, and start again.
+
+### The walk
+
+`fsio::media_tree` is the app's one recursive read, and it is deliberately not what the pane
+does: the pane shows one folder because that is where the user is, and this walks the tree
+because "prepare this folder" means an evening's music, which lives in a folder of albums.
+
+**Symbolic links to folders are not followed**, which is the whole termination argument: a link
+pointing at one of its own ancestors is an infinite tree, and `DirEntry::file_type` reports a
+link as a link rather than as the folder behind it. A link to a *file* is still collected,
+because the pane already lists those and playing one works.
+
+The walk runs to completion before any decoding starts. That costs a second on a large tree and
+buys a **total** — a count that grew as folders were discovered would show progress running
+backwards, which is the one thing a progress display must not do.
+
+### Four at a time, and no timer
+
+A scan is a decode of an entire file — a third of a second for a typical MP3 (§14a). One at a
+time leaves a folder of two thousand tracks running for ten minutes; one per core leaves
+nothing for the audio callback of somebody who is playing a set while it works. Four is the
+compromise, and it is a constant with the reasoning next to it.
+
+The driver is a **chain of messages that refills itself**, not a subscription and not a job
+queue: `scan_step` hands out as many files as the fan-out has room for, each answer calls it
+again, and it clears itself when the last thread reports. Nothing ticks, nothing polls, and a
+scan that is not running costs exactly nothing — the same rule every subscription in §4 follows,
+reached without needing one.
+
+Three counters, and they are separate because the files go out ahead of the answers: `next` is
+what has been handed to a thread, `done` is what has come back — which is the number on screen,
+because a count that jumped four ahead of the work would be a lie — and `running` is how many
+are out, which is what the fan-out is capped against and what says when the scan is over.
+
+**Stop cuts the list down to what has already gone out** rather than dropping the scan where it
+stands. There is no way to interrupt a decode that does not mean checking a flag inside the
+sample loop, so the four files in flight are going to finish either way; the counters stay
+honest, their answers are kept, and the scan clears itself as the last of them lands. Dropping
+the state instead would leave four threads reporting into a scan that no longer exists — and
+starting another one before they landed would count their files twice and run `running` past
+zero, which is a panic in a debug build and a very long scan in a release one.
+
+### Clearing it
+
+The mirror image, and the only button in the app that throws work away. It is one write
+transaction that drops all three tables — asked about first with the same modal the duplicate
+warning uses (§7a), and run off the GUI thread like every other touch of the store, because a
+commit is an `fsync`.
+
+What it does **not** clear is what the app has already learned this run. Those answers are
+still true, and blanking them would wipe the waveform of a track that is playing. The disk is
+what a clean start means: the next launch works everything out again.
+
+---
+
 ## 12. Testing
 
 Rust's built-in `#[test]` / `#[cfg(test)]`, AAA pattern, no framework — same as cmote.
@@ -1491,7 +1635,9 @@ otherwise pure; anything needing a device or a real folder is manual.
   parse, so adding a field cannot invalidate a file someone already has; and an
   out-of-range value falls back **alone**, with the good values around it kept. The
   missing-field test names the newest fields specifically: a file written before the queue
-  switches existed must read as "hand over, do not start", which is what the app did then.
+  switches existed must read as "hand over, do not start", and one written before the
+  transition existed as "play the file whole" — in both cases what the app did at the time
+  (§7b).
 - **`tree.rs`** — collapse takes the subtree and keeps the listings; `None` vs
   `Some(vec![])` survives a collapse/expand round trip. On what `expand` returns, the
   implementation split the case in two, and the split is the interesting part: **`expand`
@@ -1522,6 +1668,15 @@ otherwise pure; anything needing a device or a real folder is manual.
   immediately**: it caught that `f32::clamp` passes a `NaN` through unchanged, so the
   first version's clamp was decoration and a mis-measured strip would have panicked
   `Duration::mul_f32` on the click (§14b).
+
+  `Edges` is here too, and it is the arithmetic §7b trusts with a cut (§14c). A leader and a
+  run-out are found to the sample; a `NaN` and everything under the threshold read as silence,
+  so a file of them has *no* edges rather than edges at its two ends; and one loud sample is
+  enough to be one, which is the no-hold-time ceiling pinned rather than merely admitted. The
+  fourth is the one that would ship silently wrong: **a channel is not a second**. The decoder
+  interleaves, so a stereo file holds twice the sample rate per second, and getting that
+  backwards puts every trim at twice its real depth — a handover that starts the next track
+  halfway through its first verse, on stereo files only, which is all of them.
 - **`playlist.rs`** — the queues (§7a), and almost every test is about the *selection* rather
   than the list: an insert above it carries it down, a remove above it pulls it up, removing
   the selected row lands on whatever slid into its place, removing the last row falls back to
@@ -1563,6 +1718,18 @@ otherwise pure; anything needing a device or a real folder is manual.
   duplicate reads into one read per file. The second checks that a row *measured and answered
   nothing* is never asked about again either, which is the other thing the two-layer
   `Option<Option<Duration>>` is for.
+
+  `hands_over_early` gets one, and it is three conditions rather than a number (§7b): the music
+  has stopped *and* this list asked to skip the blanks *and* somebody has scanned the track.
+  It pins the two silent cases especially — a list set to **Whole track** never cuts however
+  far past the music the playhead is, and a track nothing has scanned plays whole for ever
+  rather than being cut at zero, which is what a missing trim read as "the music ends at the
+  start" would do.
+- **`fsio.rs`** — one test, for the one rule in the module (§11b): the recursive walk finds
+  media at every depth, in the pane's own order, and nothing that is not media at any depth.
+  Plus the boundary it draws around failure — an unreadable **root** is an error, because a
+  scan that silently found nothing there is indistinguishable from a folder with no music in
+  it, while a folder deeper down that cannot be read is skipped in silence.
 - **`ui/mod.rs`** — `visible_rows(scroll, total, row_height, built)`, the virtualization's
   whole arithmetic, shared by the files pane and the three queues (§9). A range wrong by one
   row leaves a blank strip where a row should be; wrong by a lot shows an empty pane over a
@@ -1584,7 +1751,12 @@ otherwise pure; anything needing a device or a real folder is manual.
   Then one pass over a **real database in a temporary folder**, because "the bytes are right"
   and "redb was asked the right question" are different claims: store and read back, a file
   that was never cached, then rewrite the fixture and watch its entry stop answering, then
-  delete a second fixture and watch `prune` drop exactly its entry and leave the other alone.
+  delete a second fixture and watch `prune` drop exactly its entry and leave the other alone,
+  then store a trim, read it back, and `clear` the lot — every table empty afterwards, and the
+  store still usable, since a cleared cache is a cache and not a corpse (§11b). The trim
+  encoding gets its own pure test for the halves that matter: "scanned, and this file is
+  silent" told apart from "never scanned", and **half a trim** — eight bytes where sixteen
+  belong — thrown away rather than read as a start with no end.
 - **`ui/playlist.rs`** — `running_time`, which is the only thing in that file that is not
   widgets: how many tracks, how long they run, and the `+` that says the total is a floor
   rather than a figure. An empty list says *nothing at all* rather than `0 · 0:00`, because
@@ -1619,12 +1791,23 @@ otherwise pure; anything needing a device or a real folder is manual.
   *not* fire — a bare `r` above all, since a plain letter that re-listed the folder would
   go off on any stray key press. The table is written in `Modifiers::COMMAND` rather than
   in `LOGO` or `CTRL`, so the same test asserts Cmd on macOS and Ctrl on Windows.
+
+  The folder scan's bookkeeping is the third (§11b), and it is three counters with no timer:
+  the `Task`s the driver returns need a window, but the arithmetic deciding how many there are
+  does not. One test runs a whole ten-file scan an answer at a time and asserts the fan-out is
+  never exceeded, every file goes out exactly once, and no thread is left unaccounted for. The
+  other is **Stop**: nothing more goes out, the scan is not over until the four already
+  decoding report, and each of them is counted once — the case that would otherwise underflow
+  `running` the moment a second scan was started on top of a cancelled one.
 - **`audio.rs`** — one test, and the only one this module can have: everything else here
   needs an output device. A *scan* does not, so the decode path is checked for real, from a
   file on disk to the array the widget draws. The fixture is generated rather than
   committed — one second of digital silence then one second at full scale, written as
   sixteen-bit PCM by twelve lines of header — because a binary in the repo is a fixture
-  nobody can read a diff of.
+  nobody can read a diff of. The same fixture now checks the *other* half of a scan (§14c):
+  the join the array can only place "somewhere in this column" is asserted as a time, exactly
+  — the music starts at one second and runs to two — which is the whole reason the edges are
+  counted per sample.
 - **Manual smoke test**, documented in the README: load both players, play both, sweep
   the crossfader on **both curves**, stop and re-play, load a `.mp4`, fold the tree, drag a
   row to a player, drag a file in from Finder, pull the audio device — and the
@@ -2056,6 +2239,100 @@ not to make the widget cleverer.
 
 ---
 
+## 14c. Where the music is (`waveform.rs`, `audio.rs`, `cache.rs`, `ui/deck.rs`)
+
+§7b needs one number per track and its mirror: where the music starts, and where it stops. A
+`Trim` is those two `Duration`s measured from the top of the file, and everything below is
+about how they are found, kept and shown.
+
+### Found in the pass that was already running
+
+`audio::scan` decodes every sample of a file exactly once and throws them all away as it goes
+(§14a). Finding the edges is one comparison per sample bolted onto that loop — a second
+accumulator beside `Fold`, not a second pass and certainly not a second decode.
+
+**Sample-exact, not read off the finished waveform.** The array holds at most 2048 columns
+however long the file is, so one column of a five-minute track is a sixth of a second: trimming
+to a column would either clip the first transient or leave a sixth of a second of leader, and
+both are audible in exactly the moment this feature exists to smooth. The peaks are for the
+eye; the edges are for the transport, and they are worth their own arithmetic.
+
+A file with nothing above the threshold in it has **no** edges — `None`, which is an answer and
+not a failure. It is what stops a track of pure silence from being trimmed away to nothing, and
+it is worth storing, or every launch would decode it again to be told the same thing.
+
+### The threshold, which is a knob
+
+−50 dBFS. Digital silence is 0 and a mastered track sits within a few dB of 1, so anything in
+between is a judgement: low enough not to clip a fade or mistake a quiet intro for the leader,
+high enough to sit above the dither and the tape hiss a rip carries — which are the two things
+that would otherwise make every file's music start at sample zero and the whole feature do
+nothing.
+
+`ponytail:` one threshold for every file, and no hold time. A lone click in the leader of a
+scratched record is therefore where the music starts, and a vinyl rip with a loud floor reads as
+music throughout and gets no useful trim at all — the same answer as not having scanned it,
+which is the failure mode to prefer. The upgrade is a percentile of the file's own amplitudes,
+which needs the whole array kept rather than a running pair.
+
+### Kept in a table, not in a version bump
+
+The edges are worked out by the *same* pass as the waveform, so they could have been two more
+fields on that record. A table of their own (§11a) costs one lookup and buys two things: every
+waveform already on disk stays readable, where a changed record layout would have meant bumping
+`FORMAT` and rescanning all of them to add a field; and a handover that wants a track's start
+reads sixteen bytes rather than eight kilobytes of amplitudes it has no use for. §11a promised
+that the next kind of fact would be a table rather than a migration. This is the promise being
+kept, and the first chance to break it.
+
+Both tables have to answer for a scan to count as cached. A file scanned by a build that knew
+nothing about edges has its waveform and no trim, so it is decoded once more and both are
+stored — which is the whole cost of adding this to an existing cache.
+
+### In the app: one map, three readers
+
+`Clecta::trims` is a `HashMap<PathBuf, Trim>` of what this run has been told, filled by every
+job that finds out — a track's own scan, a queue measurement reading the cache, a folder scan
+working it out — and read by the three places that need it: the early cut, the track it starts
+next, and the button above the strip.
+
+A map rather than a field on `Deck` and another on `playlist::Item`, because the same answer
+serves a loaded track, a queued one, and one that is neither yet. **A miss is the ordinary
+state** and means *play this whole*: nothing here is required for the app to work, which is
+what makes §11b's button an optimization rather than a step.
+
+A `None` from a job is not stored as "there is no trim", and the distinction matters: it means
+*that* job could not say, and another one still might — a queue measurement only reads the
+cache where a folder scan decodes. Overwriting a known answer with silence would make queueing
+a track un-learn what scanning it had taught.
+
+### Two buttons and two marks
+
+Above every strip: **⇤ 0:00** and **⇥ music**. They send the playhead to the top of the file
+and to the top of the music, and each is dead when it has nowhere to go — dead rather than
+absent, or the row would jump under the pointer as scans landed.
+
+On the strip itself, the two edges are drawn as hairlines in the same green the drop ring and
+the drag caret use, because they answer the same kind of question: *this is the place the
+control is talking about*. Without them, **⇥ music** jumps to a spot the user has to take on
+trust.
+
+### A stopped player that is asked to move becomes paused
+
+Q14 said a seek changes nothing about the transport, and that is still right for `Playing` and
+`Paused`. `Stopped` is the one that was lying. In this app it means *at the top of the track* —
+it is what **⏹** rewinds to and what every load lands on — so a player labelled "stopped"
+sitting at 1:30 is the label promising something Play will not do.
+
+That was already reachable by clicking the strip of a stopped player; the two buttons only made
+it obvious. So the rule lives in `seek_to`, where **every** seek passes through — the click, the
+scrub, both buttons, and the handover's own trim — rather than on the two controls that
+prompted it. One line, and the state machine of §7 is untouched: this is the same "seeking is
+not a transport event" boundary Q14 drew, on the other side of the transport it was drawn
+around.
+
+---
+
 ## 15. The decision log
 
 | # | Question | Decision | Landed in |
@@ -2088,6 +2365,11 @@ not to make the widget cleverer.
 | Q25 | Whether a gesture may act on the same place twice | **No — a fraction already published is not published again, and the memory dies with the gesture.** winit's macOS backend emits a `CursorMoved` before *every* `MouseInput`, so one click reaches a widget as four events and the phantom move before the release re-seeked to where the press had already gone: a tenth of a second of the track audibly replayed. The alternative — a movement threshold in pixels — is a number to tune that still fires on a stationary click; comparing the fraction is the quantity that actually matters, and it covers a hand held still mid-scrub for free. Clearing it on release keeps a second click on the same spot a second seek, which is deliberate | §14b |
 | Q26 | Where the handover's two switches belong | **On each list, as two checkboxes, and read from the list that gave the track.** Two rather than one three-way setting, because the middle position — load without playing — is the app's own default and a single toggle offers only the ends. Per list rather than per player, because that is what lets Cue 1 run the evening by itself while **Next up** stays a shelf; a per-player setting could not say that, and a global one would be a mode. A list switched off is *skipped* rather than blocking, so a cue that is off still lets the shared list feed that player. **Auto-play** is drawn dead while **Auto-load** is off, and `advance` presses Play only if the file it just took actually arrived — a load that failed leaves the *previous* track in the player, and starting that is the one way an automatic start could play the wrong thing | §7a |
 
+| Q27 | What counts as the start and the end of the music | **A fixed −50 dBFS threshold, measured per sample in the pass that was already decoding the file.** Not read off the peak array, which holds 2048 columns however long the track: one column of a five-minute file is a sixth of a second, so a column-accurate trim clips the first transient or leaves a sixth of a second of leader — audible in exactly the moment the feature exists to smooth. The threshold is the knob the physical world needs: below it sit dither and tape hiss, which without it would make every rip's music start at sample zero. No hold time, so a click in the leader wins — the ceiling is named, and the upgrade is a percentile of the file's own amplitudes | §14c, §7b |
+| Q28 | Whether a seek may touch the transport after all | **Yes, in one direction: `Stopped` becomes `Paused`.** Q14 is still right for `Playing` and `Paused`, and was wrong about `Stopped` — which in this app means *at the top of the track*, so a player labelled "stopped" at 1:30 is the label promising something Play will not do. Already reachable by clicking the strip; the two jump buttons only made it obvious. The rule lives in `seek_to`, where every seek passes, rather than on the controls that prompted it — and still outside `deck::transition`, which is the boundary Q14 actually drew | §14c, §7 |
+| Q29 | How a folder scan is driven | **A chain of messages that refills itself, four files at a time.** No subscription, no timer, no job queue: `scan_step` hands out what the fan-out has room for, each answer calls it again, and it clears itself when the last thread reports — so a scan that is not running costs nothing, which is §4's rule reached without one. Four because a decode is a third of a second a file: one at a time is ten minutes for two thousand tracks, one per core starves the audio callback of whoever is playing a set while it runs. **Stop cuts the list down to what has gone out** rather than dropping the state, because the files in flight are going to finish anyway and a scan dropped mid-air would have them reporting into nothing — and a second scan started before they landed would count them twice and run `running` past zero | §11b |
+| Q30 | How a new kind of cached fact arrives | **As a table, which is what §11a promised and this is the first chance to break.** The music's edges are worked out by the same pass as the waveform, so they could have been two fields on that record — at the price of bumping `FORMAT`, which is a re-scan of every waveform on disk to add a field. A table costs one lookup and keeps them all, and it means a handover asking where a track starts reads sixteen bytes rather than eight kilobytes of amplitudes it has no use for | §11a, §14c |
+
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
 lives in `app.rs` and `ui/browser.rs`, and the reasoning is in §6 and §9. **Q7 is the one
@@ -2100,7 +2382,7 @@ size were the easy part.
 Q7 and worth separating: Q15 was not mistaken about what the app should do, only about what
 the widget could be made to do it with — and Q16 then fixed only nine tenths of it, leaving
 one use of the window's height that was enough to keep the defect alive. Both were settled
-the same way, by looking at a running window. That is now four of the twenty-four (Q7, Q10,
+the same way, by looking at a running window. That is now four of the thirty (Q7, Q10,
 Q16, Q17), every one found by an eye and none by the tests that were passing at the time —
 and Q17 is the sharpest of them, because the tests written *for Q16* passed too.
 
