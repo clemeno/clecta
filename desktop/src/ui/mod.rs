@@ -25,6 +25,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// since the whole point is that 200 rows cost the same whether the list holds 300 or 30 000.
 pub const ROWS_BUILT: usize = 200;
 
+/// The gap between a scrolling list's content and its scrollbar, in pixels.
+///
+/// iced draws a vertical scrollbar *over* the content unless a `scrollable` is given a
+/// spacing, and then reserves `width + 2 × margin + spacing` for it — but only while the bar
+/// is actually showing, so a short list keeps its full width. Without it the right-hand end of
+/// every row sits under the bar, which is invisible until a column is flush with that edge: a
+/// queue's running time is, and was being cut in half by it (PLAN §9).
+///
+/// Small, because the three queue panels share the width two players had and the bar itself is
+/// already ten of those pixels.
+pub const SCROLLBAR_GAP: f32 = 2.0;
+
 /// Which rows are worth building, for a list scrolled this far down (PLAN §9).
 ///
 /// The rest of the list is two blank blocks of exactly the right height, so the scrollbar is

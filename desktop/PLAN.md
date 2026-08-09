@@ -1108,6 +1108,16 @@ A queue is normally tens of rows where a folder is thousands, so this buys nothi
 is here because "normally" is not a bound and the arithmetic was already written and already
 tested — the honest reason to reuse something rather than the flattering one.
 
+**The bar is drawn over the rows unless it is asked not to be.** iced lays a `scrollable`'s
+content out at the full width and paints the vertical bar on top of it; given a `spacing` it
+reserves `width + 2 × margin + spacing` instead, and only while the bar is actually showing, so
+a list too short to scroll keeps every pixel. Left alone, the right-hand end of every row sits
+under the bar — invisible until a column is flush with that edge, which is why it showed up in
+a queue first: the running time is right-aligned against it and was being cut in half. All
+three lists take the same two-pixel gap from one constant (`ui::SCROLLBAR_GAP`), because the
+defect is the layout's and not the queue's, and the two that do not show it today show it the
+moment a name or a date grows long enough to reach the edge.
+
 ### The shown folder watches itself
 
 `notify` was the third thing §14 deferred and the first that came back cheaply, because the

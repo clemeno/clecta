@@ -90,6 +90,7 @@ pub fn view<'a>(
 	column![
 		header(browser, scanning),
 		scrollable(column![above, column(rows), below])
+			.spacing(ui::SCROLLBAR_GAP)
 			.id(scroll_id())
 			.on_scroll(Message::Scrolled)
 			.height(Fill),

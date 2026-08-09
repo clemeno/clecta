@@ -11,6 +11,7 @@ use iced::{Element, Fill, Theme};
 
 use crate::app::Message;
 use crate::tree::{Row, Tree};
+use crate::ui;
 
 /// Indent per level, in pixels.
 const INDENT: f32 = 14.0;
@@ -30,7 +31,9 @@ pub fn view<'a>(tree: &'a Tree, current: Option<&'a Path>) -> Element<'a, Messag
 
 	column![
 		text("FOLDERS").size(12),
-		scrollable(column(rows).spacing(1)).height(Fill),
+		scrollable(column(rows).spacing(1))
+			.spacing(ui::SCROLLBAR_GAP)
+			.height(Fill),
 	]
 	.spacing(6)
 	.padding(8)

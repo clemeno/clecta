@@ -277,7 +277,11 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   deserves, that rows do not jump or blank out while the wheel turns, that the row under the
   pointer is the row that gets selected, and that choosing a folder opens it at the top while
   a refresh does not move. `/tmp/clecta-bench-5000`-style folders are made with a one-line
-  Python loop (PLAN §9).
+  Python loop (PLAN §9). Now also: that nothing hides under the scrollbar. iced paints the bar
+  over the rows unless a gap is reserved, which a queue's running time found first, and the
+  same gap is now reserved in all three lists — so the check is that a long name, a date and a
+  running time all end before the bar begins, and that a list too short to scroll still uses
+  its full width.
 - **Dragging the divider, and then the window edge.** This is the one that failed, twice.
   The height had been measured with a probe widget and was exact every time, and the panel
   still *wobbled* as the window's bottom edge moved: iced lays out at the new window size a

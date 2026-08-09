@@ -84,6 +84,9 @@ pub fn view<'a>(
 			edging(id, header(id, addable), true, held, edge == Some(true)),
 			switches(id, list),
 			scrollable(rows(id, list, held, insertion, scroll))
+				// Or the bar is drawn over the running time, which is the one column flush with
+				// this edge (PLAN §9).
+				.spacing(ui::SCROLLBAR_GAP)
 				.id(scroll_id(id))
 				.on_scroll(move |viewport| Message::QueueScrolled(id, viewport.absolute_offset().y))
 				.height(Fill),
