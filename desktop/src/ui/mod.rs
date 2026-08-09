@@ -10,10 +10,13 @@ pub mod browser;
 pub mod deck;
 pub mod mixer;
 pub mod playlist;
+pub mod tempo;
 pub mod tree;
 pub mod waveform;
 
+use std::collections::BTreeMap;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How many rows a scrolling list builds per frame, however long it is (PLAN §9).
@@ -236,6 +239,29 @@ pub fn format_tempo(tempo: Option<Option<f32>>) -> String {
 		Some(Some(tempo)) => format!("{tempo:.2}"),
 		Some(None) => "--".to_string(),
 		None => String::new(),
+	}
+}
+
+/// The tempo a row actually shows: the one corrected by hand if there is one, and what the
+/// detector said otherwise (PLAN §14d).
+///
+/// Applied **here, when the row is drawn**, rather than written into the model when the
+/// correction is made. That is the difference between one rule and four: a correction would
+/// otherwise have to be pushed into the files pane's map and into every queue holding the file,
+/// and emptying the corrections would have to put back a detected number nothing kept a copy of.
+/// This way the model holds what was measured, the file holds what was decided, and neither can
+/// drift from the other.
+///
+/// A correction shows even on a file nothing has scanned — a folder cleared from the cache keeps
+/// the number a person put there, which is exactly what makes it worth keeping in the other file.
+pub fn edited_tempo(
+	edits: &BTreeMap<PathBuf, f32>,
+	path: &Path,
+	detected: Option<Option<f32>>,
+) -> Option<Option<f32>> {
+	match edits.get(path) {
+		Some(tempo) => Some(Some(*tempo)),
+		None => detected,
 	}
 }
 
@@ -470,6 +496,35 @@ mod tests {
 			"174.01",
 			"half a hundredth"
 		);
+	}
+
+	#[test]
+	fn a_corrected_tempo_wins_wherever_the_row_is_drawn() {
+		// Arrange: one file corrected by hand, one left alone (PLAN §14d).
+		let corrected = PathBuf::from("/music/half-time.mp3");
+		let alone = PathBuf::from("/music/as-found.mp3");
+		let edits = BTreeMap::from([(corrected.clone(), 87.0_f32)]);
+
+		// Act / Assert: the correction replaces what the detector said, whatever that was —
+		// including a file it found no tempo in at all, which would otherwise draw `--` for ever.
+		assert_eq!(
+			edited_tempo(&edits, &corrected, Some(Some(174.0))),
+			Some(Some(87.0))
+		);
+		assert_eq!(
+			edited_tempo(&edits, &corrected, Some(None)),
+			Some(Some(87.0)),
+			"scanned and found nothing"
+		);
+
+		// And it shows even on a file nothing has scanned — a folder dropped from the cache
+		// keeps the number a person put there, which is why it lives in the other file.
+		assert_eq!(edited_tempo(&edits, &corrected, None), Some(Some(87.0)));
+
+		// A file nobody corrected is left exactly as it was found, in all three of its states.
+		for detected in [None, Some(None), Some(Some(128.0))] {
+			assert_eq!(edited_tempo(&edits, &alone, detected), detected);
+		}
 	}
 
 	#[test]

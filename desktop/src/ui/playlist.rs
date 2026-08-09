@@ -5,6 +5,9 @@
 //! in which `ListId` they carry — so this is one function and not three, and a rule added
 //! here is added to all of them.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use iced::widget::{
 	Space, button, checkbox, column, container, mouse_area, pick_list, row, scrollable, text,
 };
@@ -73,6 +76,7 @@ pub fn view<'a>(
 	list: &'a Playlist,
 	addable: bool,
 	scroll: f32,
+	tempos: &BTreeMap<PathBuf, f32>,
 	dragging: Option<Dragging>,
 ) -> Element<'a, Message> {
 	let insertion = dragging.as_ref().and_then(|drag| drag.insertion);
@@ -83,7 +87,7 @@ pub fn view<'a>(
 		column![
 			edging(id, header(id, addable), true, held, edge == Some(true)),
 			switches(id, list),
-			scrollable(rows(id, list, held, insertion, scroll))
+			scrollable(rows(id, list, held, insertion, scroll, tempos))
 				// Or the bar is drawn over the running time, which is the one column flush with
 				// this edge (PLAN §9).
 				.spacing(ui::SCROLLBAR_GAP)
@@ -223,6 +227,7 @@ fn rows<'a>(
 	dragging: bool,
 	insertion: Option<usize>,
 	scroll: f32,
+	tempos: &BTreeMap<PathBuf, f32>,
 ) -> Element<'a, Message> {
 	let total = list.items().len();
 	let range = ui::visible_rows(scroll, total, ROW_PITCH, ui::ROWS_BUILT);
@@ -252,7 +257,12 @@ fn rows<'a>(
 				// The tempo leads, because a set is ordered by it before it is timed (PLAN §14d),
 				// and the music's own length goes in front of the file's (PLAN §14c) — the number
 				// the list is actually planned against, then the one everything else agrees with.
-				text(ui::format_tempo(item.tempo.map(Some))).size(11),
+				text(ui::format_tempo(ui::edited_tempo(
+					tempos,
+					&item.path,
+					item.tempo.map(Some)
+				)))
+				.size(11),
 				text(ui::format_lengths(item.music, item.duration)).size(11),
 			]
 			.spacing(4),
@@ -266,7 +276,10 @@ fn rows<'a>(
 		// A press selects and arms a drag; a double click plays it now, jumping the queue.
 		let area = mouse_area(body)
 			.on_press(Message::QueueSelected(id, index))
-			.on_double_click(Message::QueueLoad(id, index));
+			.on_double_click(Message::QueueLoad(id, index))
+			// The same menu the files pane opens, on the same rule: a wrong tempo is usually
+			// noticed in the list it is going to be played from (PLAN §14d).
+			.on_right_press(Message::QueueMenuOpened(id, index));
 
 		// A whole row is one target and it means *above this row*, so the caret above it is
 		// what shows where the drop lands. Attached only while a drag is in flight, like the

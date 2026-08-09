@@ -1884,7 +1884,11 @@ otherwise pure; anything needing a device or a real folder is manual.
   missing-field test names the newest fields specifically: a file written before the queue
   switches existed must read as "hand over, do not start", and one written before the
   transition existed as "play the file whole" — in both cases what the app did at the time
-  (§7b).
+  (§7b), and one written before tempos could be corrected has corrected none (§14d). The
+  corrections get a test of their own, because that map is the part of this file somebody really
+  might edit by hand: a correction on a file that has been deleted or is not media at all is
+  dropped, and so is a `0`, a negative and a `NaN` — while the good one beside them stays, which
+  is the same "one bad value does not take the good ones with it" rule the faders follow.
 - **`tree.rs`** — collapse takes the subtree and keeps the listings; `None` vs
   `Some(vec![])` survives a collapse/expand round trip. On what `expand` returns, the
   implementation split the case in two, and the split is the interesting part: **`expand`
@@ -2053,7 +2057,11 @@ otherwise pure; anything needing a device or a real folder is manual.
   `2:58 / 3:15`, including the one order that would otherwise print a separator with nothing
   after it — scanned before it was measured. `format_tempo` gets the same treatment (§14d): the
   two kinds of nothing, and a number that is always two decimals — including a round 128, a
-  127.999 that rounds up to it, and a hundredth landing exactly on the boundary.
+  127.999 that rounds up to it, and a hundredth landing exactly on the boundary. `edited_tempo` is
+  the third, and it is the whole of how a correction reaches a row: it replaces whatever the
+  detector said, including the `--` of a file scanned and found to beat at nothing, and it shows
+  on a file nothing has scanned at all — while a file nobody corrected comes back in exactly the
+  state it went in, in all three of its states.
 - **`cache.rs`** — two halves, and both are needed (§11a). The encoding is pure and is checked
   without a database: a record that survives a round trip *exactly*, since a cached waveform is
   supposed to be the same array a scan produced; a stamp that does not match reading as a miss,
@@ -2754,8 +2762,64 @@ device and no window (§12).
 65–200 BPM, reported as found. A detector that quietly doubles a 70 and halves a 174 is one that
 cannot be argued with — and it will be wrong sometimes, because half-time and double-time are
 genuinely both true about a lot of music. So the app reports what it measured and the *person*
-overrules it. **Edit BPM** — a right-click menu, a small dialog with `/2` and `×2` — is the other
-half of this decision and is not built yet (Q41).
+overrules it. **Edit BPM** is the other half of that decision, and the rest of this section.
+
+### The editor: two buttons, because that is what a wrong tempo is wrong by
+
+Right-click a row — in the files pane or in a queue, since a wrong number is usually noticed in
+the list it is about to be played from — and a menu opens with one entry. The entry is dead on a
+row nothing has scanned: `/2` and `×2` need a number to start from, and there is nothing here to
+type one with.
+
+The editor is `/2`, the number, `×2`, and a footer of **Cancel** and **Apply**. No text field, and
+that is not laziness twice over: an octave error is the *only* error this detector makes that a
+person can see at a glance, and halving and doubling are exactly reversible — `×2` after `/2`
+gives back the bits that were there, since both are powers of two. So there is no undo button and
+no need to remember what the detector said. It is said under the number anyway, quietly, because
+"what was it before I started" is the one question two buttons cannot answer.
+
+Nothing is written until **Apply**. Cancel, a click outside the panel and Escape are the same
+thing, and Escape now closes the panel *before* it clears the selection — "never mind" means the
+most recent thing.
+
+### The app's first panel drawn over the window
+
+Every other dialog in clecta is native (`rfd`), because the OS draws those better than we can.
+This one cannot be: `rfd` offers buttons and a message, and this holds a value that changes while
+it is open. So it is `stack![window, shade, panel]` — the same widgets as everything else, laid
+over the top, with the dimmed rest of the window as the hit target that dismisses it. A panel that
+can only be closed by its own buttons traps the app the day one of them is missed.
+
+`ponytail:` it is **centred, not at the pointer**. iced's press messages carry no position and a
+pane cannot ask how big it is, so the only way to a cursor position is a subscription publishing a
+message on every mouse move in the app — which §6 already refuses to leave switched on, because
+each one rebuilds every row of the files pane. The upgrade is that subscription, armed by the
+right-press and disarmed by the menu.
+
+### A correction is not a cache fact, and that decides where it lives
+
+`settings.json`, not `cache.redb`. The cache's first sentence is that deleting it loses nothing
+but time (§11a) — a detected tempo obeys that, a corrected one does not, because nothing can work
+it out again. Putting it in the cache would have made **Clear cache** a button that destroys
+answers, which is a different button from the one that is there now.
+
+So the two are cleared apart. **Clear cache** takes the detected tempos with the waveforms;
+**Clear BPM edits**, beside it and dead when there are none, takes only the corrections and asks
+first. The wording of the two warnings is deliberately different: one costs the time to work
+things out again, the other costs decisions.
+
+### Applied where the row is drawn, not written into the model
+
+The correction reaches the screen through one function, `ui::edited_tempo`, called as each row is
+built. The alternative — writing the new value into the files pane's map and into every queue
+holding that file — is four places to keep in step, and it has no answer at all to **Clear BPM
+edits**: putting the detected numbers back would mean re-reading the store for the pane and
+re-measuring every queue, for a change that is supposed to be instant.
+
+This way the model holds what was *measured*, `settings.json` holds what was *decided*, and
+neither can drift. It also gives a correction on an unscanned file somewhere sensible to show: a
+folder dropped from the cache keeps the numbers a person put there, which is the whole reason they
+are in the other file.
 
 ### Two decimals, and what they are honestly worth
 
@@ -2850,7 +2914,7 @@ change rather than an argument with §11a's first sentence.
 | Q38 | What to do about `CFUserNotificationDisplayAlert` in the macOS log | **Nothing, and write down why.** It is `rfd`'s parentless path: no parent window means another process draws the alert while this one waits, which is the modal shortcut §7a already took, said out loud by the OS. iced lends a window handle inside `window::run` alone, so **Clear cache** could be parented but `admits` — asked in the middle of three queue edits, answering the code that asked — could not without three continuations and a queue that may change while the question is open. Parenting one of the two would trade a log line for two dialogs that do not look alike | §7a, §11a |
 | Q39 | Where the music's *length* comes from, and what it displaces | **Derived from the edges already stored, and it displaces nothing.** `Trim::music()` is `end - start`: a fourth table would be a number that can disagree with the two it was computed from, and the wrong one would be the one on screen. It reaches the files pane on the query §11c already makes once per listing — the edges were being read for the mark, so the number is free — and a queue row on the trim `cached_facts` was already reading for the handover. In the pane it is a column of its own before the size, because a listing says what a file *is* and this is the first thing that says what it is *for*; in a queue it goes in front of the file's length rather than instead of it, since the music is what the evening is planned against and the file's length is what every other program on the machine agrees with. The footer's running time deliberately stays a sum of *file* lengths: a total that changed meaning when a transition switch was flipped would be worse than one that is occasionally long | §14c, §11c, §9, §7a |
 | Q40 | How a tempo is found, and how far it is trusted | **A third accumulator on the decode that was already happening, reported raw between 65 and 200 BPM.** An onset track from a 512-sample loudness envelope, a whole-bin autocorrelation for the beat, then one bin of a Fourier transform to refine it — the phasor because a correlation read between two bins snaps back to whole bins, which at 128 BPM is three BPM wide, and the column claims two decimals. Written rather than pulled in, because the obvious crate is C and `deny.toml` bans a C toolchain (§11). **Not** folded into a narrower window: half-time and double-time are both genuinely true about a lot of music, so the app reports what it measured and a person overrules it (Q41). The `✓` now means three tables rather than two, which cost every prepared folder one more **Prepare folder** run — the honest price of a mark that means one thing | §14d, §11c, §9, §7a |
-| Q41 | Where a *hand-edited* tempo lives, and when it is built | **Its own store, cleared on its own, and next — not now.** A detected tempo is a cache fact: deleting it costs time. An edited one is not, so **Clear cache** must not take it and a re-scan must not overwrite it, which means a store of its own with a clear of its own behind a confirmation. It also needs the app's first in-app modal — `rfd` draws native dialogs and cannot host a `/2`, a `×2` and a live value — plus a right-click menu, neither of which exists yet. Splitting it from the detection keeps two reviewable commits instead of one large one, and the detection is useful on its own the moment it lands | §14d, §11a |
+| Q41 | Where a *hand-edited* tempo lives, and how it reaches the screen | **In `settings.json`, cleared on its own, and applied as the row is drawn.** A detected tempo is a cache fact — deleting it costs time. A corrected one is a person's answer about a track and nothing can work it out again, so it cannot live in a file whose first sentence is that losing it costs nothing (§11a): **Clear cache** takes the detected numbers, **Clear BPM edits** takes the corrections, and each asks first. It is applied by one function at draw time rather than written into the pane's map and every queue holding the file, which is four places to keep in step and no way at all to put the detected numbers back when the corrections are dropped. The editor is `/2` and `×2` and nothing else: an octave is the only error visible at a glance, and the two are exactly reversible, so no undo button is needed. It is the app's first panel drawn *over* the window, since `rfd` cannot hold a value that changes while it is open — centred rather than at the pointer, because the only route to a cursor position is a subscription that fires on every mouse move | §14d, §11, §11a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

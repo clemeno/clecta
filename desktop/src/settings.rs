@@ -9,6 +9,7 @@
 //! every one of them reads as defaults and a line on stderr. So neither `load` nor `save`
 //! returns a `Result`: there is nothing the caller could usefully do with one.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,22 @@ pub struct Settings {
 	/// has already rejected anything that is not one of the two variants, and a file that
 	/// predates the field reads as `Whole` — what the app did before there was a choice.
 	pub transition: [Transition; 3],
+	/// Tempos corrected by hand, by file (PLAN §14d).
+	///
+	/// **Here and not in the cache**, which is the whole decision: a detected tempo is worked out
+	/// from the file and costs a decode to get back, so it belongs beside the waveforms where
+	/// **Clear cache** can take it. A corrected one cannot be worked out from anything — it is a
+	/// person's answer about a track — so losing it loses something, and the file that must never
+	/// lose anything is this one. It is also what makes the two clearable apart: emptying this map
+	/// puts every row back to what the detector said, and no waveform is touched.
+	///
+	/// A `BTreeMap` so the file reads in path order and a save does not shuffle the lines a hand
+	/// editor is looking at.
+	///
+	/// `ponytail:` unbounded, like the queues above — one line per corrected track, in the file
+	/// that is rewritten whole on a throttle. A library with thousands of corrections in it wants
+	/// a file of its own; a set's worth does not.
+	pub tempos: BTreeMap<PathBuf, f32>,
 }
 
 impl Default for Settings {
@@ -99,6 +116,7 @@ impl Default for Settings {
 			auto_load: [true; 3],
 			auto_play: [false; 3],
 			transition: [Transition::Whole; 3],
+			tempos: BTreeMap::new(),
 		}
 	}
 }
@@ -201,6 +219,16 @@ impl Settings {
 			queue.retain(|path| path.is_file() && crate::browser::kind_of(path).is_media());
 		}
 
+		// A correction is only about a file that is still there, and it has to be a number the
+		// column could print: this map is the one part of the file somebody might well edit by
+		// hand, so a `0`, a negative or a `NaN` is dropped rather than drawn.
+		self.tempos.retain(|path, tempo| {
+			tempo.is_finite()
+				&& *tempo > 0.0
+				&& path.is_file()
+				&& crate::browser::kind_of(path).is_media()
+		});
+
 		self
 	}
 }
@@ -236,6 +264,7 @@ mod tests {
 			auto_load: [false, true, false],
 			auto_play: [true, false, true],
 			transition: [Transition::Trimmed, Transition::Whole, Transition::Trimmed],
+			tempos: BTreeMap::from([(queued("clecta-edited.mp3"), 128.5)]),
 		}
 	}
 
@@ -291,6 +320,37 @@ mod tests {
 			[Transition::Whole; 3],
 			"and files play whole until someone says otherwise"
 		);
+
+		// And the newest field of all: a file written before anyone could correct a tempo has
+		// corrected none, which is what every row showing the detector's answer means (PLAN §14d).
+		assert!(settings.tempos.is_empty(), "nothing corrected yet");
+	}
+
+	#[test]
+	fn a_corrected_tempo_survives_only_if_it_could_be_drawn() {
+		// Arrange: the one part of this file somebody really might edit by hand, with each of
+		// the ways a number in it can be useless — and a real correction beside them (PLAN §14d).
+		let real = queued("clecta-tempo-kept.mp3");
+		let sleeve = queued("clecta-tempo-sleeve.jpg");
+		let settings = Settings {
+			tempos: BTreeMap::from([
+				(real.clone(), 128.5),
+				(PathBuf::from("/nowhere/gone.mp3"), 120.0),
+				(sleeve.clone(), 90.0),
+				(queued("clecta-tempo-zero.mp3"), 0.0),
+				(queued("clecta-tempo-negative.mp3"), -128.0),
+				(queued("clecta-tempo-nan.mp3"), f32::NAN),
+			]),
+			..Settings::default()
+		};
+
+		// Act
+		let tempos = settings.sanitized().tempos;
+
+		// Assert: one bad entry does not take the good one with it, which is the same rule the
+		// faders and the queues follow.
+		assert_eq!(tempos, BTreeMap::from([(real, 128.5)]));
+		assert!(!tempos.contains_key(&sleeve), "not a media file");
 	}
 
 	#[test]

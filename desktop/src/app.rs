@@ -6,7 +6,7 @@
 //! three sections are arranged. That is deliberate — an `update` that is only ever a
 //! dispatch table stays readable as the app grows.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -308,6 +308,20 @@ pub enum Message {
 	/// The modifiers changed. Tracked because a `mouse_area` press does not carry them, and a
 	/// click has to know whether it is a plain one, a toggle or a range.
 	ModifiersChanged(Modifiers),
+	/// A row was right-clicked: the files pane names it by path, a queue by list and row, and
+	/// both open the same menu (PLAN §14d).
+	RowMenuOpened(PathBuf),
+	QueueMenuOpened(ListId, usize),
+	/// The menu or the editor was dismissed — its own button, a click outside it, or Escape.
+	MenuDismissed,
+	/// **Edit BPM…** on the open menu.
+	TempoEditOpened,
+	/// `/2` or `×2`, as the factor itself: the two buttons differ by nothing else.
+	TempoScaled(f32),
+	/// **Apply** — the edited tempo becomes this file's, until it is edited again.
+	TempoApplied,
+	/// **Clear BPM edits**, which asks first.
+	ClearTempoEditsPressed,
 	/// ⌘A / Ctrl+A — every row the files pane is showing.
 	SelectAll,
 	/// Escape — nothing selected.
@@ -526,6 +540,43 @@ pub struct Clecta {
 	/// nothing in `view` has to read the clock — the phase is whatever the last `Sweep`
 	/// left behind.
 	sweep: u32,
+	/// Tempos corrected by hand, by file (PLAN §14d). Persisted in `settings.json` rather than
+	/// the cache, because a person's answer about a track is not something a decode could work
+	/// out again — and read only by the two views, which apply it to a row as it is drawn.
+	tempos: BTreeMap<PathBuf, f32>,
+	/// The row menu, while it is open. `None` is the ordinary state and is also what every way
+	/// of dismissing it leaves behind.
+	menu: Option<RowMenu>,
+	/// The tempo editor, while it is open. Never both this and `menu`: opening the editor is
+	/// what closes the menu, so the two are one overlay and one Escape.
+	editing: Option<TempoEdit>,
+}
+
+/// Which row was right-clicked, and everything the menu over it needs to know.
+///
+/// The name and the tempo are **copied** rather than looked up again when the menu is drawn: the
+/// menu is opened from two panes that name a row differently — the files pane by path, a queue by
+/// list and index — and a queue can be edited underneath an open menu.
+#[derive(Debug, Clone)]
+struct RowMenu {
+	path: PathBuf,
+	name: String,
+	/// What the row is showing, corrections included, and `None` when nothing has scanned it.
+	tempo: Option<f32>,
+}
+
+/// A tempo being corrected: what it started as, and what the buttons have made of it so far.
+///
+/// The value lives here rather than in the map until **Apply**, which is the whole of what
+/// Cancel means — halving a tempo four times and changing your mind leaves nothing behind.
+#[derive(Debug, Clone)]
+struct TempoEdit {
+	path: PathBuf,
+	name: String,
+	value: f32,
+	/// What the detector said, for the line under the number. Kept so the editor can say what it
+	/// is departing from without asking the store again.
+	detected: Option<f32>,
 }
 
 impl Clecta {
@@ -599,6 +650,9 @@ impl Clecta {
 			scanning: None,
 			modifiers: Modifiers::empty(),
 			sweep: 0,
+			tempos: settings.tempos,
+			menu: None,
+			editing: None,
 		};
 		app.apply_gains();
 
@@ -646,6 +700,7 @@ impl Clecta {
 			auto_load: std::array::from_fn(|index| self.queues[index].auto_load),
 			auto_play: std::array::from_fn(|index| self.queues[index].auto_play),
 			transition: std::array::from_fn(|index| self.queues[index].transition),
+			tempos: self.tempos.clone(),
 		}
 	}
 
@@ -814,7 +869,103 @@ impl Clecta {
 
 			Message::SelectAll => self.browser.select_all(),
 
-			Message::SelectionCleared => self.browser.clear_selection(),
+			// Escape closes whatever is over the window first, and only clears the selection when
+			// there is nothing over it: "never mind" means the most recent thing, which is the
+			// panel the user is looking at.
+			Message::SelectionCleared => {
+				if self.menu.take().is_none() && self.editing.take().is_none() {
+					self.browser.clear_selection();
+				}
+			}
+
+			Message::RowMenuOpened(path) => {
+				let name = fsio::name_of(&path);
+				let detected = self.browser.ready(&path).and_then(|ready| ready.tempo);
+				self.menu = Some(RowMenu {
+					tempo: self.tempos.get(&path).copied().or(detected),
+					path,
+					name,
+				});
+			}
+
+			// A queue names its rows by position, so the path is read here rather than carried in
+			// the message: the row could have moved between the press and this arm.
+			Message::QueueMenuOpened(id, index) => {
+				if let Some(item) = self.queues[id.index()].items().get(index) {
+					self.menu = Some(RowMenu {
+						tempo: self.tempos.get(&item.path).copied().or(item.tempo),
+						path: item.path.clone(),
+						name: item.name.clone(),
+					});
+				}
+			}
+
+			Message::MenuDismissed => {
+				self.menu = None;
+				self.editing = None;
+			}
+
+			// The menu closes as the editor opens: they are one panel in two states, and two
+			// panels over each other would be two ways to dismiss one thing.
+			Message::TempoEditOpened => {
+				if let Some(menu) = self.menu.take()
+					&& let Some(value) = menu.tempo
+				{
+					self.editing = Some(TempoEdit {
+						detected: self.browser.ready(&menu.path).and_then(|ready| ready.tempo),
+						path: menu.path,
+						name: menu.name,
+						value,
+					});
+				}
+			}
+
+			// Held in the editor and nowhere else until **Apply**, which is what makes Cancel
+			// free: nothing has been written, so there is nothing to put back.
+			Message::TempoScaled(factor) => {
+				if let Some(edit) = self.editing.as_mut() {
+					let scaled = edit.value * factor;
+					// The guard is for the map and the column downstream, not for this button: a
+					// tempo halved out of every sensible range is the user's business, but one
+					// that stopped being a number would be drawn.
+					if scaled.is_finite() && scaled > 0.0 {
+						edit.value = scaled;
+					}
+				}
+			}
+
+			Message::TempoApplied => {
+				if let Some(edit) = self.editing.take() {
+					self.tempos.insert(edit.path, edit.value);
+					// A correction is a setting, so it is saved the way every other setting is —
+					// on the throttle, not immediately (PLAN §11).
+					self.dirty = true;
+				}
+			}
+
+			Message::ClearTempoEditsPressed => {
+				// The same warning **Clear cache** shows, and deliberately a different sentence:
+				// that one costs time, this one costs answers nothing can work out again
+				// (PLAN §14d).
+				let confirmed = rfd::MessageDialog::new()
+					.set_level(rfd::MessageLevel::Warning)
+					.set_title("Clear the BPM edits")
+					.set_description(
+						"Throw away every tempo you have corrected by hand?\n\n\
+						 Every row goes back to what the detector said. Nothing else is touched.",
+					)
+					.set_buttons(rfd::MessageButtons::OkCancel)
+					.show() == rfd::MessageDialogResult::Ok;
+
+				if confirmed {
+					// No re-reading and no re-scanning: the corrections were applied as the rows
+					// were drawn, so dropping them *is* putting the detected numbers back.
+					let cleared = self.tempos.len();
+					self.tempos.clear();
+					self.dirty = true;
+					self.notice = format!("cleared {cleared} BPM edits");
+				}
+			}
 
 			Message::FolderSelected(folder) => return self.select_folder(folder),
 
@@ -2207,6 +2358,7 @@ impl Clecta {
 						.map(|scanning| (scanning.done, scanning.files.len())),
 					&self.working(),
 					self.phase(),
+					&self.tempos,
 				),
 				Section::Tree => ui::tree::view(&self.tree, self.browser.folder.as_deref()),
 			};
@@ -2236,10 +2388,22 @@ impl Clecta {
 			panes,
 		];
 
-		column![body, self.status_bar()]
+		let window = column![body, self.status_bar()]
 			.spacing(STATUS_GAP)
-			.padding(WINDOW_PADDING)
-			.into()
+			.padding(WINDOW_PADDING);
+
+		// The one place anything is drawn over the window (PLAN §14d). Built last and only when
+		// there is something to draw, so the app that has no menu open is the app as it was.
+		match (&self.menu, &self.editing) {
+			(Some(menu), _) => {
+				ui::tempo::over(window.into(), ui::tempo::menu(&menu.name, menu.tempo))
+			}
+			(_, Some(edit)) => ui::tempo::over(
+				window.into(),
+				ui::tempo::editor(&edit.name, edit.value, edit.detected),
+			),
+			_ => window.into(),
+		}
 	}
 
 	/// The horizontal splitter, hand-written — the one thing `pane_grid` could not be bent
@@ -2274,6 +2438,7 @@ impl Clecta {
 				&self.queues[id.index()],
 				addable,
 				self.queue_scroll[id.index()],
+				&self.tempos,
 				// One value rather than three arguments, and `None` at rest: everything a
 				// list does differently during a drag arrives together.
 				self.drag.is_some().then(|| ui::playlist::Dragging {

@@ -4,14 +4,15 @@
 //! `widget::table`, because `table` has no row element to carry a click or a selected
 //! background. The layout spike is what settled that; PLAN §9 records why.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use iced::widget::{Space, button, checkbox, column, container, mouse_area, row, scrollable, text};
 use iced::{Element, Fill, Left, Right, Theme};
 
 use crate::app::Message;
 use crate::browser::{Browser, Entry};
-use crate::cache::Ready;
 use crate::deck::DeckId;
 use crate::ui;
 
@@ -62,6 +63,7 @@ pub fn view<'a>(
 	scanning: Option<(usize, usize)>,
 	working: &[&Path],
 	sweep: f32,
+	tempos: &BTreeMap<PathBuf, f32>,
 ) -> Element<'a, Message> {
 	// Counted rather than stored, because `visible` is the hidden filter and the count has
 	// to be of what is *shown*. One pass over a few thousand `bool`s, against the thousands
@@ -83,11 +85,15 @@ pub fn view<'a>(
 			} else {
 				None
 			};
+			let ready = browser.ready(&entry.path);
 			file_row(
 				entry,
 				browser.is_selected(&entry.path),
 				mark,
-				browser.ready(&entry.path),
+				// The correction, where there is one, is applied here rather than kept in the
+				// pane's map (PLAN §14d) — so the map stays a report of what the store said.
+				ui::edited_tempo(tempos, &entry.path, ready.map(|ready| ready.tempo)),
+				ready.map(|ready| ready.music),
 			)
 		});
 
@@ -96,7 +102,7 @@ pub fn view<'a>(
 	let below = Space::new().height((total - range.end) as f32 * ROW_HEIGHT);
 
 	column![
-		header(browser, scanning),
+		header(browser, scanning, !tempos.is_empty()),
 		scrollable(column![above, column(rows), below])
 			.spacing(ui::SCROLLBAR_GAP)
 			.id(scroll_id())
@@ -109,7 +115,11 @@ pub fn view<'a>(
 }
 
 /// Where we are, and everything that can be done to the listing as a whole.
-fn header(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, Message> {
+fn header(
+	browser: &Browser,
+	scanning: Option<(usize, usize)>,
+	edited: bool,
+) -> Element<'_, Message> {
 	let folder = match &browser.folder {
 		Some(folder) => folder.display().to_string(),
 		None => "no folder".to_string(),
@@ -154,7 +164,7 @@ fn header(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, Me
 		]
 		.spacing(6)
 		.align_y(iced::Center),
-		preparation(browser, scanning),
+		preparation(browser, scanning, edited),
 	]
 	.spacing(6)
 	.into()
@@ -166,7 +176,11 @@ fn header(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, Me
 /// the tree under it and about the cache — the same folder, a different scope. While a scan
 /// runs the row becomes the count and a way to stop, since starting a second one over the
 /// first is the only thing the buttons could otherwise do.
-fn preparation(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'_, Message> {
+fn preparation(
+	browser: &Browser,
+	scanning: Option<(usize, usize)>,
+	edited: bool,
+) -> Element<'_, Message> {
 	if let Some((done, total)) = scanning {
 		return row![
 			text(format!("preparing {done} of {total} files…"))
@@ -197,6 +211,11 @@ fn preparation(browser: &Browser, scanning: Option<(usize, usize)>) -> Element<'
 		button(text("Clear cache").size(12))
 			.padding([3, 8])
 			.on_press(Message::ClearCachePressed),
+		// Beside it, because they are the same shape of button and deliberately not the same
+		// thing: that one throws away work, this one throws away *decisions* (PLAN §14d).
+		button(text("Clear BPM edits").size(12))
+			.padding([3, 8])
+			.on_press_maybe(edited.then_some(Message::ClearTempoEditsPressed)),
 	]
 	.spacing(6)
 	.align_y(iced::Center)
@@ -219,7 +238,8 @@ fn file_row<'a>(
 	entry: &'a Entry,
 	selected: bool,
 	mark: Option<&'static str>,
-	ready: Option<Ready>,
+	tempo: Option<Option<f32>>,
+	music: Option<Option<Duration>>,
 ) -> Element<'a, Message> {
 	// Green for a file that is ready, the same green the waveform draws the music's edges in;
 	// the spinner keeps the row's own colour, since it is saying "wait", not "good".
@@ -235,13 +255,13 @@ fn file_row<'a>(
 		mark,
 		text(entry.kind.glyph()).size(13).width(GLYPH_WIDTH),
 		text(&entry.name).size(13).width(Fill),
-		text(ui::format_tempo(ready.map(|ready| ready.tempo)))
+		text(ui::format_tempo(tempo))
 			.size(12)
 			.width(TEMPO_WIDTH)
 			.align_x(Right),
 		// Only the whole answer is drawn here: the pane has never had a length column, so one
 		// that showed a file's raw length would be a second new column rather than this one.
-		text(ui::format_lengths(None, ready.map(|ready| ready.music)))
+		text(ui::format_lengths(None, music))
 			.size(12)
 			.width(MUSIC_WIDTH)
 			.align_x(Right),
@@ -266,11 +286,12 @@ fn file_row<'a>(
 
 	let area = mouse_area(body).on_press(Message::RowSelected(entry.path.clone()));
 
-	// Only media loads. A double click on a `.txt` selects it and does nothing else,
-	// which is the honest outcome — the row is listed so the user can see the folder is
-	// the right one (PLAN §9).
+	// Only media loads, and only media has a menu. A double click on a `.txt` selects it and
+	// does nothing else, which is the honest outcome — the row is listed so the user can see the
+	// folder is the right one (PLAN §9).
 	if entry.kind.is_media() {
 		area.on_double_click(Message::LoadUnaimed(entry.path.clone()))
+			.on_right_press(Message::RowMenuOpened(entry.path.clone()))
 			.into()
 	} else {
 		area.into()

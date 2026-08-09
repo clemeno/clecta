@@ -192,8 +192,15 @@ cargo build --release --target x86_64-apple-darwin
   Fourier transform to sharpen it — no new dependency, because the obvious crate is C and the
   portable build bans a C toolchain. Reported raw between 65 and 200 BPM rather than folded into
   a narrower window: half-time and double-time are both genuinely true about a lot of music, so
-  the app says what it measured and a `/2` `×2` editor (not built yet) is what overrules it.
-  `--` for a file with no tempo in it at all, blank until it is scanned (PLAN §14d).
+  the app says what it measured and you overrule it. `--` for a file with no tempo in it at all,
+  blank until it is scanned (PLAN §14d).
+- **Correcting a tempo by hand.** Right-click a row — in the files pane or in a queue — for a menu
+  with **Edit BPM…**, and a panel with `/2`, the number, and `×2`. That is the whole editor,
+  because an octave is the only error a detector makes that you can see at a glance, and the two
+  buttons are exactly reversible. Nothing is written until **Apply**; Cancel, Escape and a click
+  outside are the same thing. A correction lives in `settings.json`, not the cache, because
+  nothing can work it out again: **Clear cache** takes the detected numbers, **Clear BPM edits**
+  takes yours, and each asks first (PLAN §14d).
 
 ## What does not, yet
 
@@ -203,10 +210,12 @@ cargo build --release --target x86_64-apple-darwin
 - **No video picture** — the audio track of an `.mp4` / `.mkv` plays, and that is v1
   (PLAN §14). No cue points, and no *changing* a tempo: reading one is §14d, playing a track at
   a different one needs a time-stretch stage rodio does not have.
-- **No editing a detected tempo yet.** The `/2` `×2` dialog the octave problem calls for needs a
-  right-click menu and the app's first in-app modal — every dialog so far is a native one — and
-  a store of its own, since a hand-edited number is not a cache fact and **Clear cache** must not
-  take it (PLAN §14d, Q41).
+- **No typing a tempo in.** The editor halves and doubles, which is what an octave error needs;
+  a track whose detected tempo is wrong by something other than a factor of two has no way to be
+  corrected yet. A text field is the upgrade (PLAN §14d).
+- **The row menu is centred, not at the pointer.** iced's press messages carry no position, and
+  the only route to one is a subscription that fires on every mouse move — which would rebuild
+  every row of the files pane each time (PLAN §14d, §6).
 
 ## Checks
 
@@ -255,10 +264,11 @@ cargo build --release
 | `playlist.rs` | when a track gives way early — the music stopped *and* this list asked to skip the blanks *and* somebody has scanned the track, so a list set to **Whole track** never cuts and an unscanned one plays whole rather than being cut at zero — plus what every queue edit does to the selection — an insert above it carries it down, a remove above it pulls it up, removing the selected row lands on what slid into its place, a shift takes the highlight with the track — plus the arrows reaching a neighbour and only a neighbour, the next track coming from a player's own cue before the shared list, a list with **Auto-load** off being skipped rather than ending the handover (a cue switched off still lets the shared list feed that player) while both switched off stops the player with full lists in front of it, a drag within a list landing where the caret was (both directions, past the last row, the two carets that touch the row itself, and every from × to keeping the contents unchanged) — and the same again for a whole block of rows, which keeps its own order, lands as a block, and comes out highlighted, checked over every pair of rows to every caret — plus the multi-row gestures: each of the three click kinds, a block and a scattered pair each shifting together, a selection touching the end it moves towards blocking the *whole* move, and taking only some of a selection leaving the rest highlighted; the running time (a measured row with no length keeps the total's `+` for ever, and one answer settles every row holding that track), the duplicate search (a track found in whichever list actually holds it rather than only the one being added to, and a row on its way out of a list not counting as its own duplicate), and which tracks get sent off to be measured: one entry per file rather than per row, nothing that is already being looked up, and nothing that has already answered — even when what it answered was "no length"; and the playing time and the tempo landing on a row that was measured long ago, since that is the order it happens in, without a later queue edit taking either away again |
 | `ui/playlist.rs` | the footer's count and running time, and an empty list saying nothing at all rather than `0 · 0:00` |
 | `audio.rs` | the two things here that need no audio device — one scan of a real file (a generated WAV, silent for a second then loud for a second, whose music is asserted to start at exactly one second and run to two), and one measurement of another, plus a missing file answering "no length" rather than failing |
-| `ui/mod.rs` | which rows a pane builds: a short list built whole, the window moving by whole rows as it scrolls, the end of a long list still filling the pane, a negative or `NaN` offset still naming real rows, and the same offset naming a different row at the queues' 22-pixel pitch than at the files pane's 24 — plus the spinner showing all four of its frames in order over one turn, and no phase indexing past the last of them — plus eliding, sizes, the calendar (including a leap day), the clock, and the six states of a row's times — blank, `--:--`, a plain length, `2:58 / 3:15`, and the one order that would print a separator with nothing after it — plus a tempo's three: blank, `--`, and always two decimals, including a round 128, a 127.999 that rounds up to it, and a hundredth landing on the boundary |
+| `settings.rs` | a round trip, every broken file reading as defaults, a missing field keeping its default (including the newest: a file written before tempos could be corrected has corrected none), an out-of-range value falling back alone, a folder or a queued track that no longer exists being forgotten, and a corrected tempo surviving only if it could be drawn — a deleted file, a non-media file, a `0`, a negative and a `NaN` all dropped, the good one beside them kept |
+| `ui/mod.rs` | which rows a pane builds: a short list built whole, the window moving by whole rows as it scrolls, the end of a long list still filling the pane, a negative or `NaN` offset still naming real rows, and the same offset naming a different row at the queues' 22-pixel pitch than at the files pane's 24 — plus the spinner showing all four of its frames in order over one turn, and no phase indexing past the last of them — plus eliding, sizes, the calendar (including a leap day), the clock, and the six states of a row's times — blank, `--:--`, a plain length, `2:58 / 3:15`, and the one order that would print a separator with nothing after it — plus a tempo's three: blank, `--`, and always two decimals, including a round 128, a 127.999 that rounds up to it, and a hundredth landing on the boundary; and how a hand correction reaches a row: it replaces whatever the detector said, including the `--` of a file found to beat at nothing, it shows even on a file nothing has scanned, and a file nobody corrected comes back exactly as it went in |
 
-Twenty-two things the suite cannot reach, all of which need a window a person can look at — or,
-once, listen to. **Five of the twenty-two pass on macOS, by hand**; the last seventeen are new and
+Twenty-three things the suite cannot reach, all of which need a window a person can look at — or,
+once, listen to. **Five of the twenty-three pass on macOS, by hand**; the last eighteen are new and
 unchecked. The last rounds are why the list exists: four of the app's defects so far were
 found here and none of them by a passing test. The fourth is the sharpest — an item already
 marked *confirmed* was confirmed by eye, and the defect was audible only.
@@ -414,6 +424,13 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   rather than a confident number. Also the cost of the change itself: **every folder prepared by
   an older build has lost its `✓` and needs one more Prepare folder run**, which is the price of
   a mark that means one thing (PLAN §14d, §11c).
+- **Correcting one.** *Not checked yet.* The rule is tested and the panel is not: that a
+  right-click opens the menu from both panes and never from a `.txt`, that **Edit BPM…** is dead
+  on a row nothing has scanned, that `/2` then `×2` puts the number back exactly, that Cancel,
+  Escape and a click outside all leave the row as it was, that **Apply** changes the number in the
+  files pane *and* in every queue holding that file at once, that it survives a relaunch and a
+  **Clear cache**, and that **Clear BPM edits** asks first and puts every detected number back
+  (PLAN §14d).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.
