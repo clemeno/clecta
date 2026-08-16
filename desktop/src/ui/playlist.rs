@@ -15,7 +15,8 @@ use iced::{Center, Element, Fill, Theme};
 
 use crate::app::{DropTarget, Message, Zone};
 use crate::cache::Ready;
-use crate::playlist::{ListId, Playlist, Transition};
+use crate::playlist::{Playlist, Transition};
+use crate::queues::ListId;
 use crate::ui;
 
 /// One row's height, pinned for the same reason the files pane pins its own (PLAN §9): a

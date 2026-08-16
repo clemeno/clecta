@@ -6,7 +6,7 @@
 //! three sections are arranged. That is deliberate — an `update` that is only ever a
 //! dispatch table stays readable as the app grows.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +30,8 @@ use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
-use crate::playlist::{self, ListId, Playlist, Transition};
+use crate::playlist::{self, Playlist, Transition};
+use crate::queues::{ListId, Queues};
 use crate::select::Click;
 use crate::settings::Settings;
 use crate::tree::Tree;
@@ -500,17 +501,15 @@ pub struct Clecta {
 	stale: bool,
 	/// The three queues, indexed by `ListId::index` (PLAN §7a): one in front of each player,
 	/// and the shared one between them.
-	queues: [Playlist; 3],
+	queues: Queues,
 	/// How far down each of them is scrolled, in the same order. Not persisted, for the same
 	/// reason the files pane's offset is not: where a list is scrolled to is not a setting.
-	queue_scroll: [f32; 3],
 	/// The list whose edge a drag is resting on, and which way it is scrolling. `None` at
 	/// rest, which is what gates the timer that does the scrolling.
 	autoscroll: Option<(ListId, bool)>,
 	/// The tracks whose length is being looked up right now. A row stays *unmeasured* until
 	/// its answer lands, so without this a second edit arriving mid-lookup would send the same
 	/// file off to be opened and parsed all over again (PLAN §7a).
-	measuring: HashSet<PathBuf>,
 	/// What has already been worked out about a file (PLAN §11a). Shared with every job that
 	/// reads or writes it: an `Arc` because those jobs are threads, and the whole point is
 	/// that the cache is touched *there* rather than on the GUI thread, where a commit is an
@@ -642,10 +641,8 @@ impl Clecta {
 			notice,
 			dirty: false,
 			stale: false,
-			queues,
-			queue_scroll: [0.0; 3],
+			queues: Queues::restored(queues),
 			autoscroll: None,
-			measuring: HashSet::new(),
 			// Opened here rather than lazily, for the same reason `Settings::load` is read
 			// before the window exists: it is one small file, once, and everything after it
 			// wants to know whether there is a cache to ask (PLAN §11a).
@@ -695,15 +692,15 @@ impl Clecta {
 			window: self.window,
 			decks_height: self.decks_height,
 			cues: [
-				self.queues[ListId::Cue(DeckId::One).index()].paths(),
-				self.queues[ListId::Cue(DeckId::Two).index()].paths(),
+				self.queues.get(ListId::Cue(DeckId::One)).paths(),
+				self.queues.get(ListId::Cue(DeckId::Two)).paths(),
 			],
-			common: self.queues[ListId::Common.index()].paths(),
+			common: self.queues.get(ListId::Common).paths(),
 			// In draw order, which is the order the lists are stored in here — unlike `cues`
 			// above, which is per player.
-			auto_load: std::array::from_fn(|index| self.queues[index].auto_load),
-			auto_play: std::array::from_fn(|index| self.queues[index].auto_play),
-			transition: std::array::from_fn(|index| self.queues[index].transition),
+			auto_load: ListId::ALL.map(|id| self.queues.get(id).auto_load),
+			auto_play: ListId::ALL.map(|id| self.queues.get(id).auto_play),
+			transition: ListId::ALL.map(|id| self.queues.get(id).transition),
 			tempos: self.tempos.clone(),
 		}
 	}
@@ -895,7 +892,7 @@ impl Clecta {
 			// A queue names its rows by position, so the path is read here rather than carried in
 			// the message: the row could have moved between the press and this arm.
 			Message::QueueMenuOpened(id, index) => {
-				if let Some(item) = self.queues[id.index()].items().get(index) {
+				if let Some(item) = self.queues.get(id).items().get(index) {
 					self.menu = Some(RowMenu {
 						tempo: self
 							.tempos
@@ -1005,12 +1002,12 @@ impl Clecta {
 				// both jobs, and a plain press on an already-selected row leaves the selection
 				// alone so that a multi-row drag has something to carry.
 				let kind = self.click_kind();
-				let list = &mut self.queues[id.index()];
+				let list = self.queues.get_mut(id);
 				if !(list.is_selected(index) && kind == Click::Replace) {
 					list.click(index, kind);
 				}
 
-				let list = &self.queues[id.index()];
+				let list = self.queues.get(id);
 				let rows: Vec<usize> = list.selection().collect();
 				// From a list, so a drop *moves*: the rows leave here when they land.
 				self.drag = (!rows.is_empty()).then(|| Drag {
@@ -1033,10 +1030,11 @@ impl Clecta {
 
 				// The selection when the double-clicked row is part of it, that row alone when
 				// it is not — the same rule the files pane's double click follows (PLAN §9a).
-				let taken = if self.queues[list.index()].is_selected(index) {
-					self.queues[list.index()].take_selected()
+				let taken = if self.queues.get(list).is_selected(index) {
+					self.queues.get_mut(list).take_selected()
 				} else {
-					self.queues[list.index()]
+					self.queues
+						.get_mut(list)
 						.remove(index)
 						.into_iter()
 						.collect()
@@ -1056,7 +1054,7 @@ impl Clecta {
 
 			// Not persisted and deliberately not `dirty`, exactly like the files pane's own
 			// offset: where a list is scrolled to is not a setting.
-			Message::QueueScrolled(id, offset) => self.queue_scroll[id.index()] = offset,
+			Message::QueueScrolled(id, offset) => self.queues.scrolled(id, offset),
 
 			Message::ScrollEdge(id, up, entering) => {
 				// The same shape as `DragOut`, and for the same reason: entering one edge and
@@ -1090,10 +1088,6 @@ impl Clecta {
 
 			Message::Measured(measured) => {
 				for facts in measured {
-					// Let go of it first: this batch is done with the file whatever the lists
-					// have done with it, and a path left behind here would never be looked up
-					// again. Every path that went out comes back, so the set empties.
-					self.measuring.remove(&facts.path);
 					self.learned(&facts);
 				}
 			}
@@ -1111,7 +1105,7 @@ impl Clecta {
 					.map(playlist::Item::new)
 					.collect();
 
-				let duplicates = playlist::duplicates(&self.queues, &items, &[]);
+				let duplicates = self.queues.duplicates(&items, &[]);
 				let admission = self.admits(&items, &duplicates);
 				let items: Vec<playlist::Item> = items
 					.into_iter()
@@ -1123,7 +1117,7 @@ impl Clecta {
 					return Task::none();
 				}
 
-				let queue = &mut self.queues[id.index()];
+				let queue = self.queues.get_mut(id);
 				// Top or end, and either way in the pane's order — top to bottom, so a batch
 				// plays in the order it was looked at.
 				let at = if prepend { 0 } else { queue.items().len() };
@@ -1132,14 +1126,14 @@ impl Clecta {
 			}
 
 			Message::QueueRemove(id) => {
-				if self.queues[id.index()].has_selection() {
-					self.queues[id.index()].take_selected();
+				if self.queues.get(id).has_selection() {
+					self.queues.get_mut(id).take_selected();
 					return self.queued();
 				}
 			}
 
 			Message::QueueMove(id, up) => {
-				if self.queues[id.index()].shift_selected(up) {
+				if self.queues.get_mut(id).shift_selected(up) {
 					return self.queued();
 				}
 			}
@@ -1154,13 +1148,13 @@ impl Clecta {
 					return Task::none();
 				};
 
-				let rows: Vec<usize> = self.queues[id.index()].selection().collect();
-				let items = self.queues[id.index()].selected_items();
+				let rows: Vec<usize> = self.queues.get(id).selection().collect();
+				let items = self.queues.get(id).selected_items();
 				let moving: Vec<(ListId, usize)> = rows.iter().map(|&index| (id, index)).collect();
 
 				// The warning can leave *some* of them standing, so the rows and the tracks are
 				// filtered together — what leaves the list is exactly what arrives in the other.
-				let duplicates = playlist::duplicates(&self.queues, &items, &moving);
+				let duplicates = self.queues.duplicates(&items, &moving);
 				let admission = self.admits(&items, &duplicates);
 				let (rows, items): (Vec<usize>, Vec<playlist::Item>) = rows
 					.into_iter()
@@ -1173,9 +1167,9 @@ impl Clecta {
 					return Task::none();
 				}
 
-				self.queues[id.index()].take_rows(&rows);
-				let at = self.queues[target.index()].items().len();
-				self.queues[target.index()].insert_many(at, items);
+				self.queues.get_mut(id).take_rows(&rows);
+				let at = self.queues.get(target).items().len();
+				self.queues.get_mut(target).insert_many(at, items);
 				return self.queued();
 			}
 
@@ -1183,19 +1177,19 @@ impl Clecta {
 			// the measuring `queued` also does — nothing was added, so there is nothing new to
 			// look up.
 			Message::QueueAutoLoad(id, on) => {
-				self.queues[id.index()].auto_load = on;
+				self.queues.get_mut(id).auto_load = on;
 				self.dirty = true;
 			}
 
 			Message::QueueAutoPlay(id, on) => {
-				self.queues[id.index()].auto_play = on;
+				self.queues.get_mut(id).auto_play = on;
 				self.dirty = true;
 			}
 
 			// The third of them, and the same kind of thing: it changes what happens at the end
 			// of a track, not what is in the list.
 			Message::QueueTransition(id, transition) => {
-				self.queues[id.index()].transition = transition;
+				self.queues.get_mut(id).transition = transition;
 				self.dirty = true;
 			}
 
@@ -1358,7 +1352,7 @@ impl Clecta {
 					Some(DropTarget::Player(id)) => {
 						let mut tasks = Vec::new();
 						if let Some((list, rows)) = &drag.from {
-							self.queues[list.index()].take_rows(rows);
+							self.queues.get_mut(*list).take_rows(rows);
 							tasks.push(self.queued());
 						}
 						let paths = drag.items.into_iter().map(|item| item.path).collect();
@@ -1633,16 +1627,12 @@ impl Clecta {
 		let Some(track) = &self.decks[id.index()].track else {
 			return false;
 		};
-		let Some(source) = playlist::next_source(
-			id,
-			&self.queues[ListId::Cue(id).index()],
-			&self.queues[ListId::Common.index()],
-		) else {
+		let Some(source) = self.queues.next_source(id) else {
 			return false;
 		};
 
 		playlist::hands_over_early(
-			self.queues[source.index()].transition,
+			self.queues.get(source).transition,
 			position,
 			self.trims.get(&track.path).copied(),
 		)
@@ -1662,15 +1652,12 @@ impl Clecta {
 	/// track is the list that says whether it plays, so Cue 1 can run the evening by itself
 	/// while the shared pool stays a shelf someone takes from by hand (PLAN §7a).
 	fn advance(&mut self, id: DeckId) -> Task<Message> {
-		let cue = &self.queues[ListId::Cue(id).index()];
-		let common = &self.queues[ListId::Common.index()];
-
 		// A list with **Auto-load** off offers nothing however full it is, so this is also
 		// where switching every list off leaves the player simply stopped.
-		let Some(source) = playlist::next_source(id, cue, common) else {
+		let Some(source) = self.queues.next_source(id) else {
 			return Task::none();
 		};
-		let Some(item) = self.queues[source.index()].take_next() else {
+		let Some(item) = self.queues.get_mut(source).take_next() else {
 			return Task::none();
 		};
 
@@ -1678,7 +1665,7 @@ impl Clecta {
 		// 0:00 and audible only when someone presses Play — unless this list was told to
 		// start it. On a mixer an unrequested fade-in is a mistake that cannot be taken back,
 		// which is why that is a switch and not the default.
-		let list = &self.queues[source.index()];
+		let list = self.queues.get(source);
 		let (auto_play, transition) = (list.auto_play, list.transition);
 		let path = item.path;
 		let loading = Task::batch([self.queued(), self.load(id, path.clone())]);
@@ -1736,7 +1723,7 @@ impl Clecta {
 
 		let rest: Vec<playlist::Item> = paths.map(playlist::Item::new).collect();
 		if !rest.is_empty() {
-			self.queues[ListId::Cue(id).index()].insert_many(0, rest);
+			self.queues.get_mut(ListId::Cue(id)).insert_many(0, rest);
 			return Task::batch([self.load(id, first), self.queued()]);
 		}
 
@@ -1755,9 +1742,10 @@ impl Clecta {
 		{
 			self.browser.mark_prepared(&facts.path, ready);
 		}
-		for queue in &mut self.queues {
-			queue.measured(&facts.path, facts.duration, facts.ready);
-		}
+		// Which also lets go of the file: this answer is done with it whatever the lists have
+		// done with the rows, and a path left in flight would never be looked up again.
+		self.queues
+			.measured(&facts.path, facts.duration, facts.ready);
 	}
 
 	/// Where a file's music sits, if the job that looked found any (PLAN §14c).
@@ -1954,7 +1942,7 @@ impl Clecta {
 	///
 	/// Nothing is ever asked about twice, because a row counts as unmeasured until its answer
 	/// *lands* — long after the job that will produce it started. `measuring` is what a job
-	/// takes with it on the way out and gives back on the way in, and `to_measure` subtracts
+	/// takes with it on the way out and gives back on the way in, and `take_unmeasured` subtracts
 	/// it. Without that, two edits a few milliseconds apart would send the same file to be
 	/// opened and parsed twice, and twenty edits would send the first one twenty times.
 	///
@@ -1962,11 +1950,10 @@ impl Clecta {
 	/// that was asked about**, whatever happened to the job — so a batch cannot be lost from
 	/// the set and leave a file nothing will ever look at again.
 	fn measure_queues(&mut self) -> Task<Message> {
-		let paths = playlist::to_measure(&self.queues, &self.measuring);
+		let paths = self.queues.take_unmeasured();
 		if paths.is_empty() {
 			return Task::none();
 		}
-		self.measuring.extend(paths.iter().cloned());
 
 		// The batch survives the job, because the arm needs it whether or not the job answers.
 		let asked = paths.clone();
@@ -2014,7 +2001,7 @@ impl Clecta {
 		if let Some((source, rows)) = &drag.from
 			&& *source == list
 		{
-			self.queues[list.index()].relocate(rows, index);
+			self.queues.get_mut(list).relocate(rows, index);
 			return;
 		}
 
@@ -2025,7 +2012,7 @@ impl Clecta {
 			None => Vec::new(),
 		};
 
-		let duplicates = playlist::duplicates(&self.queues, &drag.items, &moving);
+		let duplicates = self.queues.duplicates(&drag.items, &moving);
 		let admission = self.admits(&drag.items, &duplicates);
 		let items: Vec<playlist::Item> = drag
 			.items
@@ -2051,10 +2038,10 @@ impl Clecta {
 				.filter(|(position, _)| admission.keeps(*position, &duplicates))
 				.map(|(_, row)| row)
 				.collect();
-			self.queues[source.index()].take_rows(&rows);
+			self.queues.get_mut(*source).take_rows(&rows);
 		}
 
-		self.queues[list.index()].insert_many(index, items);
+		self.queues.get_mut(list).insert_many(index, items);
 	}
 
 	/// Apply a transport event to both the model and the audio thread, in that order of
@@ -2431,9 +2418,9 @@ impl Clecta {
 		let queue = |id: ListId| {
 			ui::playlist::view(
 				id,
-				&self.queues[id.index()],
+				self.queues.get(id),
 				addable,
-				self.queue_scroll[id.index()],
+				self.queues.scroll(id),
 				&self.tempos,
 				// One value rather than three arguments, and `None` at rest: everything a
 				// list does differently during a drag arrives together.

@@ -7,63 +7,13 @@
 //! it**: a row that stays highlighted while a different track slides beneath it is worse
 //! than no highlight at all.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cache::Ready;
-use crate::deck::DeckId;
 use crate::select::{self, Click};
 use crate::waveform::Trim;
-
-/// Which of the three lists. The player-owned ones are `Cue`, the shared one is `Common`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ListId {
-	/// What one player plays next, and no other player's business.
-	Cue(DeckId),
-	/// The shared pool: whichever player finishes first takes from it (PLAN §7a).
-	Common,
-}
-
-impl ListId {
-	/// All three, left to right as they are drawn — which is also the order the `←` and `→`
-	/// buttons step through, so `neighbour` and the layout cannot disagree.
-	pub const ALL: [ListId; 3] = [
-		ListId::Cue(DeckId::One),
-		ListId::Common,
-		ListId::Cue(DeckId::Two),
-	];
-
-	/// Index into a three-element array of anything per-list.
-	pub fn index(self) -> usize {
-		match self {
-			ListId::Cue(DeckId::One) => 0,
-			ListId::Common => 1,
-			ListId::Cue(DeckId::Two) => 2,
-		}
-	}
-
-	/// What the user calls this list.
-	pub fn label(self) -> &'static str {
-		match self {
-			ListId::Cue(DeckId::One) => "Cue 1",
-			ListId::Common => "Next up",
-			ListId::Cue(DeckId::Two) => "Cue 2",
-		}
-	}
-
-	/// The list one step in this direction, or `None` at either end.
-	///
-	/// Neighbours only: `Cue 1` and `Cue 2` are not adjacent, so the arrows cannot throw a
-	/// track across the shared list without it stopping there. That is the point of the
-	/// middle list being in the middle.
-	pub fn neighbour(self, right: bool) -> Option<ListId> {
-		let step = if right { 1 } else { -1 };
-		let index = self.index() as isize + step;
-
-		ListId::ALL.get(usize::try_from(index).ok()?).copied()
-	}
-}
 
 /// When one track gives way to the next (PLAN §7b).
 ///
@@ -526,99 +476,6 @@ impl Playlist {
 	}
 }
 
-/// Which tracks still need their length looked up, given what is already being looked up
-/// (PLAN §7a).
-///
-/// `in_flight` is the whole point. A row counts as unmeasured until its answer *lands*, and
-/// the answer lands long after the job that will produce it started — so without this, two
-/// edits in quick succession would send the same file to be opened and parsed twice, and
-/// twenty would send it twenty times. Subtracting what is already on its way makes each file
-/// asked about exactly once.
-///
-/// Deduplicated across the three lists as well, because the same track may sit in two of them
-/// and one answer settles both rows. Returned in draw order, which is arbitrary but stable.
-pub fn to_measure(queues: &[Playlist; 3], in_flight: &HashSet<PathBuf>) -> Vec<PathBuf> {
-	let mut wanted: Vec<PathBuf> = Vec::new();
-
-	for path in queues.iter().flat_map(Playlist::unmeasured) {
-		// A `Vec` for the batch, against the `HashSet` for what is in flight: this one is
-		// built once per edit and is tens of entries, and the linear scan keeps the order.
-		if !in_flight.contains(path) && !wanted.iter().any(|seen| seen == path) {
-			wanted.push(path.to_path_buf());
-		}
-	}
-
-	wanted
-}
-
-/// Where this track is already queued, if it is, so the app can ask before queueing it twice
-/// (PLAN §7a).
-///
-/// **All three lists, not just the one being added to.** The mistake worth catching is a track
-/// that plays twice in an evening, and Cue 1 and Cue 2 each holding it does that exactly as
-/// surely as one list holding it twice — the duplicate is in the *set*, not in a list.
-///
-/// `moving` is the rows that are on their way out of a list, and it is the reason this takes a
-/// parameter at all: dragging rows from one list to another, or sending them with `←` / `→`,
-/// finds them in their old home and would warn about tracks colliding with themselves.
-///
-/// Searched in draw order, so the list named is the leftmost one — an arbitrary rule, but a
-/// stable one, and the message names a list rather than counting them.
-pub fn already_queued(
-	queues: &[Playlist; 3],
-	path: &Path,
-	moving: &[(ListId, usize)],
-) -> Option<ListId> {
-	ListId::ALL.into_iter().find(|list| {
-		queues[list.index()]
-			.items
-			.iter()
-			.enumerate()
-			.any(|(index, item)| item.path == path && !moving.contains(&(*list, index)))
-	})
-}
-
-/// Which of a batch of tracks are already queued, and where — as positions into `items`, so a
-/// caller can filter rows and tracks together (PLAN §7a, §9a).
-///
-/// The whole of what the duplicate warning is about, and pure: the dialog only decides what to
-/// do with this answer. A batch is checked one track at a time and against the *lists*, not
-/// against itself — a selection cannot contain the same file twice, because a pane's rows are
-/// a folder's files.
-pub fn duplicates(
-	queues: &[Playlist; 3],
-	items: &[Item],
-	moving: &[(ListId, usize)],
-) -> Vec<(usize, ListId)> {
-	items
-		.iter()
-		.enumerate()
-		.filter_map(|(index, item)| {
-			already_queued(queues, &item.path, moving).map(|list| (index, list))
-		})
-		.collect()
-}
-
-/// Where the track after this one comes from, when a player's track ends (PLAN §7a).
-///
-/// **Own cue first, the shared list second.** A track deliberately cued to Player 1 outranks
-/// the pool, which is what makes the pool "whatever is free" rather than a third queue with
-/// rules of its own. `None` when neither has anything to offer, and the player simply stops.
-///
-/// A list with `auto_load` off has nothing to offer however full it is: it is a shelf the user
-/// takes from by hand. It is *skipped*, not blocking — a cue switched off still lets the shared
-/// list feed the player, because the switch belongs to one list and says nothing about the
-/// other.
-pub fn next_source(id: DeckId, cue: &Playlist, common: &Playlist) -> Option<ListId> {
-	if cue.auto_load && !cue.is_empty() {
-		Some(ListId::Cue(id))
-	} else if common.auto_load && !common.is_empty() {
-		Some(ListId::Common)
-	} else {
-		None
-	}
-}
-
 /// Whether the track playing now should give way already (PLAN §7b).
 ///
 /// Three things have to be true at once, and each of them is a reason not to cut: the list
@@ -649,30 +506,6 @@ mod tests {
 
 	fn names(list: &Playlist) -> Vec<&str> {
 		list.items().iter().map(|item| item.name.as_str()).collect()
-	}
-
-	#[test]
-	fn the_arrows_only_reach_a_neighbour() {
-		// Arrange / Act / Assert: the middle list is the only way across, so a track cannot
-		// jump from one player's cue to the other's in one press.
-		let (one, two) = (ListId::Cue(DeckId::One), ListId::Cue(DeckId::Two));
-
-		assert_eq!(one.neighbour(true), Some(ListId::Common));
-		assert_eq!(ListId::Common.neighbour(true), Some(two));
-		assert_eq!(two.neighbour(false), Some(ListId::Common));
-		assert_eq!(ListId::Common.neighbour(false), Some(one));
-
-		// And the ends are ends — this is what disables the buttons.
-		assert_eq!(one.neighbour(false), None, "left of the first");
-		assert_eq!(two.neighbour(true), None, "right of the last");
-	}
-
-	#[test]
-	fn every_list_has_its_own_slot() {
-		// Arrange / Act / Assert: `index` is what makes `[Playlist; 3]` legal, so a
-		// collision would silently merge two lists into one.
-		let indices: Vec<usize> = ListId::ALL.iter().map(|id| id.index()).collect();
-		assert_eq!(indices, vec![0, 1, 2]);
 	}
 
 	/// Put tracks into a list at a position, the way every caller does.
@@ -1151,169 +984,10 @@ mod tests {
 	}
 
 	#[test]
-	fn nothing_is_sent_to_be_measured_twice() {
-		// Arrange: the same track in two lists, plus one of its own, and nothing measured.
-		let queues = [
-			list(&["a.mp3", "b.mp3"]),
-			list(&["a.mp3"]),
-			Playlist::default(),
-		];
-		let path = |name: &str| PathBuf::from("/m").join(name);
-
-		// Act / Assert: one entry per *file*, not per row — one answer settles every row
-		// holding it, so asking twice would be opening the file twice for one number.
-		assert_eq!(
-			to_measure(&queues, &HashSet::new()),
-			vec![path("a.mp3"), path("b.mp3")]
-		);
-
-		// Act / Assert: and nothing already on its way. This is the whole reason the set
-		// exists: a row stays unmeasured until its answer lands, so a second edit arriving
-		// mid-flight would otherwise send the same file off to be parsed all over again.
-		let in_flight = HashSet::from([path("a.mp3")]);
-		assert_eq!(to_measure(&queues, &in_flight), vec![path("b.mp3")]);
-
-		let both = HashSet::from([path("a.mp3"), path("b.mp3")]);
-		assert!(
-			to_measure(&queues, &both).is_empty(),
-			"everything is already being measured"
-		);
-	}
-
-	#[test]
-	fn a_measured_track_is_never_asked_about_again() {
-		// Arrange: one row answered, one answered with *nothing* — a stream, or a file that
-		// would not open.
-		let mut queue = list(&["a.mp3", "b.mp3"]);
-		queue.measured(
-			&PathBuf::from("/m/a.mp3"),
-			Some(Duration::from_secs(10)),
-			None,
-		);
-		queue.measured(&PathBuf::from("/m/b.mp3"), None, None);
-		let queues = [queue, Playlist::default(), Playlist::default()];
-
-		// Act / Assert: neither is asked about again, which is what stops the app re-opening
-		// an unreadable file on every edit for the rest of the run.
-		assert!(to_measure(&queues, &HashSet::new()).is_empty());
-	}
-
-	#[test]
-	fn a_track_is_found_wherever_it_is_already_queued() {
-		// Arrange: one track in Cue 2 and nowhere else, in the app's own `[Playlist; 3]`
-		// order — Cue 1, Next up, Cue 2.
-		let queues = [
-			list(&["a.mp3"]),
-			Playlist::default(),
-			list(&["b.mp3", "c.mp3"]),
-		];
-		let path = |name: &str| PathBuf::from("/m").join(name);
-
-		// Act / Assert: found in the list it is actually in, not merely in the one being
-		// added to — a track in both cues plays twice, which is the mistake worth catching.
-		assert_eq!(
-			already_queued(&queues, &path("c.mp3"), &[]),
-			Some(ListId::Cue(DeckId::Two))
-		);
-		assert_eq!(
-			already_queued(&queues, &path("a.mp3"), &[]),
-			Some(ListId::Cue(DeckId::One))
-		);
-		assert_eq!(
-			already_queued(&queues, &path("new.mp3"), &[]),
-			None,
-			"a track nothing holds"
-		);
-
-		// And a whole batch at once, which is what the warning actually asks about: the
-		// positions of the ones already queued, so a caller can filter rows and tracks
-		// together (PLAN §9a).
-		let batch = [
-			Item::new(path("new.mp3")),
-			Item::new(path("c.mp3")),
-			Item::new(path("also-new.mp3")),
-			Item::new(path("a.mp3")),
-		];
-		assert_eq!(
-			duplicates(&queues, &batch, &[]),
-			vec![(1, ListId::Cue(DeckId::Two)), (3, ListId::Cue(DeckId::One))]
-		);
-	}
-
-	#[test]
-	fn a_row_on_its_way_out_is_not_its_own_duplicate() {
-		// Arrange: the row being dragged from Cue 1 into Next up. Without the exception it
-		// would find itself in Cue 1 and warn about colliding with itself, which would make
-		// every single cross-list move ask a question with one honest answer.
-		let queues = [list(&["a.mp3", "b.mp3"]), Playlist::default(), list(&[])];
-		let moving = [(ListId::Cue(DeckId::One), 1)];
-
-		// Act / Assert
-		assert_eq!(
-			already_queued(&queues, &PathBuf::from("/m/b.mp3"), &moving),
-			None
-		);
-
-		// The exception is the *row*, not the track: a second copy elsewhere still counts.
-		let queues = [
-			list(&["a.mp3", "b.mp3"]),
-			list(&["b.mp3"]),
-			Playlist::default(),
-		];
-		assert_eq!(
-			already_queued(&queues, &PathBuf::from("/m/b.mp3"), &moving),
-			Some(ListId::Common)
-		);
-	}
-
-	#[test]
-	fn the_next_track_comes_from_the_players_own_cue_first() {
-		// Arrange: both lists have something.
-		let cue = list(&["mine.mp3"]);
-		let common = list(&["shared.mp3"]);
-		let empty = Playlist::default();
-
-		// Act / Assert: the deliberate cue outranks the pool.
-		assert_eq!(
-			next_source(DeckId::One, &cue, &common),
-			Some(ListId::Cue(DeckId::One))
-		);
-
-		// The pool is the fallback, not the first choice…
-		assert_eq!(
-			next_source(DeckId::Two, &empty, &common),
-			Some(ListId::Common)
-		);
-
-		// …and two empty lists mean the player just stops.
-		assert_eq!(next_source(DeckId::One, &empty, &empty), None);
-	}
-
-	#[test]
-	fn a_list_with_auto_load_off_is_skipped_rather_than_blocking() {
-		// Arrange: both lists have a track, and the player's own cue is switched off.
-		let off = |names: &[&str]| Playlist {
-			auto_load: false,
-			..list(names)
-		};
-		let cue = off(&["mine.mp3"]);
-		let common = list(&["shared.mp3"]);
-
-		// Act / Assert: the cue is passed over — not treated as an empty list that stops the
-		// handover, which is the difference the word *skipped* is doing. The switch belongs to
-		// one list and says nothing about the other.
-		assert_eq!(
-			next_source(DeckId::One, &cue, &common),
-			Some(ListId::Common)
-		);
-
-		// The shared list switched off too: nothing is offered, and the player stops with two
-		// full lists in front of it — which is exactly what switching both off asks for.
-		let common = off(&["shared.mp3"]);
-		assert_eq!(next_source(DeckId::One, &cue, &common), None);
-
-		// And a fresh list hands over: the default is what the app did before there were
-		// switches at all.
+	fn a_fresh_list_hands_over_and_does_not_start_anything() {
+		// Arrange / Act / Assert: the defaults are what the app did before there were switches
+		// at all, which is the only defensible thing for a switch to default to. What happens
+		// when one of them is *off* is a question about the set of three, and is asked there.
 		assert!(Playlist::default().auto_load, "on unless it is turned off");
 		assert!(!Playlist::default().auto_play, "loading is not playing");
 	}

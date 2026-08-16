@@ -213,7 +213,12 @@ clecta/
         ├── tree.rs      the folder tree's model: nodes, expansion, path arithmetic (§9)
         ├── fsio.rs      std::fs reads run off the GUI thread: list a dir, list its subfolders, the roots (§9)
         ├── paths.rs     clecta-data/ beside the app if writable, else the per-user dir; the .app walk-up (§11)
-        ├── playlist.rs  PURE queue arithmetic: three lists, their edits, what each does to the selection, what each hands over (§7a)
+        ├── playlist.rs  PURE arithmetic for **one** list: its rows, its selection, and what
+        │                every edit does to that selection (§7a)
+        ├── queues.rs    PURE, and about the **set** of three: `ListId`, the lists themselves,
+        │                where each is scrolled to, which files are out being measured, and the
+        │                three questions only the set can answer — is this a duplicate, what
+        │                needs measuring, where does the next track come from (§7a, Q47)
         ├── settings.rs  load/save clecta-data/settings.json; a corrupt file reads as defaults (§11)
         ├── waveform.rs  PURE, and about what is in a *file*: `Scanner` folds its samples to a
         │                bounded array, finds the music's edges and works out its tempo, all in
@@ -2047,27 +2052,41 @@ otherwise pure; anything needing a device or a real folder is manual.
   same rule applied to each, and a row holding one without the other was never a state anything
   could produce.
 
-  `already_queued` gets two more, and the second is the one that matters (§7a). The first is
-  the ordinary search: a track is found in whichever of the three lists actually holds it, not
-  merely in the one being added to, and a track nothing holds is found nowhere. The second is
-  the exception — a row on its way out of a list must not warn about colliding with *itself*,
-  or every cross-list move would ask a question with one honest answer — and it also pins that
-  the exception is the **row** and not the track, by leaving a second copy elsewhere in place
-  and checking it is still found.
-
-  `to_measure` gets two, and they are the two halves of "ask about each file once": that a
-  track sitting in two lists produces one entry rather than two, and that a file already being
-  looked up produces none — the subtraction that turns a burst of edits from an O(n²) pile of
-  duplicate reads into one read per file. The second checks that a row *measured and answered
-  nothing* is never asked about again either, which is the other thing the two-layer
-  `Option<Option<Duration>>` is for.
-
   `hands_over_early` gets one, and it is three conditions rather than a number (§7b): the music
   has stopped *and* this list asked to skip the blanks *and* somebody has scanned the track.
   It pins the two silent cases especially — a list set to **Whole track** never cuts however
   far past the music the playhead is, and a track nothing has scanned plays whole for ever
   rather than being cut at zero, which is what a missing trim read as "the music ends at the
   start" would do.
+- **`queues.rs`** — everything that is true of the three lists together rather than of any one
+  of them (Q47), which is where most of §7a's rules turned out to live.
+
+  The arrows reach a neighbour and only a neighbour, so a track cannot jump from one player's
+  cue to the other's in one press. `next_source` prefers a player's own cue over the shared
+  list, falls through to the shared list when the cue is empty, stops the player when both are,
+  and never offers the *other* player's cue. A second test pins the word *skipped* in the
+  switches' rule: a list with **Auto-load** off is passed over rather than treated as an empty
+  list that ends the handover, so a cue switched off still lets the shared list feed that
+  player, while both switched off is a player stopping with full lists in front of it.
+
+  `already_queued` gets two, and the second is the one that matters. The first is the ordinary
+  search: a track is found in whichever of the three lists actually holds it, not merely in the
+  one being added to, and a track nothing holds is found nowhere. The second is the exception —
+  a row on its way out of a list must not warn about colliding with *itself*, or every
+  cross-list move would ask a question with one honest answer — and it pins that the exception
+  is the **row** and not the track, by leaving a second copy elsewhere and checking it is still
+  found. `duplicates` gets the batch form: positions into the batch, so a caller can filter rows
+  and tracks by the same answer.
+
+  `take_unmeasured` gets the two halves of "ask about each file once", and the rename is part of
+  the test: a track sitting in two lists produces one entry rather than two, and **asking twice
+  in a row gives the batch and then nothing**, because recording what went out is part of asking
+  rather than a second line beside it. A third checks that a row measured and answered *nothing*
+  is never asked about again either, which is the other thing the two-layer
+  `Option<Option<Duration>>` is for. And one answer settles every row holding that track,
+  including the same track queued twice in one list — the reason `measured` works by path where
+  everything above it works by index. The scroll offsets get one: three panels, three offsets,
+  or scrolling one would scroll all of them.
 - **`fsio.rs`** — one test, for the one rule in the module (§11b): the recursive walk finds
   media at every depth, in the pane's own order, and nothing that is not media at any depth.
   Plus the boundary it draws around failure — an unreadable **root** is an error, because a
@@ -2993,6 +3012,7 @@ change rather than an argument with §11a's first sentence.
 | Q44 | Whether the store answers per table or per question | **Per question. `scan`, `store_scan`, `ready` — and the four tables go private.** Eight of `Cache`'s twelve methods were a getter and a setter each, every one a one-line forward to the same two private functions, and the real rule — that a hit means every table a decode fills — lived *outside* them: once in the app's `cached_scan` and once in `prepared`, with a comment admitting the two were kept in step by hand. Adding the tempo proved the comment right by breaking both at once. The rule is now one array and one function; the caller asks whether a file has been scanned and is told. Three consequences fell out rather than being aimed at: **one write transaction**, so a half-stored scan is no longer possible (three writes could leave a waveform with no tempo, which reads as a miss for ever and re-stores identically every launch); **one read transaction**, which was the `ponytail:` note on `prepared`; and the queues and the files pane finally agreeing about one file, since `cached_facts` was reading tables one at a time and would show a queue row's playing time for a track the pane refused to tick. `durations` keeps its own pair on purpose — a length is a header parse, and folding it in would make asking for a running time decode the whole file | §11a, §11c, §7a, §14c, §14d |
 | Q45 | Whether a row keeps a scan's answers as one thing or as loose fields | **As one thing, and the same one everywhere.** Three facts about a file were being carried by five types with overlapping fields — `Scan`, `Facts`, `Ready`, `Trim`, `Item` — and the seams between them were where the app disagreed with itself. `Item` held `music` and `tempo` as two independent `Option`s that were set by two copies of the same rule, so "a playing time with no tempo beside it" was representable and meaningless; `Facts` held the same pair a second time; and the queue row then wrote `item.tempo.map(Some)` to re-inflate a two-layer answer it had flattened on the way in. All three now hold one `Ready`, so a queue row and a files-pane row are drawn by the *same expression* — which is the real test of whether two panes agree, rather than two comments saying they should. `duration` stays a separate field with its own two layers, for the reason in Q44: a length is a header parse, a scan is a decode, and they arrive at different moments under different rules | §7a, §14c, §14d, §11a |
 | Q46 | Whether the three accumulators are three things or one | **One `Scanner`, with the three behind it.** `Fold`, `Edges` and `Tempo` are identical in shape — `Default`, `push`, `finish` — and were never independent: they are three answers to one expensive question, and the expense is the decode they share. Driving them separately meant every caller knowing there were three, that two of the three need the sample rate and the channel count and one does not, and that all three must be fed *every* sample or their answers stop being about the same audio. That loop was written four times: once in `audio::scan` and once in each of the three test modules. It is now written once, and the three stay separate types *behind* the interface, still tested one at a time — an internal seam is still a seam, it is just not part of what the module promises. A fourth fact is now a struct, a field, a `push` and a `finish`, all in one file. The same tidying moved `sweep_band` and `seek_fraction` out to `ui/waveform.rs`: they take a width in pixels and never ask `waveform` anything, so they were in the pure module because it was the pure module and not because they belonged there (Q42's rule, applied the other way round) | §14a, §14b, §12, §5 |
+| Q47 | Where the rules about the *set* of three lists live | **In `queues.rs`, with the lists.** Thirteen messages, twelve `update` arms and three `Clecta` fields described one thing that had no module: an array of three lists, an array of three scroll offsets and a set of paths in flight, all indexed by `ListId::index()` on every queue arm — 42 of those lookups in `app.rs` alone, five of them inside `QueueShift`. The tell was already in `playlist.rs`, which had grown three free functions taking `&[Playlist; 3]`: a type with no name doing a job with no home. So `Playlist` is now one list and `Queues` is the set, and the split is not arbitrary — a duplicate is a duplicate if *any* of the three holds it, a file is measured once however many rows hold it, and the next track comes from a player's own cue *or* the shared pool. None of those is a question a list can answer. `ListId` moved with them, and `index()` stayed public for one caller: the view, whose three `scrollable` ids are a `[&'static str; 3]` because iced wants a `&'static str`. `update` no longer uses it at all. Two smaller things fell out: asking what needs measuring and recording it as in flight became **one** call (`take_unmeasured`) rather than two lines beside each other, which is the pair that goes wrong the day they stop being beside each other; and the queue scroll offsets left `Clecta` for the module that owns the lists, which is where the files pane has always kept its own | §7a, §9, §5 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
