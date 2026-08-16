@@ -68,24 +68,12 @@ fn folder_row<'a>(node: Row, current: Option<&Path>) -> Element<'a, Message> {
 	)
 	.padding(ROW_PADDING)
 	.width(Fill)
-	.style(move |theme: &Theme| row_style(theme, selected));
+	// The same fill the other two lists use (`ui/mod.rs`): the folder shown in the files pane
+	// is highlighted here so the two panes visibly agree about where the user is, which is the
+	// same question a selected row answers.
+	.style(move |theme: &Theme| ui::row_style(theme, selected));
 
 	mouse_area(body)
 		.on_press(Message::FolderSelected(node.path))
 		.into()
-}
-
-/// The folder currently shown in the files pane is highlighted, so the two panes visibly
-/// agree about where the user is.
-fn row_style(theme: &Theme, selected: bool) -> container::Style {
-	if !selected {
-		return container::Style::default();
-	}
-
-	let palette = theme.extended_palette();
-	container::Style {
-		background: Some(palette.primary.weak.color.into()),
-		text_color: Some(palette.primary.weak.text),
-		..container::Style::default()
-	}
 }

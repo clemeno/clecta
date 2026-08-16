@@ -58,7 +58,7 @@ impl Tree {
 	/// alone.
 	fn insert(&mut self, path: PathBuf) {
 		self.nodes.entry(path.clone()).or_insert_with(|| Node {
-			name: display_name(&path),
+			name: crate::fsio::name_of(&path),
 			expanded: false,
 			children: None,
 		});
@@ -169,14 +169,6 @@ impl Tree {
 			}
 		}
 	}
-}
-
-/// What to call a folder in the tree. The file name, except for a root, which has none —
-/// `/` on macOS, `C:\` on Windows.
-fn display_name(path: &Path) -> String {
-	path.file_name()
-		.map(|name| name.to_string_lossy().into_owned())
-		.unwrap_or_else(|| path.display().to_string())
 }
 
 #[cfg(test)]

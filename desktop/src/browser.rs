@@ -85,10 +85,7 @@ pub struct Entry {
 impl Entry {
 	/// Build an entry from the pieces `fsio` reads off the filesystem.
 	pub fn new(path: PathBuf, size: u64, modified: Option<SystemTime>) -> Self {
-		let name = path
-			.file_name()
-			.map(|name| name.to_string_lossy().into_owned())
-			.unwrap_or_default();
+		let name = crate::fsio::name_of(&path);
 
 		Self {
 			hidden: name.starts_with('.'),

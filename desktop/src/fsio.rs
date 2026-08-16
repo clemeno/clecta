@@ -133,10 +133,16 @@ fn read_dir(folder: &Path) -> Result<impl Iterator<Item = std::fs::DirEntry>, St
 	Ok(entries.filter_map(Result::ok))
 }
 
-/// A path's last component, for a notice line or a sort key.
+/// A path's last component: what to call a file or a folder on screen.
 ///
 /// Falls back to the whole path, which is what `/` and `C:\` have instead of a name, and
-/// what a notice should say rather than nothing at all.
+/// what a notice should say rather than nothing at all. The one caller that can be handed a
+/// root is the folder tree, and a blank row where `/` belongs would be worse than a `/`.
+///
+/// The one implementation, after three: a files-pane row, a queue row and a tree row all ask
+/// this and all have to give the same answer, or the same track is called two things in two
+/// panes. It lives here rather than in any of them because this is the module that reads the
+/// names off the filesystem in the first place.
 pub fn name_of(path: &Path) -> String {
 	path.file_name()
 		.map(|name| name.to_string_lossy().into_owned())

@@ -319,7 +319,7 @@ fn file_row<'a>(
 		// Fixed, and the reason `visible_rows` can be arithmetic instead of a measurement.
 		.height(ROW_HEIGHT)
 		.align_y(iced::Center)
-		.style(move |theme: &Theme| row_style(theme, selected));
+		.style(move |theme: &Theme| ui::row_style(theme, selected));
 
 	let area = mouse_area(body).on_press(Message::RowSelected(entry.path.clone()));
 
@@ -335,22 +335,7 @@ fn file_row<'a>(
 	}
 }
 
-/// A selected row gets a filled background; every other row gets nothing, so the
-/// selection is the only thing the eye is drawn to.
-pub fn row_style(theme: &Theme, selected: bool) -> container::Style {
-	if !selected {
-		return container::Style::default();
-	}
-
-	let palette = theme.extended_palette();
-	container::Style {
-		background: Some(palette.primary.weak.color.into()),
-		text_color: Some(palette.primary.weak.text),
-		..container::Style::default()
-	}
-}
-
-// `visible_rows` moved to `ui/mod.rs`, which the queues now share (PLAN §9). What is left
+// `visible_rows` and `row_style` moved to `ui/mod.rs`, which all three lists share. What is left
 // here that is not a widget is the two decisions below.
 #[cfg(test)]
 mod tests {

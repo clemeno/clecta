@@ -265,6 +265,30 @@ pub fn edited_tempo(
 	}
 }
 
+/// A selected row's background — the same fill in all three of the app's lists.
+///
+/// Here rather than in one of them because all three ask the same question and the answer has
+/// to look the same: the files pane, the three queues, and the folder tree, where it says the
+/// two panes agree about which folder is being shown. The queues borrow it for their scroll
+/// edges too, which are lit while a drag hovers them for exactly the same reason — this is the
+/// thing the pointer is on.
+///
+/// Every other row gets nothing at all, so the selection is the only thing the eye is drawn to.
+pub fn row_style(theme: &iced::Theme, selected: bool) -> iced::widget::container::Style {
+	use iced::widget::container;
+
+	if !selected {
+		return container::Style::default();
+	}
+
+	let palette = theme.extended_palette();
+	container::Style {
+		background: Some(palette.primary.weak.color.into()),
+		text_color: Some(palette.primary.weak.text),
+		..container::Style::default()
+	}
+}
+
 /// The `position / length` readout, with the length replaced when the decoder could not
 /// determine one (PLAN §7).
 pub fn format_transport(position: Duration, duration: Option<Duration>) -> String {

@@ -138,7 +138,7 @@ fn edging<'a>(
 	// to avoid, and worse, because it would move the rows the moment a drag began.
 	let lit = container(body)
 		.padding([1, 2])
-		.style(move |theme: &Theme| ui::browser::row_style(theme, armed));
+		.style(move |theme: &Theme| ui::row_style(theme, armed));
 
 	if !dragging {
 		return lit.into();
@@ -271,7 +271,7 @@ fn rows<'a>(
 		.width(Fill)
 		.height(ROW_HEIGHT)
 		.align_y(Center)
-		.style(move |theme: &Theme| ui::browser::row_style(theme, selected));
+		.style(move |theme: &Theme| ui::row_style(theme, selected));
 
 		// A press selects and arms a drag; a double click plays it now, jumping the queue.
 		let area = mouse_area(body)
