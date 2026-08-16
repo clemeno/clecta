@@ -87,15 +87,6 @@ pub fn editor<'a>(name: &'a str, value: f32, detected: Option<f32>) -> Element<'
 			.on_press(Message::TempoScaled(factor))
 	};
 
-	// Said only when it differs, and said quietly: it is the answer to "what was it before I
-	// started", which is the one question the two buttons cannot answer on their own.
-	let was = match detected {
-		Some(detected) if (detected - value).abs() > f32::EPSILON => {
-			format!("detected {}", ui::format_tempo(Some(Some(detected))))
-		}
-		_ => String::new(),
-	};
-
 	panel(column![
 		text(name).size(12).width(Fill),
 		row![
@@ -107,7 +98,7 @@ pub fn editor<'a>(name: &'a str, value: f32, detected: Option<f32>) -> Element<'
 		]
 		.align_y(Center)
 		.spacing(8),
-		text(was).size(10),
+		text(detected_line(value, detected)).size(10),
 		row![
 			Space::new().width(Fill),
 			button(text("Cancel").size(12))
@@ -128,4 +119,50 @@ fn panel<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
 		.padding(12)
 		.style(container::bordered_box)
 		.into()
+}
+
+/// What the detector said, when that is not what is on screen — the one question `/2` and `×2`
+/// cannot answer between them.
+///
+/// Blank while the two agree, so opening the editor and closing it again shows nothing new, and
+/// blank on a file nothing has scanned, where the number on screen is a correction and there is
+/// no "before" to go back to.
+///
+/// The comparison is against the *shown* two decimals rather than the bits, because that is
+/// what the line is for: `f32::EPSILON` is about 1.2e-7, so halving and doubling a tempo back to
+/// where it started can leave a difference that passes an exact test and prints identically —
+/// a line reading "detected 128.00" under a 128.00.
+fn detected_line(value: f32, detected: Option<f32>) -> String {
+	let shown = ui::format_tempo(Some(Some(value)));
+	match detected.map(|detected| ui::format_tempo(Some(Some(detected)))) {
+		Some(was) if was != shown => format!("detected {was}"),
+		_ => String::new(),
+	}
+}
+
+/// The one decision in this file. Everything else builds widgets (PLAN §12).
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn the_detected_tempo_is_said_only_while_it_differs_from_what_is_shown() {
+		// Arrange / Act / Assert: the ordinary correction, and the ordinary non-correction.
+		assert_eq!(detected_line(87.0, Some(174.0)), "detected 174.00");
+		assert_eq!(detected_line(174.0, Some(174.0)), "", "nothing changed yet");
+
+		// A correction on a file nothing has scanned has no "before" to offer.
+		assert_eq!(detected_line(128.0, None), "");
+
+		// And the case the two buttons make: halved and doubled back, which is exact for a
+		// power of two — and would still have to read as unchanged if it were not, since the
+		// line compares the two decimals the panel is showing.
+		assert_eq!(detected_line(174.0 / 2.0 * 2.0, Some(174.0)), "");
+		assert_eq!(
+			detected_line(97.464_9, Some(97.464_1)),
+			"",
+			"same to a hundredth"
+		);
+		assert_eq!(detected_line(97.47, Some(97.46)), "detected 97.46");
+	}
 }

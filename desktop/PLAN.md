@@ -2088,10 +2088,43 @@ otherwise pure; anything needing a device or a real folder is manual.
   reads the playing time and the tempo back out of the same answer (§14c, §14d): a scanned file
   gives the seconds between its edges and the beats it runs at, one scanned and found silent gives
   a mark with neither, and the one still missing a table gives nothing at all.
-- **`ui/playlist.rs`** — `running_time`, which is the only thing in that file that is not
-  widgets: how many tracks, how long they run, and the `+` that says the total is a floor
-  rather than a figure. An empty list says *nothing at all* rather than `0 · 0:00`, because
-  three empty panels each announcing their emptiness is furniture.
+- **`ui/playlist.rs`** — `running_time`: how many tracks, how long they run, and the `+` that
+  says the total is a floor rather than a figure. An empty list says *nothing at all* rather
+  than `0 · 0:00`, because three empty panels each announcing their emptiness is furniture.
+  `arrows(first, last, count)` is the second (§9a), and it is two off-by-ones against opposite
+  ends of the same list — `> 0` at the top and `+ 1 < count` at the bottom. One test covers the
+  ends, the middle, the blocks that touch each end, the whole list selected, and the single row
+  of a single-row list, which is where an off-by-one shows first. An arrow live one row too far
+  is a block moved off the end of the list it is in.
+- **`ui/browser.rs`, `ui/deck.rs`, `ui/tempo.rs`** — the decisions that were sitting inside a
+  `view`, lifted out and given the tests §12 has asked for all along (Q42). Four rules, and each
+  one had a way of being wrong that no glance at the screen would catch.
+
+  `mark_of(working, prepared)` is the leading column's three-way (§11c), and the case worth
+  writing down is `(true, true)`: **Prepare folder** over a folder already prepared re-reads
+  every file, so a row is both at once, and the one that says `✓` through all of it is lying
+  about what is happening to it. Working wins. It also stopped being a string: the green that
+  means *ready* is now chosen by asking which state the row is in rather than by comparing the
+  glyph against `"✓"`.
+
+  `load_label(id, count)` is §9a's rule that the count appears only once there is more than one
+  — a `(1)` on the commonest click there is would be noise, and a dead button reads as the plain
+  promise it will make when it wakes up.
+
+  `music_span(length, trim)` and `progress(position, length)` are `ui/deck.rs`'s two divides
+  (§14c, §7). They now take the two numbers rather than the `Deck` they came off, which is what
+  lets the interesting cases be written at all: a stream with no length, a zero-length track, a
+  stale trim whose edges sit past the end of the file — clamped to the strip, because the caller
+  is a `draw` — and a playhead a tick past its own total, which the app really does produce
+  twenty times a second at the end of every track. `music_span`'s guard changed while it was
+  being written: `total <= 0.0` lets a `NaN` through and `f32::clamp` passes one straight on,
+  which is the exact trap `seek_fraction` fell into in §14b, so it is `(total > 0.0).then(…)`
+  like its neighbour.
+
+  `detected_line(value, detected)` is the quiet line under the tempo editor (§14d), and writing
+  the test changed the code: it compared with `f32::EPSILON`, about 1.2e-7, where the line is
+  about what the panel *shows* to two decimals. So it compares the two rendered strings, and
+  "detected 128.00" can no longer appear under a 128.00.
 - **`audio.rs`** — a second test that needs no output device, beside the scan (§14a): a
   generated three-second WAV is measured through `duration`, and a path that does not exist
   answers `None` rather than failing. The queues' whole running time is built out of that one
@@ -2915,6 +2948,7 @@ change rather than an argument with §11a's first sentence.
 | Q39 | Where the music's *length* comes from, and what it displaces | **Derived from the edges already stored, and it displaces nothing.** `Trim::music()` is `end - start`: a fourth table would be a number that can disagree with the two it was computed from, and the wrong one would be the one on screen. It reaches the files pane on the query §11c already makes once per listing — the edges were being read for the mark, so the number is free — and a queue row on the trim `cached_facts` was already reading for the handover. In the pane it is a column of its own before the size, because a listing says what a file *is* and this is the first thing that says what it is *for*; in a queue it goes in front of the file's length rather than instead of it, since the music is what the evening is planned against and the file's length is what every other program on the machine agrees with. The footer's running time deliberately stays a sum of *file* lengths: a total that changed meaning when a transition switch was flipped would be worse than one that is occasionally long | §14c, §11c, §9, §7a |
 | Q40 | How a tempo is found, and how far it is trusted | **A third accumulator on the decode that was already happening, reported raw between 65 and 200 BPM.** An onset track from a 512-sample loudness envelope, a whole-bin autocorrelation for the beat, then one bin of a Fourier transform to refine it — the phasor because a correlation read between two bins snaps back to whole bins, which at 128 BPM is three BPM wide, and the column claims two decimals. Written rather than pulled in, because the obvious crate is C and `deny.toml` bans a C toolchain (§11). **Not** folded into a narrower window: half-time and double-time are both genuinely true about a lot of music, so the app reports what it measured and a person overrules it (Q41). The `✓` now means three tables rather than two, which cost every prepared folder one more **Prepare folder** run — the honest price of a mark that means one thing | §14d, §11c, §9, §7a |
 | Q41 | Where a *hand-edited* tempo lives, and how it reaches the screen | **In `settings.json`, cleared on its own, and applied as the row is drawn.** A detected tempo is a cache fact — deleting it costs time. A corrected one is a person's answer about a track and nothing can work it out again, so it cannot live in a file whose first sentence is that losing it costs nothing (§11a): **Clear cache** takes the detected numbers, **Clear BPM edits** takes the corrections, and each asks first. It is applied by one function at draw time rather than written into the pane's map and every queue holding the file, which is four places to keep in step and no way at all to put the detected numbers back when the corrections are dropped. The editor is `/2` and `×2` and nothing else: an octave is the only error visible at a glance, and the two are exactly reversible, so no undo button is needed. It is the app's first panel drawn *over* the window, since `rfd` cannot hold a value that changes while it is open — centred rather than at the pointer, because the only route to a cursor position is a subscription that fires on every mouse move | §14d, §11, §11a |
+| Q42 | Where a decision inside a `view` belongs | **Beside the view, as a named function with a test — not moved to another module, and not left in the closure.** §12's rule was already "pure logic is tested, including the arithmetic inside a module that is not otherwise pure", and five places under `ui/` were quietly exempt from it because a decision written inside a `.map()` has no name to call and no interface to cross. Lifted rather than *relocated*: `mark_of` belongs with the column it marks and `music_span` with the strip it measures, so a rule and the widget it is about stay in one file — `ui/mod.rs` is for what two panes share, which none of these are. Writing the tests changed two of the four: `detected_line` was comparing floats where the question is about two rendered decimals, and `music_span`'s `<= 0.0` guard let a `NaN` through into a `clamp` that passes them on. Both were reachable only from inputs nothing produces today, which is the argument for the rule rather than against it | §12, §11c, §14c, §14d, §9a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

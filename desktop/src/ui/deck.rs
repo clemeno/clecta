@@ -32,6 +32,9 @@ pub fn view(
 	sweep: f32,
 ) -> Element<'_, Message> {
 	let loaded = deck.transport.has_track();
+	// Asked once and used three times below. The decoder cannot always answer it (PLAN §7),
+	// and every one of the three has a different thing to do about that.
+	let length = deck.track.as_ref().and_then(|track| track.duration);
 
 	// Disabled rather than hidden: buttons that come and go make the panel jump, and the
 	// user learns the layout from the empty state.
@@ -50,12 +53,9 @@ pub fn view(
 			.spacing(8),
 			text(ui::elide_middle(deck.title(), TITLE_CHARS)).size(16),
 			row![
-				text(ui::format_transport(
-					deck.position,
-					deck.track.as_ref().and_then(|track| track.duration)
-				))
-				.size(13)
-				.width(Fill),
+				text(ui::format_transport(deck.position, length))
+					.size(13)
+					.width(Fill),
 				jump("⇤ 0:00", loaded.then_some(Duration::ZERO), id),
 				jump(
 					"⇥ music",
@@ -67,8 +67,8 @@ pub fn view(
 			.align_y(Center),
 			ui::waveform::view(
 				&deck.peaks,
-				progress(deck),
-				music(deck, trim),
+				progress(deck.position, length),
+				music_span(length, trim),
 				deck.scanning.then_some(sweep),
 				move |fraction| Message::Seeked(id, fraction),
 			),
@@ -127,20 +127,26 @@ fn jump(label: &'static str, to: Option<Duration>, id: DeckId) -> Element<'stati
 
 /// The music's two edges as fractions of the track, for the marks on the strip.
 ///
-/// `None` unless everything needed is there — a track, a length to divide by, and a trim —
-/// because a mark drawn against a length the app had to guess at would be a line in the wrong
-/// place, which is worse than no line.
-fn music(deck: &Deck, trim: Option<Trim>) -> Option<(f32, f32)> {
-	let total = deck.track.as_ref()?.duration?.as_secs_f32();
+/// `None` unless everything needed is there — a length to divide by and a trim — because a
+/// mark drawn against a length the app had to guess at would be a line in the wrong place,
+/// which is worse than no line.
+///
+/// Takes the length rather than the `Deck` it came from, so the arithmetic can be checked
+/// without one: this is a divide and two clamps, and every one of its interesting cases is a
+/// number no player can be put into on purpose (PLAN §12).
+fn music_span(length: Option<Duration>, trim: Option<Trim>) -> Option<(f32, f32)> {
+	let total = length?.as_secs_f32();
 	let trim = trim?;
-	if total <= 0.0 {
-		return None;
-	}
 
-	Some((
-		(trim.start.as_secs_f32() / total).clamp(0.0, 1.0),
-		(trim.end.as_secs_f32() / total).clamp(0.0, 1.0),
-	))
+	// The same positive test `progress` uses rather than a `<= 0.0` guard, and for the reason
+	// `seek_fraction` learned the hard way (PLAN §14b): `f32::clamp` passes a `NaN` straight
+	// through, so a guard that only refuses zero would draw two marks at nowhere.
+	(total > 0.0).then(|| {
+		(
+			(trim.start.as_secs_f32() / total).clamp(0.0, 1.0),
+			(trim.end.as_secs_f32() / total).clamp(0.0, 1.0),
+		)
+	})
 }
 
 /// How far through the track the playhead is, for the waveform's playhead line.
@@ -148,11 +154,11 @@ fn music(deck: &Deck, trim: Option<Trim>) -> Option<(f32, f32)> {
 /// `None` whenever there is nothing to measure against — an empty player, or a stream the
 /// decoder could not give a length for (PLAN §7) — which is the case the readout above
 /// shows as `--:--` and the strip shows by drawing no playhead at all.
-fn progress(deck: &Deck) -> Option<f32> {
-	let total = deck.track.as_ref()?.duration?.as_secs_f32();
+fn progress(position: Duration, length: Option<Duration>) -> Option<f32> {
+	let total = length?.as_secs_f32();
 	// A zero-length track would divide by nothing, and a playhead can overrun its total by
 	// a tick's worth at the very end, so the ratio is clamped rather than trusted.
-	(total > 0.0).then(|| (deck.position.as_secs_f32() / total).clamp(0.0, 1.0))
+	(total > 0.0).then(|| (position.as_secs_f32() / total).clamp(0.0, 1.0))
 }
 
 /// The transport state, in the user's words rather than the enum's.
@@ -162,5 +168,66 @@ fn state_label(transport: Transport) -> &'static str {
 		Transport::Stopped => "stopped",
 		Transport::Playing => "playing",
 		Transport::Paused => "paused",
+	}
+}
+
+/// The two divisions in this panel. Everything else here builds widgets (PLAN §12).
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Seconds as a `Duration`, since every case below is written in them.
+	fn secs(seconds: f32) -> Duration {
+		Duration::from_secs_f32(seconds)
+	}
+
+	#[test]
+	fn the_marks_sit_where_the_music_does_and_nowhere_at_all_without_a_length() {
+		// Arrange: four seconds of leader and two of run-out in a two-hundred-second track,
+		// which is the shape §14c actually finds.
+		let trim = Trim {
+			start: secs(4.0),
+			end: secs(198.0),
+		};
+
+		// Act / Assert: two fractions of the *file*, not of the music.
+		let (start, end) = music_span(Some(secs(200.0)), Some(trim)).expect("a measured track");
+		assert!((start - 0.02).abs() < 1e-6, "start {start}");
+		assert!((end - 0.99).abs() < 1e-6, "end {end}");
+
+		// Nothing to divide by, and nothing to divide: both are a strip with no marks on it
+		// rather than marks in the wrong place.
+		assert_eq!(music_span(None, Some(trim)), None, "a stream");
+		assert_eq!(music_span(Some(secs(200.0)), None), None, "never scanned");
+		assert_eq!(music_span(Some(Duration::ZERO), Some(trim)), None, "empty");
+	}
+
+	#[test]
+	fn a_mark_can_never_be_drawn_off_the_end_of_the_strip() {
+		// Arrange: edges past the end of the file, which a stale trim against a re-encoded
+		// file would give — the caller is a `draw`, so this has to be a clamp and not a panic.
+		let past = Trim {
+			start: secs(500.0),
+			end: secs(900.0),
+		};
+
+		// Act / Assert
+		assert_eq!(music_span(Some(secs(200.0)), Some(past)), Some((1.0, 1.0)));
+	}
+
+	#[test]
+	fn the_playhead_is_a_fraction_or_it_is_not_drawn() {
+		// Arrange / Act / Assert: the ordinary case, then the three that must not divide.
+		assert_eq!(progress(secs(50.0), Some(secs(200.0))), Some(0.25));
+		assert_eq!(progress(secs(50.0), None), None, "a stream");
+		assert_eq!(
+			progress(Duration::ZERO, Some(Duration::ZERO)),
+			None,
+			"empty"
+		);
+
+		// The playhead can overrun its own total by a tick at the very end, which is a
+		// position the app really does produce — 20 times a second, every track.
+		assert_eq!(progress(secs(200.05), Some(secs(200.0))), Some(1.0));
 	}
 }

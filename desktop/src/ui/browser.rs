@@ -32,6 +32,44 @@ const DATE_WIDTH: f32 = 92.0;
 /// already does on both targets.
 const PREPARED: &str = "✓";
 
+/// What the leading column is saying about a row (PLAN §11c).
+///
+/// One column and two states, because they are the two ends of the same sentence — this file
+/// is being worked out, this file has been. A named pair rather than the glyph itself, so the
+/// green that means *ready* is chosen by asking which state this is and not by comparing two
+/// strings that happen to differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+	/// A thread has this file open right now.
+	Working,
+	/// The store holds every fact about it.
+	Prepared,
+}
+
+/// Which of the two a row is in, if either.
+///
+/// **Working wins.** A file being re-scanned is already prepared — that is what re-preparing
+/// means — and the row that says so is the one lying about what is happening to it.
+fn mark_of(working: bool, prepared: bool) -> Option<Mark> {
+	match (working, prepared) {
+		(true, _) => Some(Mark::Working),
+		(false, true) => Some(Mark::Prepared),
+		(false, false) => None,
+	}
+}
+
+/// What a load button promises, with this many rows highlighted (PLAN §9a).
+///
+/// The count only appears once there is more than one, because "→ Player 1" with five rows
+/// selected is a different promise from the same button with one — and a `(1)` on every
+/// ordinary single click would be noise on the commonest case there is.
+fn load_label(id: DeckId, selected: usize) -> String {
+	match selected {
+		0 | 1 => format!("→ {}", id.label()),
+		count => format!("→ {} ({count})", id.label()),
+	}
+}
+
 /// Horizontal padding inside a row. Small: the pane is scanned, so more rows on screen
 /// beats a roomier row. There is no vertical padding any more — the row is a fixed
 /// `ROW_HEIGHT` with its contents centred, which is what makes the height a number rather
@@ -78,18 +116,16 @@ pub fn view<'a>(
 		// The mark is worked out here, per built row, rather than stored per entry: `working`
 		// is at most six paths and only the rows on screen are ever asked about.
 		.map(|entry| {
-			let mark = if working.contains(&entry.path.as_path()) {
-				Some(ui::spinner(sweep))
-			} else if browser.is_prepared(&entry.path) {
-				Some(PREPARED)
-			} else {
-				None
-			};
+			let mark = mark_of(
+				working.contains(&entry.path.as_path()),
+				browser.is_prepared(&entry.path),
+			);
 			let ready = browser.ready(&entry.path);
 			file_row(
 				entry,
 				browser.is_selected(&entry.path),
 				mark,
+				sweep,
 				// The correction, where there is one, is applied here rather than kept in the
 				// pane's map (PLAN §14d) — so the map stays a report of what the store said.
 				ui::edited_tempo(tempos, &entry.path, ready.map(|ready| ready.tempo)),
@@ -132,11 +168,7 @@ fn header(
 	let selected = browser.selected_media().len();
 
 	let load_into = move |id: DeckId| {
-		let label = match selected {
-			0 | 1 => format!("→ {}", id.label()),
-			count => format!("→ {} ({count})", id.label()),
-		};
-		button(text(label).size(12))
+		button(text(load_label(id, selected)).size(12))
 			.padding([3, 8])
 			.on_press_maybe((selected > 0).then_some(Message::LoadSelected(id)))
 	};
@@ -237,19 +269,24 @@ fn preparation(
 fn file_row<'a>(
 	entry: &'a Entry,
 	selected: bool,
-	mark: Option<&'static str>,
+	mark: Option<Mark>,
+	sweep: f32,
 	tempo: Option<Option<f32>>,
 	music: Option<Option<Duration>>,
 ) -> Element<'a, Message> {
 	// Green for a file that is ready, the same green the waveform draws the music's edges in;
 	// the spinner keeps the row's own colour, since it is saying "wait", not "good".
-	let prepared = mark == Some(PREPARED);
-	let mark = text(mark.unwrap_or(""))
-		.size(12)
-		.width(MARK_WIDTH)
-		.style(move |theme: &Theme| iced::widget::text::Style {
-			color: prepared.then(|| theme.extended_palette().success.base.color),
-		});
+	let prepared = mark == Some(Mark::Prepared);
+	let mark = text(match mark {
+		Some(Mark::Working) => ui::spinner(sweep),
+		Some(Mark::Prepared) => PREPARED,
+		None => "",
+	})
+	.size(12)
+	.width(MARK_WIDTH)
+	.style(move |theme: &Theme| iced::widget::text::Style {
+		color: prepared.then(|| theme.extended_palette().success.base.color),
+	});
 
 	let cells = row![
 		mark,
@@ -313,5 +350,31 @@ pub fn row_style(theme: &Theme, selected: bool) -> container::Style {
 	}
 }
 
-// The one testable thing that was in this file moved to `ui/mod.rs` with `visible_rows`
-// itself, which the queues now share (PLAN §9). Everything left here builds widgets.
+// `visible_rows` moved to `ui/mod.rs`, which the queues now share (PLAN §9). What is left
+// here that is not a widget is the two decisions below.
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_file_being_worked_out_says_so_even_though_it_is_already_ready() {
+		// Arrange / Act / Assert: the ordinary three, in the order the pane fills up.
+		assert_eq!(mark_of(false, false), None, "never scanned");
+		assert_eq!(mark_of(true, false), Some(Mark::Working), "first scan");
+		assert_eq!(mark_of(false, true), Some(Mark::Prepared), "done");
+
+		// And the one that decides the precedence: **Prepare folder** over a folder already
+		// prepared re-reads every file, and a row showing a settled `✓` through all of it is
+		// the row lying about what is happening to it.
+		assert_eq!(mark_of(true, true), Some(Mark::Working), "being re-scanned");
+	}
+
+	#[test]
+	fn a_load_button_counts_the_rows_only_once_there_is_more_than_one() {
+		// Arrange / Act / Assert: no count on the commonest case there is, and no count at all
+		// on a dead button — which reads as the plain promise it will make once it wakes up.
+		assert_eq!(load_label(DeckId::One, 0), "→ Player 1");
+		assert_eq!(load_label(DeckId::One, 1), "→ Player 1");
+		assert_eq!(load_label(DeckId::Two, 5), "→ Player 2 (5)");
+	}
+}

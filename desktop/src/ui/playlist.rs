@@ -360,19 +360,12 @@ fn footer(id: ListId, list: &Playlist) -> Element<'static, Message> {
 		edit(glyph, allowed.then_some(Message::QueueShift(id, right)))
 	};
 
+	let (up, down) = arrows(first, last, count);
+
 	row![
 		send(false),
-		edit(
-			"▲",
-			first
-				.filter(|index| *index > 0)
-				.map(|_| Message::QueueMove(id, true))
-		),
-		edit(
-			"▼",
-			last.filter(|index| index + 1 < count)
-				.map(|_| Message::QueueMove(id, false))
-		),
+		edit("▲", up.then_some(Message::QueueMove(id, true))),
+		edit("▼", down.then_some(Message::QueueMove(id, false))),
 		edit(
 			"✕",
 			list.has_selection().then_some(Message::QueueRemove(id))
@@ -386,6 +379,22 @@ fn footer(id: ListId, list: &Playlist) -> Element<'static, Message> {
 	.spacing(3)
 	.align_y(Center)
 	.into()
+}
+
+/// Whether the `▲` and the `▼` have anywhere to go (PLAN §9a).
+///
+/// The ends of the selection decide it, not its size: a block already touching the top cannot
+/// go up however many rows are in it, and one row in the middle of a hundred can go both ways.
+/// `None` for either end means nothing is selected, which is both arrows dead.
+///
+/// Its own function because both halves are an off-by-one against a boundary — `> 0` at one end
+/// and `+ 1 < count` at the other — and an arrow that is live one row too far moves a block off
+/// the end of the list it is in.
+fn arrows(first: Option<usize>, last: Option<usize>, count: usize) -> (bool, bool) {
+	(
+		first.is_some_and(|index| index > 0),
+		last.is_some_and(|index| index + 1 < count),
+	)
 }
 
 /// How many tracks, and how long they run for.
@@ -408,13 +417,45 @@ fn running_time(list: &Playlist) -> String {
 	)
 }
 
-/// The one thing in this file that is arithmetic rather than widgets. The rows' own
+/// The two things in this file that are arithmetic rather than widgets. The rows' own
 /// virtualization is tested where the helper lives (`ui/mod.rs`).
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use std::path::PathBuf;
 	use std::time::Duration;
+
+	#[test]
+	fn an_arrow_is_dead_at_the_end_it_is_pointing_at() {
+		// Arrange / Act / Assert: nothing selected is both dead — there is nothing to move.
+		assert_eq!(arrows(None, None, 4), (false, false), "no selection");
+
+		// One row in the middle can go either way; the two at the ends can go one way each.
+		assert_eq!(arrows(Some(1), Some(1), 4), (true, true), "the middle");
+		assert_eq!(arrows(Some(0), Some(0), 4), (false, true), "the top row");
+		assert_eq!(arrows(Some(3), Some(3), 4), (true, false), "the last row");
+
+		// A block is decided by its ends, not its size: one already touching the top cannot go
+		// up however many rows are in it (PLAN §9a).
+		assert_eq!(
+			arrows(Some(0), Some(2), 4),
+			(false, true),
+			"a block at the top"
+		);
+		assert_eq!(
+			arrows(Some(1), Some(3), 4),
+			(true, false),
+			"a block at the end"
+		);
+		assert_eq!(
+			arrows(Some(0), Some(3), 4),
+			(false, false),
+			"the whole list"
+		);
+
+		// The single row of a single-row list, which is where an off-by-one would show first.
+		assert_eq!(arrows(Some(0), Some(0), 1), (false, false), "the only row");
+	}
 
 	#[test]
 	fn a_running_time_says_when_it_is_still_counting() {
