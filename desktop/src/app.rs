@@ -211,13 +211,17 @@ pub struct Drag {
 pub struct Facts {
 	pub path: PathBuf,
 	pub duration: Option<Duration>,
-	pub trim: Option<Trim>,
-	/// Beats per minute (PLAN §14d), read or worked out by the same job that found the edges —
-	/// and `None` under the same rule as `trim`: this job could not say, not there is none.
-	pub tempo: Option<f32>,
+	/// What a full scan of the file says — the music's edges and its tempo — or `None` when this
+	/// job could not say (Q45). Not "there is none": a queue measurement only *reads* the store,
+	/// so a track nothing has scanned comes back with nothing here and keeps whatever it had.
+	///
+	/// One field rather than the two it used to be, because the two can only ever be found
+	/// together: they come out of one decode, they are stored under one rule, and a row showing
+	/// a playing time with no tempo beside it was never a state anything could produce.
+	pub ready: Option<Ready>,
 	/// Whether this job left the store holding everything a load would need (PLAN §11c).
 	///
-	/// The same shape as `trim` and for the same reason: `false` means *this job did not work
+	/// The same shape as `ready` and for the same reason: `false` means *this job did not work
 	/// it out*, never "and it is not prepared". A queue measurement only reads, so it says
 	/// `false` and takes no mark away — the listing's own question is what removes one.
 	pub prepared: bool,
@@ -893,7 +897,11 @@ impl Clecta {
 			Message::QueueMenuOpened(id, index) => {
 				if let Some(item) = self.queues[id.index()].items().get(index) {
 					self.menu = Some(RowMenu {
-						tempo: self.tempos.get(&item.path).copied().or(item.tempo),
+						tempo: self
+							.tempos
+							.get(&item.path)
+							.copied()
+							.or_else(|| item.ready.and_then(|ready| ready.tempo)),
 						path: item.path.clone(),
 						name: item.name.clone(),
 					});
@@ -1741,17 +1749,14 @@ impl Clecta {
 	/// is being looked up — and by path, so one answer settles every row holding that file. A
 	/// row that has been removed in the meantime simply matches nothing.
 	fn learned(&mut self, facts: &Facts) {
-		let ready = Ready {
-			tempo: facts.tempo,
-			trim: facts.trim,
-		};
-
-		self.remember(&facts.path, facts.trim);
-		if facts.prepared {
+		self.remember(&facts.path, facts.ready.and_then(|ready| ready.trim));
+		if facts.prepared
+			&& let Some(ready) = facts.ready
+		{
 			self.browser.mark_prepared(&facts.path, ready);
 		}
 		for queue in &mut self.queues {
-			queue.measured(&facts.path, facts.duration, ready.music(), facts.tempo);
+			queue.measured(&facts.path, facts.duration, facts.ready);
 		}
 	}
 
@@ -1987,8 +1992,7 @@ impl Clecta {
 						.map(|path| Facts {
 							path: path.clone(),
 							duration: None,
-							trim: None,
-							tempo: None,
+							ready: None,
 							prepared: false,
 						})
 						.collect()
@@ -2806,8 +2810,10 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 				// the next listing asks the store and takes the mark straight back off — and the
 				// alternative is a second lookup per file to learn what the decode already knew.
 				prepared: scan.is_ok(),
-				tempo: scan.as_ref().ok().and_then(|scan| scan.tempo),
-				trim: scan.ok().and_then(|scan| scan.trim),
+				ready: scan.ok().map(|scan| Ready {
+					trim: scan.trim,
+					tempo: scan.tempo,
+				}),
 				duration: cached_duration(&cache, &path),
 				path,
 			}
@@ -2818,8 +2824,7 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 			Message::ScanFolderStepped(facts.unwrap_or_else(|| Facts {
 				path: asked.clone(),
 				duration: None,
-				trim: None,
-				tempo: None,
+				ready: None,
 				prepared: false,
 			}))
 		},
@@ -2869,12 +2874,9 @@ fn cached_scan(cache: &Cache, path: &Path) -> anyhow::Result<Scan> {
 /// tempo table by table, so a track scanned by a build that knew nothing about tempi showed a
 /// playing time in a queue while its row in the pane showed no `✓` at all.
 fn cached_facts(cache: &Cache, path: &Path) -> Facts {
-	let ready = cache::stamp(path).and_then(|stamp| cache.ready(path, stamp));
-
 	Facts {
 		duration: cached_duration(cache, path),
-		trim: ready.and_then(|ready| ready.trim),
-		tempo: ready.and_then(|ready| ready.tempo),
+		ready: cache::stamp(path).and_then(|stamp| cache.ready(path, stamp)),
 		// This job never *prepares* anything — it reads what is there. Saying so here is what
 		// stops a queue edit taking marks off rows the store is perfectly happy about.
 		prepared: false,

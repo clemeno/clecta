@@ -14,6 +14,7 @@ use iced::widget::{
 use iced::{Center, Element, Fill, Theme};
 
 use crate::app::{DropTarget, Message, Zone};
+use crate::cache::Ready;
 use crate::playlist::{ListId, Playlist, Transition};
 use crate::ui;
 
@@ -260,10 +261,14 @@ fn rows<'a>(
 				text(ui::format_tempo(ui::edited_tempo(
 					tempos,
 					&item.path,
-					item.tempo.map(Some)
+					item.ready.map(|ready| ready.tempo)
 				)))
 				.size(11),
-				text(ui::format_lengths(item.music, item.duration)).size(11),
+				text(ui::format_lengths(
+					item.ready.and_then(Ready::music),
+					item.duration
+				))
+				.size(11),
 			]
 			.spacing(4),
 		)
@@ -472,7 +477,6 @@ mod tests {
 		list.measured(
 			&PathBuf::from("/m/a.mp3"),
 			Some(Duration::from_secs(215)),
-			None,
 			None,
 		);
 		assert_eq!(running_time(&list), "1 · 3:35", "measured");
