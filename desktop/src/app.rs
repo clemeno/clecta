@@ -1557,34 +1557,17 @@ impl Clecta {
 				continue;
 			}
 
-			// Re-borrowed each time round rather than held: the loop now calls `&mut self`
+			// Re-borrowed each time round rather than held: the loop calls `&mut self`
 			// methods, and the engine is only read.
 			let engine = self.engine.as_ref().expect("checked above");
 
 			if engine.finished(id) {
 				// There is no end-of-track callback in rodio; `empty()` going true on the
-				// tick is the signal (PLAN §7).
-				//
-				// `empty()` also means the source has been *consumed*: rodio has dropped it
-				// and there is nothing left in the player to start. The app is about to show
-				// that track stopped at 0:00 with a live Play button, so the file has to go
-				// back in, or that button is a lie — `play()` on an empty player is silence
-				// (PLAN §7).
-				//
-				// `ponytail:` this re-opens the file even when the handover below replaces it
-				// a moment later, which costs one header parse and one `clear()` per track.
-				// Cheap, and it is the one place where the model and rodio can disagree —
-				// worth splitting only if a handover ever feels like it hitches.
-				if let Some(track) = &self.decks[id.index()].track {
-					let path = track.path.clone();
-					if let Err(error) = engine.load(id, &path) {
-						self.notice = format!("{}: {error:#}", id.label());
-					}
+				// tick is the signal (PLAN §7). What that then means for the player is the
+				// deck's business, not this loop's.
+				if let Some(notice) = self.decks[id.index()].ended(id, &self.engine) {
+					self.notice = notice;
 				}
-
-				let deck = &mut self.decks[id.index()];
-				deck.transport = deck::transition(deck.transport, deck::Event::Ended);
-				deck.position = Duration::ZERO;
 				ended.push(id);
 			} else {
 				let position = engine.position(id);
@@ -1593,18 +1576,16 @@ impl Clecta {
 				// The *other* end of a track (PLAN §7b): the music has stopped, and the list
 				// waiting behind this player asked not to sit through the run-out.
 				if self.cuts_early(id, position) {
-					// Stopped rather than re-appended, which is the whole difference from the
-					// branch above: nothing has been consumed here — the file is still in the
-					// player and still playing — so it is rewound and paused, and the handover
-					// replaces it a moment later. Doing nothing would leave the tail audible
-					// under the next track if the load failed.
-					if let Err(error) = engine.stop(id) {
-						self.notice = format!("{}: {error:#}", id.label());
+					// **Stop**, not `Ended`, and that is the whole difference from the branch
+					// above: nothing has been consumed here — the file is still in the player
+					// and still playing — so it is the same rewind the button does, and the
+					// handover replaces the track a moment later. Doing nothing would leave the
+					// tail audible under the next track if the load failed.
+					if let Some(notice) =
+						self.decks[id.index()].moved(id, deck::Event::Stop, &self.engine)
+					{
+						self.notice = notice;
 					}
-
-					let deck = &mut self.decks[id.index()];
-					deck.transport = deck::transition(deck.transport, deck::Event::Ended);
-					deck.position = Duration::ZERO;
 					ended.push(id);
 				}
 			}
@@ -2088,59 +2069,14 @@ impl Clecta {
 	/// which was already true of a click on the strip and is why the rule lives here rather
 	/// than on the buttons that made it obvious.
 	fn seek_to(&mut self, id: DeckId, to: Duration) {
-		if let Some(engine) = self.engine.as_ref()
-			&& let Err(error) = engine.seek(id, to)
-		{
-			// `ponytail:` a stream that cannot seek keeps its old position, the same
-			// failure Stop already has. PLAN §7's fallback — re-open and re-append — would
-			// fix both at once if it is ever worth it.
-			self.notice = format!("{}: {error:#}", id.label());
-			return;
-		}
-
-		// Set here rather than left to the tick, which runs only while something plays: a
-		// paused player would otherwise keep drawing its old playhead until it was started
-		// again, and clicking a strip that visibly does nothing is worse than not clicking.
-		let deck = &mut self.decks[id.index()];
-		deck.position = to;
-		if deck.transport == deck::Transport::Stopped {
-			deck.transport = deck::Transport::Paused;
+		if let Some(notice) = self.decks[id.index()].seek(id, to, &self.engine) {
+			self.notice = notice;
 		}
 	}
 
 	fn transport(&mut self, id: DeckId, event: deck::Event) {
-		let current = self.decks[id.index()].transport;
-		let next = deck::transition(current, event);
-		if next == current && current == deck::Transport::Empty {
-			return;
-		}
-
-		if let Some(engine) = self.engine.as_ref() {
-			let outcome = match event {
-				deck::Event::Play => {
-					engine.play(id);
-					Ok(())
-				}
-				deck::Event::Pause => {
-					engine.pause(id);
-					Ok(())
-				}
-				deck::Event::Stop => engine.stop(id),
-				deck::Event::Loaded | deck::Event::Ended => Ok(()),
-			};
-
-			if let Err(error) = outcome {
-				// `ponytail:` a stream that cannot seek fails to rewind. PLAN §7's
-				// fallback is to re-open and re-append the file; for now the transport
-				// still stops and the notice says the position stayed put.
-				self.notice = format!("{}: {error:#}", id.label());
-			}
-		}
-
-		let deck = &mut self.decks[id.index()];
-		deck.transport = next;
-		if event == deck::Event::Stop {
-			deck.position = Duration::ZERO;
+		if let Some(notice) = self.decks[id.index()].moved(id, event, &self.engine) {
+			self.notice = notice;
 		}
 	}
 

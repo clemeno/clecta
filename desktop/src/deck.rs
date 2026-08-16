@@ -1,10 +1,14 @@
 //! One player's model (PLAN §7): which of the two it is, what is loaded, and where the
 //! transport sits.
 //!
-//! Deliberately free of rodio and iced. The transport is a pure `transition` function,
-//! which is what lets every edge of the state machine be checked with no audio device in
-//! the room (PLAN §12) — and what stops "what should Pause do to a stopped player?" from
-//! being answered differently in three places.
+//! Free of rodio and iced. The transport is a pure `transition` function, which is what
+//! stops "what should Pause do to a stopped player?" from being answered differently in
+//! three places — and the methods that *pair* that decision with the audio take the engine as
+//! an `Option`, so passing `None` leaves the state machine and nothing else. Every edge is
+//! therefore still checkable with no audio device in the room (PLAN §12, Q48).
+//!
+//! It names `audio::Engine`, which names rodio; it does not name rodio. The seam is that the
+//! only module that knows what a `rodio::Player` is remains `audio`.
 //!
 //! The drop policy lives here too, at the bottom: `drop_outcome` decides what a dropped
 //! file does and `idle_target` decides which player gets it, and PLAN §10 wants them
@@ -16,6 +20,8 @@
 
 use std::path::PathBuf;
 use std::time::Duration;
+
+use crate::audio::Engine;
 
 /// Which of the two players.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,7 +71,8 @@ impl Transport {
 
 /// Everything that can move the transport. `Ended` is not a button: it is the polled
 /// `Player::empty()` going true, which is the only end-of-track signal rodio gives
-/// (PLAN §4).
+/// (PLAN §4). Neither is `Seeked` — it is a click on the waveform or one of the two jump
+/// buttons above it (PLAN §14b, §14c).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
 	Loaded,
@@ -73,6 +80,7 @@ pub enum Event {
 	Pause,
 	Stop,
 	Ended,
+	Seeked,
 }
 
 /// The whole state machine, in one place and with no `self`.
@@ -88,9 +96,16 @@ pub fn transition(state: Transport, event: Event) -> Transport {
 		(_, Event::Stop) => Transport::Stopped,
 		(Transport::Playing, Event::Pause) => Transport::Paused,
 		(Transport::Playing, Event::Ended) => Transport::Stopped,
-		// Pausing a stopped player, or a track ending on a player that is not playing:
-		// both are events arriving for a state that has already moved past them.
-		(_, Event::Pause | Event::Ended) => state,
+		// A seek leaves the transport alone (Q14) — except from `Stopped`, which in this app
+		// means *at the top of the track*: it is what Stop rewinds to and what every load
+		// lands on, so a player labelled "stopped" sitting at 1:30 is the label lying about
+		// where Play would start. The edge lived in `app.rs` until Q48 and is here now,
+		// because a transport edge that the state machine has never heard of is a transport
+		// edge nothing can check.
+		(Transport::Stopped, Event::Seeked) => Transport::Paused,
+		// Pausing a stopped player, a track ending on a player that is not playing, a seek on
+		// one that is already going: all events arriving for a state that has moved past them.
+		(_, Event::Pause | Event::Ended | Event::Seeked) => state,
 	}
 }
 
@@ -156,6 +171,111 @@ impl Deck {
 
 	pub fn is_playing(&self) -> bool {
 		self.transport == Transport::Playing
+	}
+
+	/// Move the transport, and make the audio agree (Q48).
+	///
+	/// The pure decision and the effect it implies, paired **here** and nowhere else. They used
+	/// to be re-paired by hand in four places in `update`, which is how the seek grew an edge
+	/// the state machine had never heard of.
+	///
+	/// Returns the line for the status bar when the device refused, and `None` otherwise. A
+	/// returned error does **not** stop the transport moving: a stream that will not rewind is
+	/// still a player the user pressed Stop on, and leaving the button lit would be a second
+	/// wrong answer on top of the device's.
+	///
+	/// `engine` is an `Option` because the app runs without an audio device (PLAN §11) — which
+	/// is also what makes every edge of this checkable with nothing plugged in: pass `None` and
+	/// what is left is the state machine.
+	pub fn moved(&mut self, id: DeckId, event: Event, engine: &Option<Engine>) -> Option<String> {
+		let next = transition(self.transport, event);
+		if next == self.transport && self.transport == Transport::Empty {
+			return None;
+		}
+
+		let outcome = match (engine, event) {
+			(Some(engine), Event::Play) => {
+				engine.play(id);
+				Ok(())
+			}
+			(Some(engine), Event::Pause) => {
+				engine.pause(id);
+				Ok(())
+			}
+			// `ponytail:` a stream that cannot seek fails to rewind. PLAN §7's fallback is to
+			// re-open and re-append the file; for now the transport still stops and the notice
+			// says the position stayed put.
+			(Some(engine), Event::Stop) => engine.stop(id),
+			_ => Ok(()),
+		};
+
+		self.transport = next;
+		// Both ends of a track land at the top of it. `Stop` is the button and `Ended` is the
+		// file running out, and they were zeroing the playhead in three separate places before
+		// this — with `Ended` doing it in two of them and not in the third.
+		if matches!(event, Event::Stop | Event::Ended) {
+			self.position = Duration::ZERO;
+		}
+
+		outcome
+			.err()
+			.map(|error| format!("{}: {error:#}", id.label()))
+	}
+
+	/// Move the playhead, which is what both gestures come down to: the strip works in
+	/// fractions of a width, the two buttons above it work in seconds (PLAN §14b, §14c).
+	///
+	/// The position is set here rather than left to the tick, which runs only while something
+	/// plays: a paused player would otherwise keep drawing its old playhead until it was
+	/// started again, and clicking a strip that visibly does nothing is worse than not clicking.
+	///
+	/// A device that refuses leaves the playhead where it was — the model must not claim a move
+	/// the audio did not make.
+	pub fn seek(&mut self, id: DeckId, to: Duration, engine: &Option<Engine>) -> Option<String> {
+		// Nothing to seek in, and nothing that would show the result. Unreachable from the two
+		// gestures today — the strip needs a length to work a fraction out of and the jump
+		// buttons are dead — but a playhead moving inside an empty player is the kind of thing
+		// only a guard here can promise, since both those reasons live in other files.
+		if !self.transport.has_track() {
+			return None;
+		}
+
+		if let Some(engine) = engine
+			&& let Err(error) = engine.seek(id, to)
+		{
+			// `ponytail:` a stream that cannot seek keeps its old position, the same failure
+			// Stop already has. PLAN §7's fallback — re-open and re-append — fixes both at once.
+			return Some(format!("{}: {error:#}", id.label()));
+		}
+
+		self.position = to;
+		self.transport = transition(self.transport, Event::Seeked);
+		None
+	}
+
+	/// The file ran out (PLAN §7): put it back in the player, and stop at the top of it.
+	///
+	/// `empty()` going true means rodio has *consumed* the source and dropped it, so there is
+	/// nothing left in the player to start. The app is about to show that track stopped at 0:00
+	/// with a live Play button, and that button would be a lie — `play()` on an empty player is
+	/// silence.
+	///
+	/// `ponytail:` this re-opens the file even when a handover replaces it a moment later, which
+	/// costs one header parse and one `clear()` per track. Cheap, and it is the one place where
+	/// the model and rodio can disagree — worth splitting only if a handover ever feels like it
+	/// hitches.
+	pub fn ended(&mut self, id: DeckId, engine: &Option<Engine>) -> Option<String> {
+		let reload = match (engine, &self.track) {
+			(Some(engine), Some(track)) => engine
+				.load(id, &track.path)
+				.err()
+				.map(|error| format!("{}: {error:#}", id.label())),
+			_ => None,
+		};
+
+		// The reload's failure is reported over the move's, because the move cannot fail: what
+		// went wrong is the file, and that is the more useful of the two things to say.
+		reload.or(self.moved(id, Event::Ended, engine))
 	}
 }
 
@@ -236,6 +356,105 @@ mod tests {
 		}
 	}
 
+	/// No audio device in the room, which is what the `Option` is for — and a real state the
+	/// app runs in when an interface is unplugged (PLAN §11).
+	const SILENT: Option<Engine> = None;
+
+	#[test]
+	fn a_seek_leaves_the_transport_alone_unless_it_was_at_the_top() {
+		// Arrange / Act / Assert: Q14's rule — moving the playhead is not a transport gesture,
+		// so a playing player carries on and a paused one stays paused.
+		assert_eq!(
+			transition(Transport::Playing, Event::Seeked),
+			Transport::Playing
+		);
+		assert_eq!(
+			transition(Transport::Paused, Event::Seeked),
+			Transport::Paused
+		);
+
+		// Except from Stopped, which in this app means *at the top of the track*: a player
+		// labelled "stopped" sitting at 1:30 is the label lying about where Play would start.
+		assert_eq!(
+			transition(Transport::Stopped, Event::Seeked),
+			Transport::Paused
+		);
+	}
+
+	#[test]
+	fn moving_the_transport_moves_the_model_with_no_device_at_all() {
+		// Arrange: a playing player and nothing plugged in (Q48).
+		let mut player = deck(Transport::Playing);
+		player.position = Duration::from_secs(90);
+
+		// Act / Assert: Pause is the state and nothing else — the playhead stays where the
+		// listener last heard it, which is what makes Play a resume.
+		assert_eq!(player.moved(DeckId::One, Event::Pause, &SILENT), None);
+		assert_eq!(player.transport, Transport::Paused);
+		assert_eq!(player.position, Duration::from_secs(90), "paused in place");
+
+		// Stop is a rewind, and it says so in the model rather than waiting for the tick —
+		// which does not run while nothing is playing.
+		assert_eq!(player.moved(DeckId::One, Event::Stop, &SILENT), None);
+		assert_eq!(player.transport, Transport::Stopped);
+		assert_eq!(player.position, Duration::ZERO);
+	}
+
+	#[test]
+	fn both_ends_of_a_track_land_at_the_top_of_it() {
+		// Arrange: a playing track about to run out.
+		let mut player = deck(Transport::Playing);
+		player.position = Duration::from_secs(215);
+
+		// Act / Assert: the file running out and the Stop button agree about where the player
+		// ends up. They were zeroing the playhead in three separate places before Q48, and one
+		// of the three did not.
+		assert_eq!(player.ended(DeckId::One, &SILENT), None);
+		assert_eq!(player.transport, Transport::Stopped);
+		assert_eq!(player.position, Duration::ZERO);
+	}
+
+	#[test]
+	fn a_seek_on_a_stopped_player_moves_the_playhead_and_the_label_together() {
+		// Arrange: a stopped player, which means one sitting at the top of its track.
+		let mut player = deck(Transport::Stopped);
+
+		// Act
+		assert_eq!(
+			player.seek(DeckId::One, Duration::from_secs(90), &SILENT),
+			None
+		);
+
+		// Assert: both, or the readout and the label disagree about the same player — the
+		// playhead is set here rather than left to the tick, which does not run for a player
+		// that is not playing.
+		assert_eq!(player.position, Duration::from_secs(90));
+		assert_eq!(player.transport, Transport::Paused);
+	}
+
+	#[test]
+	fn an_empty_player_cannot_be_moved_by_anything() {
+		// Arrange: no track, which is every button drawn dead — but the model must not depend
+		// on the view having remembered that.
+		let mut player = deck(Transport::Empty);
+
+		// Act / Assert
+		for event in [Event::Play, Event::Pause, Event::Stop, Event::Ended] {
+			assert_eq!(player.moved(DeckId::One, event, &SILENT), None);
+			assert_eq!(player.transport, Transport::Empty, "{event:?}");
+		}
+
+		// A seek is the one that could have slipped through, because its own rule is about
+		// `Stopped` and an empty player is not that — and it moves the playhead before it looks
+		// at the transport at all, so an empty player would have shown 0:09 on its readout.
+		assert_eq!(
+			player.seek(DeckId::Two, Duration::from_secs(9), &SILENT),
+			None
+		);
+		assert_eq!(player.transport, Transport::Empty);
+		assert_eq!(player.position, Duration::ZERO, "nowhere to seek to");
+	}
+
 	#[test]
 	fn loading_always_lands_on_stopped() {
 		// Arrange / Act / Assert: from every state, including over a playing track —
@@ -258,7 +477,13 @@ mod tests {
 	fn an_empty_player_ignores_every_transport_event() {
 		// Arrange / Act / Assert: the buttons are drawn disabled, but the state machine
 		// must not depend on the view having remembered to do that.
-		for event in [Event::Play, Event::Pause, Event::Stop, Event::Ended] {
+		for event in [
+			Event::Play,
+			Event::Pause,
+			Event::Stop,
+			Event::Ended,
+			Event::Seeked,
+		] {
 			assert_eq!(
 				transition(Transport::Empty, event),
 				Transport::Empty,
