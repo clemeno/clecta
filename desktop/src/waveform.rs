@@ -1,11 +1,19 @@
-//! The waveform's arithmetic (PLAN §14a, §14c, §14d): folding a file's samples down to a small
-//! array of amplitudes, finding where the music inside the file starts and stops, working out
-//! how fast it beats, and matching the array to the pixel columns drawn from it.
+//! What is in a file (PLAN §14a, §14c, §14d): its samples folded down to a small array of
+//! amplitudes, where the music inside it starts and stops, and how fast it beats.
 //!
-//! Pure — no rodio, no iced, no filesystem. `audio::scan` feeds `Fold`, `Edges` and `Tempo` one
-//! decoded sample at a time and `ui::waveform` reads the result back through `column_peak`,
-//! so the arithmetic both ends depend on sits in one place and can be checked with no audio
-//! device and no window (PLAN §12).
+//! Pure — no rodio, no iced, no filesystem. `audio::scan` opens the file and hands every sample
+//! to a `Scanner`; everything after that is arithmetic, which is why all of it can be checked
+//! with no audio device and no window (PLAN §12).
+//!
+//! The interface is small on purpose: `Scanner` and the `Scan` it produces, `Trim` and the one
+//! question anybody asks it, and `column_peak` for reading a finished array back at whatever
+//! width a strip happens to be. The three accumulators behind `Scanner` are private — they are
+//! how it works, not what it offers, and their tests reach them directly from inside this module
+//! because a seam inside a module is still a seam.
+//!
+//! What is **not** here any more is the strip's own geometry (Q46): `sweep_band` and
+//! `seek_fraction` take a width in pixels and never ask this module anything, so they live with
+//! the widget that draws them.
 
 use std::time::Duration;
 
@@ -24,7 +32,7 @@ const MAX_COLUMNS: usize = 2048;
 /// after the first `MAX_COLUMNS`, and the halvings together cost less than the final pass
 /// over the array: each one touches half as many elements as the one before.
 #[derive(Debug)]
-pub struct Fold {
+struct Fold {
 	columns: Vec<f32>,
 	/// How many samples one finished column stands for. Doubles at every halving.
 	per_column: u32,
@@ -168,7 +176,7 @@ pub struct Scan {
 /// of a second. Trimming to a *column* would clip the first transient or leave a sixth of a
 /// second of leader — audible either way, and this costs one comparison per sample.
 #[derive(Debug, Default)]
-pub struct Edges {
+struct Edges {
 	/// How many samples have been pushed, which is also the index of the next one.
 	seen: u64,
 	/// The first sample above the threshold, and one past the last.
@@ -251,7 +259,7 @@ const QUIET: f32 = 1e-6;
 /// do: halving would coarsen the time resolution the whole answer rests on. Cap the *analysed*
 /// length instead if a two-hour recording ever needs to be scanned.
 #[derive(Debug, Default)]
-pub struct Tempo {
+struct Tempo {
 	bins: Vec<f32>,
 	/// The bin being filled: the sum of the sample magnitudes in it, and how many there are.
 	current: f32,
@@ -323,6 +331,56 @@ impl Tempo {
 		// The store keeps whatever comes out of here and the column prints it, so the one number
 		// that must not leave this function is one that could be drawn as a tempo and is not.
 		(bpm.is_finite() && bpm > 0.0).then_some(bpm as f32)
+	}
+}
+
+/// One decode's worth of accumulation: push every sample in, get a `Scan` out (Q46).
+///
+/// The three accumulators above are identical in shape — `Default`, `push`, `finish` — and were
+/// never independent: they are three answers to the one expensive question, which is "what is in
+/// this file", and the expensive part is the decode they share. Driving them separately meant the
+/// caller had to know there were three of them, that two of the three need the sample rate and
+/// the channel count and one does not, and that all three must be fed *every* sample or their
+/// answers stop meaning anything about the same audio.
+///
+/// So the drive loop lives here, once, instead of in `audio::scan` and again in each of the three
+/// test modules. The three stay separate types behind it, and their tests still reach them one at
+/// a time — a seam inside a module is still a seam; it is just not part of what the module
+/// promises.
+///
+/// Adding a fourth fact is now a struct, a field, a `push` and a `finish` — all of them in this
+/// file, and none of them anywhere else.
+#[derive(Debug, Default)]
+pub struct Scanner {
+	fold: Fold,
+	edges: Edges,
+	tempo: Tempo,
+}
+
+impl Scanner {
+	/// One decoded sample, to all three.
+	///
+	/// Every sample, in order, with nothing skipped: `Fold` counts them to know how wide a
+	/// column is, `Edges` counts them to know where the music starts, and `Tempo` counts them to
+	/// know how long a bin is. A sample given to two of the three would put the third's answer
+	/// out by however many it missed.
+	pub fn push(&mut self, sample: f32) {
+		self.fold.push(sample);
+		self.edges.push(sample);
+		self.tempo.push(sample);
+	}
+
+	/// The three answers, given the format the samples arrived in.
+	///
+	/// The rate and the channel count are asked for here rather than at the start because only
+	/// the two accumulators that report *times* need them — and asking once, at the end, is what
+	/// keeps `push` a function of one argument.
+	pub fn finish(self, rate: u32, channels: u16) -> Scan {
+		Scan {
+			peaks: self.fold.finish(),
+			trim: self.edges.finish(rate, channels),
+			tempo: self.tempo.finish(rate, channels),
+		}
 	}
 }
 
@@ -462,51 +520,6 @@ pub fn column_peak(peaks: &[f32], column: usize, columns: usize) -> f32 {
 		.min(peaks.len());
 
 	peaks[start..end].iter().copied().fold(0.0, f32::max)
-}
-
-/// How much of the strip the scanning band covers, as a fraction of its width.
-const SWEEP_WIDTH: f32 = 0.18;
-
-/// The visible part of the scanning band, as `(start, end)` offsets into a strip `width`
-/// wide, or `None` when the band is entirely off one end.
-///
-/// `phase` runs `0.0..=1.0` and the band travels from *fully off the left* to *fully off
-/// the right*, so it slides in and out rather than appearing and vanishing at the edges.
-/// That is the whole reason this is arithmetic worth its own function: the clamping at both
-/// ends is where an off-by-one would draw a band hanging outside the strip, and the caller
-/// is a `draw`.
-pub fn sweep_band(width: f32, phase: f32) -> Option<(f32, f32)> {
-	if width <= 0.0 {
-		return None;
-	}
-
-	let band = width * SWEEP_WIDTH;
-	let left = phase.clamp(0.0, 1.0) * (width + band) - band;
-
-	let start = left.max(0.0);
-	let end = (left + band).min(width);
-
-	(end > start).then_some((start, end))
-}
-
-/// Where a click `x` pixels into a strip `width` wide lands in the track, as a fraction of
-/// its length. `None` for a strip with no width.
-///
-/// The `None` is not politeness about a degenerate case. The caller multiplies a `Duration`
-/// by this, and `Duration::mul_f32` **panics** on a `NaN` rather than saturating — so a
-/// mis-measured strip would take the app down mid-click.
-///
-/// Guarding the width alone is not enough, which the test below found rather than the
-/// author: `f32::clamp` passes a `NaN` **straight through**, so `clamp(0.0, 1.0)` is not a
-/// range guarantee at all. The range test on the way out is the actual guard; the clamp
-/// only handles a pointer dragged past either edge.
-pub fn seek_fraction(width: f32, x: f32) -> Option<f32> {
-	if width <= 0.0 {
-		return None;
-	}
-
-	let fraction = (x / width).clamp(0.0, 1.0);
-	(0.0..=1.0).contains(&fraction).then_some(fraction)
 }
 
 #[cfg(test)]
@@ -790,66 +803,6 @@ mod tests {
 					"{column} of {columns} gave {value}"
 				);
 			}
-		}
-	}
-
-	#[test]
-	fn the_scanning_band_slides_in_and_out_rather_than_appearing() {
-		// Arrange / Act / Assert: off both ends at the extremes, and fully inside halfway.
-		assert_eq!(sweep_band(100.0, 0.0), None, "still off the left");
-		assert_eq!(sweep_band(100.0, 1.0), None, "already off the right");
-
-		let (start, end) = sweep_band(100.0, 0.5).expect("visible halfway");
-		assert!(
-			start > 0.0 && end < 100.0,
-			"{start}..{end} should be inside"
-		);
-		assert!((end - start - 18.0).abs() < 0.01, "full width halfway");
-	}
-
-	#[test]
-	fn the_scanning_band_never_leaves_the_strip() {
-		// Arrange / Act / Assert: the guard, for the same reason as the columns above —
-		// this is read by a `draw`, including on a strip of no width at all.
-		assert_eq!(sweep_band(0.0, 0.5), None, "a strip with no width");
-
-		for step in 0..=100 {
-			let phase = step as f32 / 100.0;
-			if let Some((start, end)) = sweep_band(240.0, phase) {
-				assert!(
-					start >= 0.0 && end <= 240.0 && start < end,
-					"phase {phase} gave {start}..{end}"
-				);
-			}
-		}
-	}
-
-	#[test]
-	fn a_click_maps_to_the_fraction_of_the_track_under_it() {
-		// Arrange / Act / Assert: both ends exact, because clicking the very start of a
-		// strip has to mean 0 and not "nearly 0".
-		assert_eq!(seek_fraction(400.0, 0.0), Some(0.0));
-		assert_eq!(seek_fraction(400.0, 400.0), Some(1.0));
-		assert_eq!(seek_fraction(400.0, 100.0), Some(0.25));
-	}
-
-	#[test]
-	fn a_click_can_never_produce_a_fraction_that_panics_a_duration() {
-		// Arrange / Act / Assert: `Duration::mul_f32` panics on a `NaN` or a negative, so
-		// this is the guard that keeps a mis-measured strip from taking the app down.
-		assert_eq!(seek_fraction(0.0, 10.0), None, "a strip with no width");
-		assert_eq!(seek_fraction(-5.0, 10.0), None, "a negative width");
-
-		// A pointer past either edge — reachable while a button is held and dragged.
-		assert_eq!(seek_fraction(400.0, -30.0), Some(0.0), "left of the strip");
-		assert_eq!(seek_fraction(400.0, 900.0), Some(1.0), "right of the strip");
-
-		for (width, x) in [(400.0, f32::NAN), (f32::NAN, 10.0), (400.0, f32::INFINITY)] {
-			let fraction = seek_fraction(width, x);
-			assert!(
-				fraction.is_none_or(|f| (0.0..=1.0).contains(&f)),
-				"width {width}, x {x} gave {fraction:?}"
-			);
 		}
 	}
 

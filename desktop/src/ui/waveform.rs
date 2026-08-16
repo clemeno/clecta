@@ -243,7 +243,7 @@ where
 			return;
 		};
 
-		if let Some(fraction) = waveform::seek_fraction(bounds.width, position.x - bounds.x) {
+		if let Some(fraction) = seek_fraction(bounds.width, position.x - bounds.x) {
 			// Only when it is somewhere the gesture has not already been: a seek to where the
 			// playhead was already sent is not a no-op, it is a jump backwards to it.
 			if state.moved_to(fraction) {
@@ -343,9 +343,7 @@ where
 			// A band travelling along that line while the decode runs. It says "working"
 			// rather than "empty", and it is drawn here rather than written in the status
 			// bar because this is the thing being waited for (PLAN §14a).
-			if let Some((start, end)) = self
-				.sweep
-				.and_then(|phase| waveform::sweep_band(bounds.width, phase))
+			if let Some((start, end)) = self.sweep.and_then(|phase| sweep_band(bounds.width, phase))
 			{
 				renderer.fill_quad(
 					renderer::Quad {
@@ -437,6 +435,57 @@ where
 
 /// The gesture's rules, which are the only thing in this file a test can reach: everything
 /// else here is a `fill_quad` (PLAN §14).
+/// The strip's own geometry, which is about pixels rather than about a file (Q46).
+///
+/// These two moved here from `waveform.rs` because that module is about what is *in* a file —
+/// how loud it is, where the music starts, how fast it beats — and neither of these has ever
+/// asked it anything. They take a width and give back a place on it. They kept their tests,
+/// which is the whole reason they were ever written as functions at all.
+/// How much of the strip the scanning band covers, as a fraction of its width.
+const SWEEP_WIDTH: f32 = 0.18;
+
+/// The visible part of the scanning band, as `(start, end)` offsets into a strip `width`
+/// wide, or `None` when the band is entirely off one end.
+///
+/// `phase` runs `0.0..=1.0` and the band travels from *fully off the left* to *fully off
+/// the right*, so it slides in and out rather than appearing and vanishing at the edges.
+/// That is the whole reason this is arithmetic worth its own function: the clamping at both
+/// ends is where an off-by-one would draw a band hanging outside the strip, and the caller
+/// is a `draw`.
+pub fn sweep_band(width: f32, phase: f32) -> Option<(f32, f32)> {
+	if width <= 0.0 {
+		return None;
+	}
+
+	let band = width * SWEEP_WIDTH;
+	let left = phase.clamp(0.0, 1.0) * (width + band) - band;
+
+	let start = left.max(0.0);
+	let end = (left + band).min(width);
+
+	(end > start).then_some((start, end))
+}
+
+/// Where a click `x` pixels into a strip `width` wide lands in the track, as a fraction of
+/// its length. `None` for a strip with no width.
+///
+/// The `None` is not politeness about a degenerate case. The caller multiplies a `Duration`
+/// by this, and `Duration::mul_f32` **panics** on a `NaN` rather than saturating — so a
+/// mis-measured strip would take the app down mid-click.
+///
+/// Guarding the width alone is not enough, which the test below found rather than the
+/// author: `f32::clamp` passes a `NaN` **straight through**, so `clamp(0.0, 1.0)` is not a
+/// range guarantee at all. The range test on the way out is the actual guard; the clamp
+/// only handles a pointer dragged past either edge.
+pub fn seek_fraction(width: f32, x: f32) -> Option<f32> {
+	if width <= 0.0 {
+		return None;
+	}
+
+	let fraction = (x / width).clamp(0.0, 1.0);
+	(0.0..=1.0).contains(&fraction).then_some(fraction)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -559,6 +608,66 @@ mod tests {
 		// Act / Assert: including while armed, since a right-click mid-scrub must not end it.
 		for event in others {
 			assert_eq!(scrub(&event, true, true), Scrub::Ignore, "{event:?}");
+		}
+	}
+
+	#[test]
+	fn the_scanning_band_slides_in_and_out_rather_than_appearing() {
+		// Arrange / Act / Assert: off both ends at the extremes, and fully inside halfway.
+		assert_eq!(sweep_band(100.0, 0.0), None, "still off the left");
+		assert_eq!(sweep_band(100.0, 1.0), None, "already off the right");
+
+		let (start, end) = sweep_band(100.0, 0.5).expect("visible halfway");
+		assert!(
+			start > 0.0 && end < 100.0,
+			"{start}..{end} should be inside"
+		);
+		assert!((end - start - 18.0).abs() < 0.01, "full width halfway");
+	}
+
+	#[test]
+	fn the_scanning_band_never_leaves_the_strip() {
+		// Arrange / Act / Assert: the guard, for the same reason as the columns above —
+		// this is read by a `draw`, including on a strip of no width at all.
+		assert_eq!(sweep_band(0.0, 0.5), None, "a strip with no width");
+
+		for step in 0..=100 {
+			let phase = step as f32 / 100.0;
+			if let Some((start, end)) = sweep_band(240.0, phase) {
+				assert!(
+					start >= 0.0 && end <= 240.0 && start < end,
+					"phase {phase} gave {start}..{end}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn a_click_maps_to_the_fraction_of_the_track_under_it() {
+		// Arrange / Act / Assert: both ends exact, because clicking the very start of a
+		// strip has to mean 0 and not "nearly 0".
+		assert_eq!(seek_fraction(400.0, 0.0), Some(0.0));
+		assert_eq!(seek_fraction(400.0, 400.0), Some(1.0));
+		assert_eq!(seek_fraction(400.0, 100.0), Some(0.25));
+	}
+
+	#[test]
+	fn a_click_can_never_produce_a_fraction_that_panics_a_duration() {
+		// Arrange / Act / Assert: `Duration::mul_f32` panics on a `NaN` or a negative, so
+		// this is the guard that keeps a mis-measured strip from taking the app down.
+		assert_eq!(seek_fraction(0.0, 10.0), None, "a strip with no width");
+		assert_eq!(seek_fraction(-5.0, 10.0), None, "a negative width");
+
+		// A pointer past either edge — reachable while a button is held and dragged.
+		assert_eq!(seek_fraction(400.0, -30.0), Some(0.0), "left of the strip");
+		assert_eq!(seek_fraction(400.0, 900.0), Some(1.0), "right of the strip");
+
+		for (width, x) in [(400.0, f32::NAN), (f32::NAN, 10.0), (400.0, f32::INFINITY)] {
+			let fraction = seek_fraction(width, x);
+			assert!(
+				fraction.is_none_or(|f| (0.0..=1.0).contains(&f)),
+				"width {width}, x {x} gave {fraction:?}"
+			);
 		}
 	}
 }

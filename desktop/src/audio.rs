@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::deck::DeckId;
-use crate::waveform::{Edges, Fold, Scan, Tempo};
+use crate::waveform::{Scan, Scanner};
 
 /// The audio output, alive for as long as the app can make a sound.
 pub struct Engine {
@@ -209,20 +209,12 @@ pub fn scan(path: &Path) -> Result<Scan> {
 	let rate = source.sample_rate().get();
 	let channels = source.channels().get();
 
-	let mut fold = Fold::default();
-	let mut edges = Edges::default();
-	let mut tempo = Tempo::default();
+	let mut scanner = Scanner::default();
 	for sample in source {
-		fold.push(sample);
-		edges.push(sample);
-		tempo.push(sample);
+		scanner.push(sample);
 	}
 
-	Ok(Scan {
-		peaks: fold.finish(),
-		trim: edges.finish(rate, channels),
-		tempo: tempo.finish(rate, channels),
-	})
+	Ok(scanner.finish(rate, channels))
 }
 
 #[cfg(test)]
