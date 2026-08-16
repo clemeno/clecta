@@ -383,6 +383,8 @@ mod tests {
 	use super::*;
 	use std::time::Duration;
 
+	use crate::waveform::Trim;
+
 	fn entry(name: &str) -> Entry {
 		Entry::new(PathBuf::from("/music").join(name), 0, None)
 	}
@@ -611,7 +613,10 @@ mod tests {
 		let mut browser = pane();
 		let scanned = Ready {
 			tempo: Some(128.5),
-			music: Some(Duration::from_secs(215)),
+			trim: Some(Trim {
+				start: Duration::ZERO,
+				end: Duration::from_secs(215),
+			}),
 		};
 		browser.marked_prepared(HashMap::from([
 			(row("1.mp3"), scanned),
@@ -640,7 +645,10 @@ mod tests {
 		// must not mark rows by name in whatever folder they are looking at now.
 		let rescanned = Ready {
 			tempo: Some(174.0),
-			music: Some(Duration::from_secs(180)),
+			trim: Some(Trim {
+				start: Duration::ZERO,
+				end: Duration::from_secs(180),
+			}),
 		};
 		browser.mark_prepared(&row("1.mp3"), rescanned);
 		browser.mark_prepared(&PathBuf::from("/elsewhere/1.mp3"), Ready::default());

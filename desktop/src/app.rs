@@ -25,7 +25,7 @@ use iced::{
 };
 use notify::{RecursiveMode, Watcher};
 
-use crate::audio::{self, Engine, Scan};
+use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
@@ -34,7 +34,7 @@ use crate::playlist::{self, ListId, Playlist, Transition};
 use crate::select::Click;
 use crate::settings::Settings;
 use crate::tree::Tree;
-use crate::waveform::Trim;
+use crate::waveform::{Scan, Trim};
 use crate::{fsio, paths, ui};
 
 /// The playhead poll (PLAN §4). 20 Hz: fast enough that a time readout never looks stuck,
@@ -1390,13 +1390,7 @@ impl Clecta {
 				if result.is_ok() {
 					// Loading a track prepares it, so its row gets the same mark the folder scan
 					// would have given it (PLAN §11c) — one rule, whoever asked for the decode.
-					self.browser.mark_prepared(
-						&path,
-						Ready {
-							tempo,
-							music: trim.map(Trim::music),
-						},
-					);
+					self.browser.mark_prepared(&path, Ready { tempo, trim });
 				}
 
 				// A scan takes a moment, and a player can be given a second track inside it.
@@ -1747,19 +1741,17 @@ impl Clecta {
 	/// is being looked up — and by path, so one answer settles every row holding that file. A
 	/// row that has been removed in the meantime simply matches nothing.
 	fn learned(&mut self, facts: &Facts) {
-		let music = facts.trim.map(Trim::music);
+		let ready = Ready {
+			tempo: facts.tempo,
+			trim: facts.trim,
+		};
+
 		self.remember(&facts.path, facts.trim);
 		if facts.prepared {
-			self.browser.mark_prepared(
-				&facts.path,
-				Ready {
-					tempo: facts.tempo,
-					music,
-				},
-			);
+			self.browser.mark_prepared(&facts.path, ready);
 		}
 		for queue in &mut self.queues {
-			queue.measured(&facts.path, facts.duration, music, facts.tempo);
+			queue.measured(&facts.path, facts.duration, ready.music(), facts.tempo);
 		}
 	}
 
@@ -2843,28 +2835,23 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 /// not stored: the cache holds answers about files, not the fact that one of them would not
 /// open, which is a condition that can change under it.
 ///
-/// Every table has to answer for it to be a hit. That is what lets a new fact arrive without a
-/// format bump: a file scanned by a build that knew nothing about tempi has its waveform and its
-/// edges on disk and no tempo, so it is decoded once more and all three are stored — where
-/// bumping `FORMAT` would have thrown away every waveform in the cache to add a field. The price
-/// is that fact number three costs the library one more pass, once, and the ready column says so
-/// while it is happening (PLAN §11c).
+/// What *counts* as a hit is no longer decided here (Q44). This function used to chain three
+/// lookups and know that all three had to answer, which is a rule the store was also enforcing
+/// on its own for the files pane's marks — two copies with a comment between them saying they
+/// had to be kept in step by hand. Now it asks the store whether the file has been scanned, and
+/// the store knows what that means.
 fn cached_scan(cache: &Cache, path: &Path) -> anyhow::Result<Scan> {
 	let stamp = cache::stamp(path);
 
 	if let Some(stamp) = stamp
-		&& let Some(peaks) = cache.peaks(path, stamp)
-		&& let Some(trim) = cache.trim(path, stamp)
-		&& let Some(tempo) = cache.tempo(path, stamp)
+		&& let Some(scan) = cache.scan(path, stamp)
 	{
-		return Ok(Scan { peaks, trim, tempo });
+		return Ok(scan);
 	}
 
 	let scan = audio::scan(path)?;
 	if let Some(stamp) = stamp {
-		cache.store_peaks(path, stamp, &scan.peaks);
-		cache.store_trim(path, stamp, scan.trim);
-		cache.store_tempo(path, stamp, scan.tempo);
+		cache.store_scan(path, stamp, &scan);
 	}
 	Ok(scan)
 }
@@ -2876,15 +2863,18 @@ fn cached_scan(cache: &Cache, path: &Path) -> anyhow::Result<Scan> {
 /// for a setting the user may not even have switched on. So a queue learns where a track's music
 /// starts and how fast it beats only if something has already scanned it — the folder scan, or the
 /// track's own turn in a player — and shows neither until then.
+///
+/// It asks the same question the files pane's marks ask, through the same function, so the two
+/// panes now agree about one file (Q44). They did not quite before: this read the trim and the
+/// tempo table by table, so a track scanned by a build that knew nothing about tempi showed a
+/// playing time in a queue while its row in the pane showed no `✓` at all.
 fn cached_facts(cache: &Cache, path: &Path) -> Facts {
+	let ready = cache::stamp(path).and_then(|stamp| cache.ready(path, stamp));
+
 	Facts {
 		duration: cached_duration(cache, path),
-		trim: cache::stamp(path)
-			.and_then(|stamp| cache.trim(path, stamp))
-			.flatten(),
-		tempo: cache::stamp(path)
-			.and_then(|stamp| cache.tempo(path, stamp))
-			.flatten(),
+		trim: ready.and_then(|ready| ready.trim),
+		tempo: ready.and_then(|ready| ready.tempo),
 		// This job never *prepares* anything — it reads what is there. Saying so here is what
 		// stops a queue edit taking marks off rows the store is perfectly happy about.
 		prepared: false,

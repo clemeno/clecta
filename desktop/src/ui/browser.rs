@@ -129,7 +129,7 @@ pub fn view<'a>(
 				// The correction, where there is one, is applied here rather than kept in the
 				// pane's map (PLAN §14d) — so the map stays a report of what the store said.
 				ui::edited_tempo(tempos, &entry.path, ready.map(|ready| ready.tempo)),
-				ready.map(|ready| ready.music),
+				ready.map(|ready| ready.music()),
 			)
 		});
 

@@ -215,7 +215,10 @@ clecta/
         ├── paths.rs     clecta-data/ beside the app if writable, else the per-user dir; the .app walk-up (§11)
         ├── playlist.rs  PURE queue arithmetic: three lists, their edits, what each does to the selection, what each hands over (§7a)
         ├── settings.rs  load/save clecta-data/settings.json; a corrupt file reads as defaults (§11)
-        ├── waveform.rs  PURE peak arithmetic: fold a file's samples to a bounded array, fit it to pixels (§14a)
+        ├── waveform.rs  PURE peak arithmetic: fold a file's samples to a bounded array, find the
+        │                music's edges and its tempo, fit the array to pixels; and `Scan`, the
+        │                three answers one decode gives, declared here so `cache` can name them
+        │                without depending on the module that knows rodio exists (§14a, Q44)
         └── ui/
             ├── mod.rs       what more than one pane shares: the formatting helpers, the row
             │                window, and the selected-row fill all three lists are drawn with
@@ -1628,6 +1631,28 @@ That promise has now been kept twice — `trims` (§14c) and `tempos` (§14d) �
 shows what it is worth beyond the migration it saves: a hand-edited tempo will need a store that
 can be emptied on its own without touching a waveform (Q41), and a table is already that.
 
+**But four tables are not four questions** (Q44). Three of them — the waveform, the edges and
+the tempo — are what *one decode* works out, so a caller wanting any of them wants all of them,
+and the rule that a hit means all three was being enforced in two places at once: once in the
+app's `cached_scan`, chaining three lookups, and once here in `prepared`, doing it again for the
+files pane's marks. The comment between them said the two had to be kept in step by hand, and
+adding `tempos` proved it by making both wrong at the same time until both were edited.
+
+So the store now answers `scan` and `store_scan`, and `ready` for the callers that want
+everything except the eight kilobytes. The tables are private, `FULL` names the three in one
+array, and one function reads them in **one transaction** rather than three. Nothing outside
+this file knows how many tables there are, what order they are in, or that the stamp is checked
+per table — which is what "a table, not a migration" was supposed to mean all along: the *store*
+absorbs a new fact, not everything that reads from it.
+
+One write transaction is not only tidier. Three separate writes could leave a waveform on disk
+with no tempo beside it, and `scan` would read that for ever as a miss and re-store it
+identically every time — a file that is scanned on every launch and never says why.
+
+`durations` stays its own pair, and that is the asymmetry worth naming rather than smoothing: a
+length is a **header parse**, not a decode. Folding it into `scan` would mean a queue asking for
+a running time triggering a full decode of every row, which is the thing §7a is built to avoid.
+
 Each value is a format byte, then the stamp, then the payload. The format byte is one byte and
 buys the only migration story a cache needs — bump it, and every old record reads as a miss
 and is overwritten the next time it is wanted. Without it a changed layout reads old bytes as
@@ -1661,10 +1686,16 @@ get back — a real cost whose only symptom is a track that re-scans.
 ### Where it is asked, and where it is not
 
 **Inside the jobs, never on the GUI thread.** A commit is an `fsync`, which is §4's rule
-verbatim: if it blocks, it gets a thread. So `cached_peaks` and `cached_duration` sit on the
+verbatim: if it blocks, it gets a thread. So `cached_scan` and `cached_duration` sit on the
 far side of `off_thread`, replacing the decode they wrap, and the app above them is unchanged —
 a hit and a scan produce the same message. That is what kept this feature from touching the
 transport, the widget or the queues at all.
+
+`cached_facts` — what a queue edit learns about a track without decoding it — now asks the same
+`ready` the files pane's marks are built from, which fixed a disagreement nobody had noticed
+(Q44). It used to read the trims table and the tempos table one at a time, so a track scanned by
+a build that knew nothing about tempi showed a playing time in a queue while its row in the pane
+showed no `✓` at all. Two answers to "has this been scanned?" in two panes about one file.
 
 The pruning pass is the one job in the app that gets a **bare `std::thread::spawn`** rather
 than `off_thread`: nothing waits for the answer and nothing on screen changes, so there is no
@@ -2072,11 +2103,16 @@ otherwise pure; anything needing a device or a real folder is manual.
   truncated, because a waveform missing its last column would draw without complaining.
 
   Then one pass over a **real database in a temporary folder**, because "the bytes are right"
-  and "redb was asked the right question" are different claims: store and read back, a file
-  that was never cached, then rewrite the fixture and watch its entry stop answering, then
-  delete a second fixture and watch `prune` drop exactly its entry and leave the other alone,
-  then store a trim, read it back, and `clear` the lot — every table empty afterwards, and the
-  store still usable, since a cleared cache is a cache and not a corpse (§11b). The trim
+  and "redb was asked the right question" are different claims: store a whole `Scan` and get the
+  same one back, a file that was never cached, then rewrite the fixture and watch its entry stop
+  answering, then delete a second fixture and watch `prune` drop exactly its entries — **three
+  of them, one per table**, which is the assertion that says `store_scan` really wrote all three
+  and not just the first — and `clear` the lot, with the store still usable afterwards, since a
+  cleared cache is a cache and not a corpse (§11b). One case in that pass is written through the
+  private `write` rather than the public interface, on purpose (Q44): a file with a waveform and
+  a tempo and *no edges* is the one state `store_scan` can no longer produce, and it is exactly
+  the state a store written by an older build is in — so the test reaches past the door to build
+  it, and then checks the door refuses it. The trim
   encoding gets its own pure test for the halves that matter: "scanned, and this file is
   silent" told apart from "never scanned", and **half a trim** — eight bytes where sixteen
   belong — thrown away rather than read as a start with no end. The tempo encoding gets the same
@@ -2951,6 +2987,7 @@ change rather than an argument with §11a's first sentence.
 | Q41 | Where a *hand-edited* tempo lives, and how it reaches the screen | **In `settings.json`, cleared on its own, and applied as the row is drawn.** A detected tempo is a cache fact — deleting it costs time. A corrected one is a person's answer about a track and nothing can work it out again, so it cannot live in a file whose first sentence is that losing it costs nothing (§11a): **Clear cache** takes the detected numbers, **Clear BPM edits** takes the corrections, and each asks first. It is applied by one function at draw time rather than written into the pane's map and every queue holding the file, which is four places to keep in step and no way at all to put the detected numbers back when the corrections are dropped. The editor is `/2` and `×2` and nothing else: an octave is the only error visible at a glance, and the two are exactly reversible, so no undo button is needed. It is the app's first panel drawn *over* the window, since `rfd` cannot hold a value that changes while it is open — centred rather than at the pointer, because the only route to a cursor position is a subscription that fires on every mouse move | §14d, §11, §11a |
 | Q42 | Where a decision inside a `view` belongs | **Beside the view, as a named function with a test — not moved to another module, and not left in the closure.** §12's rule was already "pure logic is tested, including the arithmetic inside a module that is not otherwise pure", and five places under `ui/` were quietly exempt from it because a decision written inside a `.map()` has no name to call and no interface to cross. Lifted rather than *relocated*: `mark_of` belongs with the column it marks and `music_span` with the strip it measures, so a rule and the widget it is about stay in one file — `ui/mod.rs` is for what two panes share, which none of these are. Writing the tests changed two of the four: `detected_line` was comparing floats where the question is about two rendered decimals, and `music_span`'s `<= 0.0` guard let a `NaN` through into a `clamp` that passes them on. Both were reachable only from inputs nothing produces today, which is the argument for the rule rather than against it | §12, §11c, §14c, §14d, §9a |
 | Q43 | What to do about a rule the app had written down more than once | **Delete the copies, and put the survivor where the third caller can reach it.** Two of these had grown quietly: the selected-row fill existed twice, byte for byte, in `ui/browser.rs` and `ui/tree.rs` — with the queues importing the browser's, which is a queue asking the files pane what colour a queue row is — and "the last component of a path" existed *three* times, in `fsio`, in `tree` and inline in `Entry::new`. Neither is an abstraction being introduced: both are one implementation being kept and two being removed, which is the only kind of sharing that needs no justification beyond the count. The fill moved to `ui/mod.rs`, which is exactly the module for what more than one pane shares; the name stayed in `fsio`, which is where the names are read off the filesystem to begin with. `Entry::new`'s copy differed by one line — it fell back to an empty string where the other two fall back to the whole path — and the survivor's behaviour won, since a blank row is never the better answer | §5, §9 |
+| Q44 | Whether the store answers per table or per question | **Per question. `scan`, `store_scan`, `ready` — and the four tables go private.** Eight of `Cache`'s twelve methods were a getter and a setter each, every one a one-line forward to the same two private functions, and the real rule — that a hit means every table a decode fills — lived *outside* them: once in the app's `cached_scan` and once in `prepared`, with a comment admitting the two were kept in step by hand. Adding the tempo proved the comment right by breaking both at once. The rule is now one array and one function; the caller asks whether a file has been scanned and is told. Three consequences fell out rather than being aimed at: **one write transaction**, so a half-stored scan is no longer possible (three writes could leave a waveform with no tempo, which reads as a miss for ever and re-stores identically every launch); **one read transaction**, which was the `ponytail:` note on `prepared`; and the queues and the files pane finally agreeing about one file, since `cached_facts` was reading tables one at a time and would show a queue row's playing time for a track the pane refused to tick. `durations` keeps its own pair on purpose — a length is a header parse, and folding it in would make asking for a running time decode the whole file | §11a, §11c, §7a, §14c, §14d |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

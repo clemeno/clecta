@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
-use crate::waveform::Trim;
+use crate::waveform::{Scan, Trim};
 
 /// One table per kind of fact, keyed by the same file. Separate rather than one record with
 /// optional fields because they are worked out at different moments by different jobs — a
@@ -50,6 +50,14 @@ const TEMPOS: TableDefinition<&str, &[u8]> = TableDefinition::new("tempos");
 /// All of them, for the two operations that are about the store rather than about a file:
 /// pruning what the library no longer has, and emptying it on request.
 const TABLES: [TableDefinition<&str, &[u8]>; 4] = [WAVEFORMS, DURATIONS, TRIMS, TEMPOS];
+
+/// The three a full scan is spread across, **in the order a `Scan`'s fields are written**.
+///
+/// This array is the all-or-nothing rule, and having it in one place is the point: the rule used
+/// to be written twice, once in the app's `cached_scan` and once in `prepared` here, with a
+/// comment saying the two had to be kept in step by hand. Adding the tempo table meant editing
+/// both, which is how a comment like that gets found out.
+const FULL: [TableDefinition<&str, &[u8]>; 3] = [WAVEFORMS, TRIMS, TEMPOS];
 
 /// The record layout's version, in the first byte of every value.
 ///
@@ -98,19 +106,37 @@ pub fn stamp_of(size: u64, modified: Option<SystemTime>) -> Stamp {
 	}
 }
 
-/// Everything a prepared row shows beside its mark (PLAN §11c, §14c, §14d).
+/// What one decode of a file worked out, minus the waveform itself (PLAN §11c, §14c, §14d).
+///
+/// A `Scan` with the eight kilobytes taken off, and the reason to have it separately is that
+/// almost nothing wants the eight kilobytes: a files-pane row shows two numbers, a queue row
+/// shows two numbers, and a handover wants one `Duration` out of the trim. Only the player
+/// panel draws the array.
 ///
 /// One value rather than two maps, because it is one answer read from one set of tables in one
 /// pass: a tick with no tempo beside it and a tempo on an unticked row are both states that
 /// cannot happen, and the cheapest way to keep them impossible is to leave them unrepresentable.
 ///
 /// Each field keeps its own `None`, which here means *scanned, and there is none* — silence has
-/// no playing time and a spoken word recording has no tempo. "Nobody has scanned this" is the
+/// no music in it and a spoken word recording has no tempo. "Nobody has scanned this" is the
 /// absence of the whole value.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Ready {
 	pub tempo: Option<f32>,
-	pub music: Option<Duration>,
+	/// The music's two edges, kept rather than the length between them: a handover seeks to
+	/// `start` and a strip marks both, so a stored length would have to be a stored trim as well.
+	pub trim: Option<Trim>,
+}
+
+impl Ready {
+	/// How long the music runs, for the one column both panes show.
+	///
+	/// The only place `Trim::music` is now called. It was written three times across two
+	/// modules before this — once here in `prepared`, twice in the app — which for arithmetic
+	/// this cheap is not a performance problem but is three chances to disagree.
+	pub fn music(self) -> Option<Duration> {
+		self.trim.map(Trim::music)
+	}
 }
 
 /// The store, or nothing at all when there could not be one.
@@ -150,15 +176,77 @@ impl Cache {
 		}
 	}
 
-	/// A track's waveform, if this exact version of the file has already been scanned.
-	pub fn peaks(&self, path: &Path, stamp: Stamp) -> Option<Vec<f32>> {
-		let payload = self.read(WAVEFORMS, path, stamp)?;
-		decode_peaks(&payload)
+	/// Everything one decode of this exact version of the file worked out, or nothing at all.
+	///
+	/// **All three tables or none of them**, which is the rule that makes a hit here mean the
+	/// same thing as a `✓` in the files pane (Q34). A file scanned by a build that knew nothing
+	/// about tempi has a waveform and edges on disk and no tempo, so it is a miss and is decoded
+	/// once more — which is what lets a new kind of fact arrive without bumping `FORMAT` and
+	/// throwing away every waveform in the store to add a field (PLAN §11a).
+	///
+	/// The caller does not know how many tables there are, what order they are in, or that the
+	/// stamp is checked three times. It asks whether the file has been scanned and is told.
+	pub fn scan(&self, path: &Path, stamp: Stamp) -> Option<Scan> {
+		let [peaks, trim, tempo] = self.full(path, stamp)?;
+		Some(Scan {
+			peaks: decode_peaks(&peaks)?,
+			trim: decode_trim(&trim)?,
+			tempo: decode_tempo(&tempo)?,
+		})
 	}
 
-	/// Remember a scan. Silent on failure, which costs the next launch a re-scan.
-	pub fn store_peaks(&self, path: &Path, stamp: Stamp, peaks: &[f32]) {
-		self.write(WAVEFORMS, path, stamp, &encode_peaks(peaks));
+	/// Remember a scan: every table, in one commit.
+	///
+	/// One transaction rather than three, which is one `fsync` rather than three and — the part
+	/// that matters — makes a half-stored scan impossible. Three separate writes could leave a
+	/// waveform on disk with no tempo beside it, which is a state `scan` would read as a miss for
+	/// ever and re-store identically every time.
+	///
+	/// Silent on failure, which costs the next launch a re-scan.
+	pub fn store_scan(&self, path: &Path, stamp: Stamp, scan: &Scan) {
+		let payloads = [
+			encode_peaks(&scan.peaks),
+			encode_trim(scan.trim),
+			encode_tempo(scan.tempo),
+		];
+
+		let (Some(key), Some(db)) = (key(path), self.db.as_ref()) else {
+			return;
+		};
+		let Ok(transaction) = db.begin_write() else {
+			return;
+		};
+
+		{
+			for (definition, payload) in FULL.into_iter().zip(&payloads) {
+				let Ok(mut table) = transaction.open_table(definition) else {
+					return;
+				};
+				if table
+					.insert(key, record(stamp, payload).as_slice())
+					.is_err()
+				{
+					return;
+				}
+			}
+		}
+
+		let _ = transaction.commit();
+	}
+
+	/// What a row shows once the file has been scanned, without reading the waveform back
+	/// (PLAN §11c, §14c, §14d).
+	///
+	/// The same all-or-nothing test `scan` makes — literally the same function — so a row that
+	/// shows a playing time is a row a load will not decode. What it skips is turning eight
+	/// kilobytes of little-endian bytes back into `f32`s that nothing is going to draw, which is
+	/// the whole reason a queue edit reading fifty tracks is cheap.
+	pub fn ready(&self, path: &Path, stamp: Stamp) -> Option<Ready> {
+		let [_, trim, tempo] = self.full(path, stamp)?;
+		Some(Ready {
+			tempo: decode_tempo(&tempo)?,
+			trim: decode_trim(&trim)?,
+		})
 	}
 
 	/// A track's length, if it has already been looked up.
@@ -175,69 +263,21 @@ impl Cache {
 		self.write(DURATIONS, path, stamp, &encode_duration(length));
 	}
 
-	/// Where the music inside a track starts and stops, if it has already been scanned for
-	/// (PLAN §14c).
-	///
-	/// Two layers again, and for the same reason as a duration: *was this scanned* on the
-	/// outside, *did the file have any music in it* on the inside. A file of pure silence is
-	/// worth remembering as such, or every launch would decode it again to be told the same
-	/// thing — and the two answers mean different things to the handover, which trims to a
-	/// known start and leaves an unknown one at 0:00.
-	pub fn trim(&self, path: &Path, stamp: Stamp) -> Option<Option<Trim>> {
-		let payload = self.read(TRIMS, path, stamp)?;
-		decode_trim(&payload)
-	}
-
-	pub fn store_trim(&self, path: &Path, stamp: Stamp, trim: Option<Trim>) {
-		self.write(TRIMS, path, stamp, &encode_trim(trim));
-	}
-
-	/// How fast the track beats, if it has already been scanned for (PLAN §14d).
-	///
-	/// Two layers a third time, and the inner one is doing real work here: plenty of files have
-	/// no tempo — a spoken word recording, an ambient wash, a jingle too short to hold four
-	/// beats — and each of them costs a full decode to find that out. Storing "asked, and there
-	/// is none" is what keeps that decode from happening again on every launch.
-	pub fn tempo(&self, path: &Path, stamp: Stamp) -> Option<Option<f32>> {
-		let payload = self.read(TEMPOS, path, stamp)?;
-		decode_tempo(&payload)
-	}
-
-	pub fn store_tempo(&self, path: &Path, stamp: Stamp, tempo: Option<f32>) {
-		self.write(TEMPOS, path, stamp, &encode_tempo(tempo));
-	}
-
 	/// Which of these files the store already answers for **in full**, and what each of those
 	/// answers is (PLAN §11c, §14c, §14d).
 	///
-	/// Full means every table a load reads: the waveform, the music's edges and the tempo, for
-	/// this exact version of the file. That is deliberately the same test `cached_scan` uses to
-	/// decide it has a hit, so a marked row is a row that will not be decoded again — a file the
-	/// queues merely measured the length of has an entry here and is still a third of a second of
-	/// work, and saying otherwise would make the mark mean nothing.
+	/// One `ready` per file and nothing else: the mark is the key being present, and its value is
+	/// everything the row shows beside the mark. Both come out of the same read, and the test is
+	/// the one `scan` makes, so a marked row is a row that will not be decoded again.
 	///
-	/// A key present is the mark; its value is everything else the row shows. Both were already
-	/// being read to answer the first question, so neither costs a query of its own.
-	///
-	/// `ponytail:` three read transactions and an 8 KB copy per file, because it is `read` reused
-	/// rather than a presence check of its own. One folder's listing is hundreds of files and
-	/// this runs on a thread; give it one transaction and a header-only test if a listing of
-	/// tens of thousands ever takes long enough to see.
+	/// `ponytail:` an 8 KB copy per file, because the waveform's payload is fetched and then not
+	/// decoded. One transaction now rather than three, which was the note that used to be here;
+	/// what is left is a header-only presence test, worth writing the day a listing of tens of
+	/// thousands takes long enough to see.
 	pub fn prepared(&self, files: &[(PathBuf, Stamp)]) -> HashMap<PathBuf, Ready> {
 		files
 			.iter()
-			.filter(|(path, stamp)| self.read(WAVEFORMS, path, *stamp).is_some())
-			.filter_map(|(path, stamp)| {
-				let trim = self.trim(path, *stamp)?;
-				let tempo = self.tempo(path, *stamp)?;
-				Some((
-					path.clone(),
-					Ready {
-						tempo,
-						music: trim.map(Trim::music),
-					},
-				))
-			})
+			.filter_map(|(path, stamp)| Some((path.clone(), self.ready(path, *stamp)?)))
 			.collect()
 	}
 
@@ -300,6 +340,30 @@ impl Cache {
 			return 0;
 		}
 		dropped
+	}
+
+	/// The three payloads a full scan is stored as, in **one** read transaction — or `None`
+	/// unless every one of them answers for this exact version of the file.
+	///
+	/// The all-or-nothing rule lives here, once, and both public readers go through it. Every `?`
+	/// is a miss: a table that was never created, a file with no entry in one of them, a record
+	/// from an older `FORMAT`, or a stamp that has moved since it was written. The caller cannot
+	/// see which, and there is nothing it would do differently if it could.
+	///
+	/// The payloads come back undecoded so the one caller that does not need the waveform does
+	/// not pay to turn it back into floats.
+	fn full(&self, path: &Path, stamp: Stamp) -> Option<[Vec<u8>; 3]> {
+		let key = key(path)?;
+		let transaction = self.db.as_ref()?.begin_read().ok()?;
+
+		let fetch = |definition| -> Option<Vec<u8>> {
+			let table = transaction.open_table(definition).ok()?;
+			let stored = table.get(key).ok()??;
+			// Copied out rather than borrowed: the value guard cannot outlive the table.
+			payload(stored.value(), stamp).map(<[u8]>::to_vec)
+		};
+
+		Some([fetch(FULL[0])?, fetch(FULL[1])?, fetch(FULL[2])?])
 	}
 
 	/// One lookup, with the staleness test on the way out. Every `?` here is a cache miss and
@@ -631,11 +695,20 @@ mod tests {
 		let first = stamp(&track).expect("stat of a file just written");
 
 		let cache = Cache::open(&dir.join("cache.redb"));
+		let scanned = Scan {
+			peaks: vec![0.25, 0.75],
+			trim: Some(Trim {
+				start: Duration::from_millis(500),
+				end: Duration::from_secs(9),
+			}),
+			tempo: Some(128.5),
+		};
 
-		// Act / Assert: a miss before anything is stored, a hit after.
-		assert_eq!(cache.peaks(&track, first), None, "nothing stored yet");
-		cache.store_peaks(&track, first, &[0.25, 0.75]);
-		assert_eq!(cache.peaks(&track, first), Some(vec![0.25, 0.75]));
+		// Act / Assert: a miss before anything is stored, and one answer after — all three
+		// tables written and read as a unit, which is the whole of the interface now.
+		assert_eq!(cache.scan(&track, first), None, "nothing stored yet");
+		cache.store_scan(&track, first, &scanned);
+		assert_eq!(cache.scan(&track, first), Some(scanned.clone()));
 
 		cache.store_duration(&track, first, Some(Duration::from_secs(9)));
 		assert_eq!(
@@ -645,81 +718,83 @@ mod tests {
 
 		// A file that is not there was never cached, and asking is not an error.
 		let missing = dir.join("gone.wav");
-		assert_eq!(cache.peaks(&missing, first), None);
+		assert_eq!(cache.scan(&missing, first), None);
 
 		// Act / Assert: writing the file again moves its stamp, and the old entry stops
 		// answering for it — the staleness rule, end to end rather than in bytes.
 		std::fs::write(&track, b"a different length entirely").expect("rewriting the fixture");
 		let moved = stamp(&track).expect("stat again");
 		assert_ne!(moved, first, "the fixture must actually look different");
-		assert_eq!(cache.peaks(&track, moved), None, "stale");
+		assert_eq!(cache.scan(&track, moved), None, "stale");
 
 		// Act / Assert: pruning drops what the library no longer has. The track is still
-		// there, so its two entries stay and the deleted one's go.
-		cache.store_peaks(&track, moved, &[1.0]);
+		// there, so its entries stay and the deleted one's go — three of them, one per table a
+		// scan is spread across, which is the count that says `store_scan` wrote all three.
+		cache.store_scan(&track, moved, &scanned);
 		let orphan = dir.join("deleted.wav");
 		std::fs::write(&orphan, b"briefly").expect("writing the second fixture");
 		let orphan_stamp = stamp(&orphan).expect("stat of the second fixture");
-		cache.store_peaks(&orphan, orphan_stamp, &[0.5]);
+		cache.store_scan(&orphan, orphan_stamp, &scanned);
 		std::fs::remove_file(&orphan).expect("deleting the second fixture");
 
-		assert_eq!(cache.prune(), 1, "one orphan, one entry");
-		assert_eq!(cache.peaks(&track, moved), Some(vec![1.0]), "still here");
+		assert_eq!(cache.prune(), FULL.len(), "one orphan, one entry per table");
 		assert_eq!(
-			cache.peaks(&orphan, orphan_stamp),
+			cache.scan(&track, moved),
+			Some(scanned.clone()),
+			"still here"
+		);
+		assert_eq!(
+			cache.scan(&orphan, orphan_stamp),
 			None,
 			"gone with its file"
 		);
 
-		// Act / Assert: the trims table answers like the other two, and `clear` empties every
-		// one of them — the whole of what the button next to the folder scan promises.
-		let trim = Trim {
-			start: Duration::from_millis(500),
-			end: Duration::from_secs(9),
-		};
-		cache.store_trim(&track, moved, Some(trim));
-		assert_eq!(cache.trim(&track, moved), Some(Some(trim)));
-		cache.store_tempo(&track, moved, Some(128.5));
-		assert_eq!(cache.tempo(&track, moved), Some(Some(128.5)));
-
-		// Act / Assert: "prepared" is every table or none of them. A file with a waveform and no
-		// edges is still a whole decode away, which is exactly what the mark in the files pane
-		// promises it is not (PLAN §11c). The answer carries the tempo and the playing time with
-		// it, both worked out from what was being read anyway (PLAN §14c, §14d) — 8.5 s of music
-		// in a 9 s file.
+		// Act / Assert: a hit is every table or none of them. A file with a waveform and a tempo
+		// and no edges is still a whole decode away, which is exactly what the mark in the files
+		// pane promises it is not (PLAN §11c). This is the one state the interface above cannot
+		// produce, and it is the state a store written by an older build is *in* — so it is
+		// written here through the private door, which is what an older build effectively is.
 		let half = dir.join("half.wav");
 		std::fs::write(&half, b"only a waveform").expect("writing the third fixture");
 		let half_stamp = stamp(&half).expect("stat of the third fixture");
-		cache.store_peaks(&half, half_stamp, &[0.1]);
-		cache.store_tempo(&half, half_stamp, Some(120.0));
+		cache.write(WAVEFORMS, &half, half_stamp, &encode_peaks(&[0.1]));
+		cache.write(TEMPOS, &half, half_stamp, &encode_tempo(Some(120.0)));
+		assert_eq!(cache.scan(&half, half_stamp), None, "two tables of three");
 
 		// And one scanned and found to hold no music at all, which is an answer rather than a
 		// gap: it is marked, and it has neither a playing time nor a tempo to give.
 		let silent = dir.join("silent.wav");
 		std::fs::write(&silent, b"nothing audible").expect("writing the fourth fixture");
 		let silent_stamp = stamp(&silent).expect("stat of the fourth fixture");
-		cache.store_peaks(&silent, silent_stamp, &[0.0]);
-		cache.store_trim(&silent, silent_stamp, None);
-		cache.store_tempo(&silent, silent_stamp, None);
+		cache.store_scan(
+			&silent,
+			silent_stamp,
+			&Scan {
+				peaks: vec![0.0],
+				trim: None,
+				tempo: None,
+			},
+		);
 
+		// The answer carries the tempo and the edges with it, both read from what `scan` was
+		// reading anyway (PLAN §14c, §14d) — 8.5 s of music in a 9 s file.
 		let asked = [
 			(track.clone(), moved),
 			(half.clone(), half_stamp),
 			(silent.clone(), silent_stamp),
 		];
+		let marked = cache.prepared(&asked);
 		assert_eq!(
-			cache.prepared(&asked),
+			marked,
 			HashMap::from([
-				(
-					track.clone(),
-					Ready {
-						tempo: Some(128.5),
-						music: Some(Duration::from_millis(8_500)),
-					}
-				),
+				(track.clone(), cache.ready(&track, moved).expect("scanned")),
 				(silent.clone(), Ready::default()),
-			])
+			]),
+			"the half-written one is not marked"
 		);
+		assert_eq!(marked[&track].tempo, Some(128.5));
+		assert_eq!(marked[&track].music(), Some(Duration::from_millis(8_500)));
+		assert_eq!(marked[&silent].music(), None, "scanned, and silent");
 
 		// And the listing's own metadata makes the same stamp a `stat` does, which is the whole
 		// reason marking a folder costs no filesystem work.
@@ -728,16 +803,14 @@ mod tests {
 
 		cache.clear();
 		assert!(cache.prepared(&asked).is_empty(), "cleared");
-		assert_eq!(cache.peaks(&track, moved), None, "cleared");
+		assert_eq!(cache.scan(&track, moved), None, "cleared");
 		assert_eq!(cache.duration(&track, moved), None, "cleared");
-		assert_eq!(cache.trim(&track, moved), None, "cleared");
-		assert_eq!(cache.tempo(&track, moved), None, "cleared");
 
 		// And an emptied store is still a store: what goes in after comes back out.
-		cache.store_trim(&track, moved, None);
+		cache.store_scan(&track, moved, &scanned);
 		assert_eq!(
-			cache.trim(&track, moved),
-			Some(None),
+			cache.scan(&track, moved),
+			Some(scanned),
 			"usable after clearing"
 		);
 

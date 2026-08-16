@@ -135,6 +135,31 @@ impl Trim {
 	}
 }
 
+/// What one decode of a whole file works out about it (PLAN §14a, §14c, §14d).
+///
+/// Three answers from one pass, because the pass is the expensive part: the array the waveform
+/// draws, where the music inside the file starts and stops, and how fast it beats. Splitting them
+/// into three functions would mean decoding every track three times for facts that arrive
+/// together.
+///
+/// Declared here rather than in `audio`, which is the module that produces it, so that `cache`
+/// can name it without depending on the one module that knows rodio exists (PLAN §4). Nothing
+/// in it is about playback: it is three numbers about a file, and the three accumulators that
+/// find them are its neighbours.
+///
+/// `Clone` because it travels inside a `Message` (PLAN §5), which iced requires to be one —
+/// eight kilobytes of amplitudes copied once per track loaded. `PartialEq` so a test can say
+/// "what came back out of the store is what went in" in one line rather than three.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scan {
+	pub peaks: Vec<f32>,
+	/// `None` for a file with nothing above the silence threshold in it (PLAN §14c).
+	pub trim: Option<Trim>,
+	/// Beats per minute, and `None` for a file with no tempo to find: silence, speech, or a
+	/// recording too short to hold a few beats (PLAN §14d).
+	pub tempo: Option<f32>,
+}
+
 /// The two edges of the music, found in the same pass that folds the waveform.
 ///
 /// Sample-exact rather than read off the finished peak array, which is the whole reason this
