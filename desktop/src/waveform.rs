@@ -1,5 +1,6 @@
-//! What is in a file (PLAN §14a, §14c, §14d): its samples folded down to a small array of
-//! amplitudes, where the music inside it starts and stops, and how fast it beats.
+//! What is in a file (PLAN §14a, §14c, §14d, §14e): its samples folded down to a small array
+//! of amplitudes, where the music inside it starts and stops, how fast it beats, and what key
+//! it is in.
 //!
 //! Pure — no rodio, no iced, no filesystem. `audio::scan` opens the file and hands every sample
 //! to a `Scanner`; everything after that is arithmetic, which is why all of it can be checked
@@ -166,6 +167,39 @@ pub struct Scan {
 	/// Beats per minute, and `None` for a file with no tempo to find: silence, speech, or a
 	/// recording too short to hold a few beats (PLAN §14d).
 	pub tempo: Option<f32>,
+	/// The musical key, and `None` for a file with no key to find: silence, or a recording
+	/// too short to fill a single analysis frame (PLAN §14e).
+	pub key: Option<Key>,
+}
+
+/// One of the twenty-four keys a track can be in (PLAN §14e).
+///
+/// A pitch class and a mode rather than a name, so the store writes one byte and the label
+/// is worked out where it is printed. Sharps only in the labels — one spelling per pitch
+/// class, because a column that shows G♭ for one file and F♯ for the next reads as two keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Key {
+	/// The tonic as a pitch class, `0..12` with C at 0.
+	pub root: u8,
+	pub minor: bool,
+}
+
+impl Key {
+	/// What the column prints: the tonic's name, with an `m` for the minor keys — `C`,
+	/// `F♯m`. The names DJs and tags use, rather than the Camelot wheel's numbers, because
+	/// a number system is a convention on top of this one and can be added where this is
+	/// printed.
+	pub fn label(self) -> String {
+		const NAMES: [&str; 12] = [
+			"C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
+		];
+		let name = NAMES[usize::from(self.root) % 12];
+		if self.minor {
+			format!("{name}m")
+		} else {
+			name.to_string()
+		}
+	}
 }
 
 /// The two edges of the music, found in the same pass that folds the waveform.
@@ -334,13 +368,175 @@ impl Tempo {
 	}
 }
 
+/// How many interleaved samples one chroma sample stands for (PLAN §14e).
+///
+/// A boxcar mean, which is a crude low-pass and a decimation in one: a 44.1 kHz stereo file
+/// comes down to about 5 500 samples a second, keeping everything below ~2.7 kHz — where the
+/// notes are — while the buffer a five-minute track holds shrinks from fifty megabytes to
+/// three. Averaging the raw samples rather than their magnitudes is the difference from
+/// `Tempo`'s bins: a key lives in the waveform itself, not in its loudness. The mean also
+/// folds the channels into each other, the same rough mono mix the other accumulators make.
+///
+/// `ponytail:` a boxcar aliases what it does not remove — cymbals fold down over the notes as
+/// broadband noise. The correlation below is robust to it; the upgrade is a real low-pass and
+/// a real resampler, the day the detector is wrong in a way a listener notices.
+const CHROMA_DECIM: u32 = 16;
+
+/// One analysis frame, in decimated samples — about three seconds of a stereo file. Long
+/// enough that every semitone asked about is many Goertzel bins from its neighbour, short
+/// enough that a key change mid-track still leaves most frames voting for the two real keys.
+const CHROMA_FRAME: usize = 4096;
+
+/// C3, the bottom of the three octaves the detector listens to. Low enough to catch a
+/// bassline, and the top — B5 — stays under the decimated Nyquist for every real file.
+const C3_HZ: f64 = 130.812_782_650_299_3;
+
+/// The key being worked out, in the same pass as the other three answers (PLAN §14e).
+///
+/// The fourth accumulator, and the one the `Scanner`'s promise was written for: a struct, a
+/// field, a `push` and a `finish`. What it keeps is the *decimated waveform* — unlike `Fold`
+/// and `Tempo` it needs the signal itself, because a key is which frequencies are in it.
+/// Everything expensive happens in `finish`, on a buffer a sixteenth the size of the file.
+#[derive(Debug, Default)]
+struct Chroma {
+	samples: Vec<f32>,
+	/// The decimation window being filled: the sum of the raw samples in it, and how many.
+	current: f32,
+	filled: u32,
+}
+
+impl Chroma {
+	/// Add one decoded sample, the same one the other three accumulators are given.
+	///
+	/// A `NaN` is skipped rather than averaged in, for the usual reason: one bad sample from
+	/// a decoder must not poison a window, a frame, and then every correlation.
+	pub fn push(&mut self, sample: f32) {
+		if sample.is_finite() {
+			self.current += sample;
+		}
+		self.filled += 1;
+
+		if self.filled == CHROMA_DECIM {
+			self.samples.push(self.current / CHROMA_DECIM as f32);
+			self.current = 0.0;
+			self.filled = 0;
+		}
+	}
+
+	/// The key, or `None` when the file has none to give: silence, or a recording shorter
+	/// than one analysis frame.
+	///
+	/// The textbook Krumhansl–Schmuckler detector: total how much of each of the twelve pitch
+	/// classes the file holds, then ask which of the twenty-four key profiles those totals
+	/// fit best. The totals come from a Goertzel bin per note over three octaves per frame —
+	/// thirty-six named frequencies, which is far cheaper than a transform that answers for
+	/// two thousand unnamed ones.
+	pub fn finish(self, rate: u32, channels: u16) -> Option<Key> {
+		let per_second = f64::from(rate) * f64::from(channels) / f64::from(CHROMA_DECIM);
+		if per_second <= 0.0 {
+			return None;
+		}
+
+		// The window, once: a Hann keeps each note from leaking into its neighbours, and a
+		// cosine per sample per frame would be most of the cost of this whole function.
+		let hann: Vec<f32> = (0..CHROMA_FRAME)
+			.map(|index| {
+				let turn = std::f64::consts::TAU * index as f64 / CHROMA_FRAME as f64;
+				(0.5 - 0.5 * turn.cos()) as f32
+			})
+			.collect();
+
+		let mut chroma = [0.0_f64; 12];
+		let mut scratch = vec![0.0_f32; CHROMA_FRAME];
+		for frame in self.samples.chunks_exact(CHROMA_FRAME) {
+			// The frame's own mean off first, so a DC offset does not leak into every bin.
+			let mean = frame.iter().sum::<f32>() / CHROMA_FRAME as f32;
+			for (out, (sample, window)) in scratch.iter_mut().zip(frame.iter().zip(&hann)) {
+				*out = (sample - mean) * window;
+			}
+
+			for semitone in 0..36usize {
+				let frequency = C3_HZ * (semitone as f64 / 12.0).exp2();
+				// Nothing near or past Nyquist: a low-rate stream loses its top octave
+				// rather than reading an alias as a note.
+				if frequency > 0.45 * per_second {
+					break;
+				}
+				// The magnitude rather than the power, so one loud pad does not outvote
+				// every melody note that ever sounded.
+				chroma[semitone % 12] += goertzel(&scratch, frequency / per_second).sqrt();
+			}
+		}
+
+		key_of(&chroma)
+	}
+}
+
+/// The power of one frequency in a frame — one bin of a Fourier transform, evaluated alone.
+///
+/// `f64` state for the same reason `strength` turns its phasor in `f64`: four thousand
+/// multiply-accumulates per call is exactly where `f32` starts to drift.
+fn goertzel(samples: &[f32], normalized: f64) -> f64 {
+	let coeff = 2.0 * (std::f64::consts::TAU * normalized).cos();
+	let (mut behind, mut before) = (0.0_f64, 0.0_f64);
+	for sample in samples {
+		let now = f64::from(*sample) + coeff * behind - before;
+		before = behind;
+		behind = now;
+	}
+	(behind * behind + before * before - coeff * behind * before).max(0.0)
+}
+
+/// Krumhansl's two key profiles: how strongly each scale degree is heard as belonging to a
+/// key, measured on listeners (Krumhansl & Kessler, 1982). Index 0 is the tonic.
+const MAJOR: [f64; 12] = [
+	6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88,
+];
+const MINOR: [f64; 12] = [
+	6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
+];
+
+/// The key whose profile the twelve totals fit best, at any rotation — or `None` for totals
+/// with nothing in them to fit.
+fn key_of(chroma: &[f64; 12]) -> Option<Key> {
+	let mut best: Option<(f64, Key)> = None;
+	for root in 0..12u8 {
+		for (minor, profile) in [(false, &MAJOR), (true, &MINOR)] {
+			let score = pearson(chroma, profile, root)?;
+			if best.is_none_or(|(top, _)| score > top) {
+				best = Some((score, Key { root, minor }));
+			}
+		}
+	}
+	best.map(|(_, key)| key)
+}
+
+/// Pearson correlation between the chroma totals and a profile rotated to put its tonic on
+/// `root`. `None` when the totals have no variance to correlate: digital silence's twelve
+/// identical zeros must have no key, rather than whichever one a tie-break happens to pick.
+fn pearson(chroma: &[f64; 12], profile: &[f64; 12], root: u8) -> Option<f64> {
+	let chroma_mean = chroma.iter().sum::<f64>() / 12.0;
+	let profile_mean = profile.iter().sum::<f64>() / 12.0;
+
+	let (mut covariance, mut chroma_var, mut profile_var) = (0.0, 0.0, 0.0);
+	for degree in 0..12 {
+		let heard = chroma[(usize::from(root) + degree) % 12] - chroma_mean;
+		let expected = profile[degree] - profile_mean;
+		covariance += heard * expected;
+		chroma_var += heard * heard;
+		profile_var += expected * expected;
+	}
+
+	(chroma_var > 0.0).then(|| covariance / (chroma_var * profile_var).sqrt())
+}
+
 /// One decode's worth of accumulation: push every sample in, get a `Scan` out (Q46).
 ///
-/// The three accumulators above are identical in shape — `Default`, `push`, `finish` — and were
-/// never independent: they are three answers to the one expensive question, which is "what is in
+/// The four accumulators above are identical in shape — `Default`, `push`, `finish` — and were
+/// never independent: they are four answers to the one expensive question, which is "what is in
 /// this file", and the expensive part is the decode they share. Driving them separately meant the
-/// caller had to know there were three of them, that two of the three need the sample rate and
-/// the channel count and one does not, and that all three must be fed *every* sample or their
+/// caller had to know how many there were, which of them need the sample rate and the channel
+/// count and which do not, and that all of them must be fed *every* sample or their
 /// answers stop meaning anything about the same audio.
 ///
 /// So the drive loop lives here, once, instead of in `audio::scan` and again in each of the three
@@ -355,31 +551,34 @@ pub struct Scanner {
 	fold: Fold,
 	edges: Edges,
 	tempo: Tempo,
+	chroma: Chroma,
 }
 
 impl Scanner {
-	/// One decoded sample, to all three.
+	/// One decoded sample, to all four.
 	///
 	/// Every sample, in order, with nothing skipped: `Fold` counts them to know how wide a
-	/// column is, `Edges` counts them to know where the music starts, and `Tempo` counts them to
-	/// know how long a bin is. A sample given to two of the three would put the third's answer
-	/// out by however many it missed.
+	/// column is, `Edges` counts them to know where the music starts, and `Tempo` and `Chroma`
+	/// count them to know how long their windows are. A sample given to three of the four
+	/// would put the fourth's answer out by however many it missed.
 	pub fn push(&mut self, sample: f32) {
 		self.fold.push(sample);
 		self.edges.push(sample);
 		self.tempo.push(sample);
+		self.chroma.push(sample);
 	}
 
-	/// The three answers, given the format the samples arrived in.
+	/// The four answers, given the format the samples arrived in.
 	///
 	/// The rate and the channel count are asked for here rather than at the start because only
-	/// the two accumulators that report *times* need them — and asking once, at the end, is what
-	/// keeps `push` a function of one argument.
+	/// the accumulators that report *times and frequencies* need them — and asking once, at the
+	/// end, is what keeps `push` a function of one argument.
 	pub fn finish(self, rate: u32, channels: u16) -> Scan {
 		Scan {
 			peaks: self.fold.finish(),
 			trim: self.edges.finish(rate, channels),
 			tempo: self.tempo.finish(rate, channels),
+			key: self.chroma.finish(rate, channels),
 		}
 	}
 }
@@ -708,6 +907,114 @@ mod tests {
 			tempo.push(*sample);
 		}
 		tempo.finish(rate, channels)
+	}
+
+	/// A pure tone, for building keys out of the notes that spell them.
+	fn tone(frequency: f32, seconds: f32, rate: u32) -> Vec<f32> {
+		let count = (seconds * rate as f32) as usize;
+		(0..count)
+			.map(|n| 0.5 * (std::f32::consts::TAU * frequency * n as f32 / rate as f32).sin())
+			.collect()
+	}
+
+	/// Drive `Chroma` alone, the way `tempo` above drives `Tempo`: a seam inside the module.
+	fn key(samples: &[f32], rate: u32, channels: u16) -> Option<Key> {
+		let mut chroma = Chroma::default();
+		for sample in samples {
+			chroma.push(*sample);
+		}
+		chroma.finish(rate, channels)
+	}
+
+	#[test]
+	fn a_scale_reads_back_as_its_key() {
+		// Arrange: the C major triad first and the tonic held longest — the emphasis the
+		// profile was measured on. 22.05 kHz mono keeps the fixture and the Goertzel passes
+		// small, and twelve seconds is four whole analysis frames: `chunks_exact` drops the
+		// tail, so a fixture must not keep its point after the last full frame.
+		const RATE: u32 = 22_050;
+		let mut samples = Vec::new();
+		for (frequency, seconds) in [
+			(261.63, 2.0), // C4, the tonic
+			(329.63, 1.5), // E4
+			(392.00, 1.5), // G4, the dominant
+			(293.66, 1.0), // D4
+			(349.23, 1.0), // F4
+			(440.00, 1.0), // A4
+			(493.88, 1.0), // B4
+			(523.25, 3.0), // C5, home again
+		] {
+			samples.extend(tone(frequency, seconds, RATE));
+		}
+
+		// Act / Assert
+		assert_eq!(
+			key(&samples, RATE, 1),
+			Some(Key {
+				root: 0,
+				minor: false
+			}),
+			"C major"
+		);
+	}
+
+	#[test]
+	fn a_minor_third_turns_the_same_tonic_minor() {
+		// Arrange: A harmonic minor, weighted the same way — the C natural against A is what
+		// separates this from A major, and the G♯ from C major's own scale.
+		const RATE: u32 = 22_050;
+		let mut samples = Vec::new();
+		for (frequency, seconds) in [
+			(220.00, 2.0), // A3, the tonic
+			(246.94, 1.0), // B3
+			(261.63, 1.5), // C4, the minor third
+			(293.66, 1.0), // D4
+			(329.63, 1.5), // E4, the dominant
+			(349.23, 1.0), // F4
+			(415.30, 1.0), // G♯4, the leading tone
+			(440.00, 2.0), // A4, home again
+		] {
+			samples.extend(tone(frequency, seconds, RATE));
+		}
+
+		// Act / Assert
+		assert_eq!(
+			key(&samples, RATE, 1),
+			Some(Key {
+				root: 9,
+				minor: true
+			}),
+			"A minor"
+		);
+	}
+
+	#[test]
+	fn a_file_with_nothing_to_sound_has_no_key() {
+		// Arrange / Act / Assert: digital silence correlates with nothing, and a recording
+		// shorter than one analysis frame has nothing to total. Both are `None` rather than
+		// whichever key a tie-break would pick.
+		assert_eq!(key(&[0.0; 441_000], 44_100, 1), None, "digital silence");
+		assert_eq!(
+			key(&tone(440.0, 0.5, 22_050), 22_050, 1),
+			None,
+			"shorter than a frame"
+		);
+		assert_eq!(key(&tone(440.0, 10.0, 22_050), 0, 1), None, "no rate");
+	}
+
+	#[test]
+	fn a_key_prints_as_its_tonic_with_an_m_for_minor() {
+		// Arrange / Act / Assert: sharps only — one spelling per pitch class.
+		let a_minor = Key {
+			root: 9,
+			minor: true,
+		};
+		let f_sharp = Key {
+			root: 6,
+			minor: false,
+		};
+		assert_eq!(a_minor.label(), "Am");
+		assert_eq!(f_sharp.label(), "F♯");
 	}
 
 	#[test]

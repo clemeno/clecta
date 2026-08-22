@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
-use crate::waveform::{Scan, Trim};
+use crate::waveform::{Key, Scan, Trim};
 
 /// One table per kind of fact, keyed by the same file. Separate rather than one record with
 /// optional fields because they are worked out at different moments by different jobs — a
@@ -46,18 +46,22 @@ const TRIMS: TableDefinition<&str, &[u8]> = TableDefinition::new("trims");
 /// a corrected tempo will need (PLAN §14d) is a store of its own it can be cleared from without
 /// touching a waveform.
 const TEMPOS: TableDefinition<&str, &[u8]> = TableDefinition::new("tempos");
+/// And a third time for the key (PLAN §14e). The all-or-nothing rule below is also the
+/// migration: a store written before keys existed misses on every file and is re-scanned once,
+/// with every waveform already on disk still readable by the build before this one.
+const KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("keys");
 
 /// All of them, for the two operations that are about the store rather than about a file:
 /// pruning what the library no longer has, and emptying it on request.
-const TABLES: [TableDefinition<&str, &[u8]>; 4] = [WAVEFORMS, DURATIONS, TRIMS, TEMPOS];
+const TABLES: [TableDefinition<&str, &[u8]>; 5] = [WAVEFORMS, DURATIONS, TRIMS, TEMPOS, KEYS];
 
-/// The three a full scan is spread across, **in the order a `Scan`'s fields are written**.
+/// The four a full scan is spread across, **in the order a `Scan`'s fields are written**.
 ///
 /// This array is the all-or-nothing rule, and having it in one place is the point: the rule used
 /// to be written twice, once in the app's `cached_scan` and once in `prepared` here, with a
 /// comment saying the two had to be kept in step by hand. Adding the tempo table meant editing
 /// both, which is how a comment like that gets found out.
-const FULL: [TableDefinition<&str, &[u8]>; 3] = [WAVEFORMS, TRIMS, TEMPOS];
+const FULL: [TableDefinition<&str, &[u8]>; 4] = [WAVEFORMS, TRIMS, TEMPOS, KEYS];
 
 /// The record layout's version, in the first byte of every value.
 ///
@@ -126,6 +130,8 @@ pub struct Ready {
 	/// The music's two edges, kept rather than the length between them: a handover seeks to
 	/// `start` and a strip marks both, so a stored length would have to be a stored trim as well.
 	pub trim: Option<Trim>,
+	/// The musical key (PLAN §14e), on the same per-field `None`: scanned, and it has none.
+	pub key: Option<Key>,
 }
 
 impl Ready {
@@ -187,11 +193,12 @@ impl Cache {
 	/// The caller does not know how many tables there are, what order they are in, or that the
 	/// stamp is checked three times. It asks whether the file has been scanned and is told.
 	pub fn scan(&self, path: &Path, stamp: Stamp) -> Option<Scan> {
-		let [peaks, trim, tempo] = self.full(path, stamp)?;
+		let [peaks, trim, tempo, keysig] = self.full(path, stamp)?;
 		Some(Scan {
 			peaks: decode_peaks(&peaks)?,
 			trim: decode_trim(&trim)?,
 			tempo: decode_tempo(&tempo)?,
+			key: decode_key(&keysig)?,
 		})
 	}
 
@@ -208,6 +215,7 @@ impl Cache {
 			encode_peaks(&scan.peaks),
 			encode_trim(scan.trim),
 			encode_tempo(scan.tempo),
+			encode_key(scan.key),
 		];
 
 		let (Some(key), Some(db)) = (key(path), self.db.as_ref()) else {
@@ -242,10 +250,11 @@ impl Cache {
 	/// kilobytes of little-endian bytes back into `f32`s that nothing is going to draw, which is
 	/// the whole reason a queue edit reading fifty tracks is cheap.
 	pub fn ready(&self, path: &Path, stamp: Stamp) -> Option<Ready> {
-		let [_, trim, tempo] = self.full(path, stamp)?;
+		let [_, trim, tempo, keysig] = self.full(path, stamp)?;
 		Some(Ready {
 			tempo: decode_tempo(&tempo)?,
 			trim: decode_trim(&trim)?,
+			key: decode_key(&keysig)?,
 		})
 	}
 
@@ -352,7 +361,7 @@ impl Cache {
 	///
 	/// The payloads come back undecoded so the one caller that does not need the waveform does
 	/// not pay to turn it back into floats.
-	fn full(&self, path: &Path, stamp: Stamp) -> Option<[Vec<u8>; 3]> {
+	fn full(&self, path: &Path, stamp: Stamp) -> Option<[Vec<u8>; 4]> {
 		let key = key(path)?;
 		let transaction = self.db.as_ref()?.begin_read().ok()?;
 
@@ -363,7 +372,12 @@ impl Cache {
 			payload(stored.value(), stamp).map(<[u8]>::to_vec)
 		};
 
-		Some([fetch(FULL[0])?, fetch(FULL[1])?, fetch(FULL[2])?])
+		Some([
+			fetch(FULL[0])?,
+			fetch(FULL[1])?,
+			fetch(FULL[2])?,
+			fetch(FULL[3])?,
+		])
 	}
 
 	/// One lookup, with the staleness test on the way out. Every `?` here is a cache miss and
@@ -526,6 +540,28 @@ fn decode_tempo(payload: &[u8]) -> Option<Option<f32>> {
 	}
 }
 
+/// A key in one byte — the pitch class, plus twelve for the minor keys — or no bytes at all
+/// for a file scanned and found to have none: the same shape a fourth time (PLAN §14e).
+fn encode_key(key: Option<Key>) -> Vec<u8> {
+	match key {
+		Some(key) => vec![(key.root % 12) + if key.minor { 12 } else { 0 }],
+		None => Vec::new(),
+	}
+}
+
+fn decode_key(payload: &[u8]) -> Option<Option<Key>> {
+	match payload {
+		[] => Some(None),
+		// A byte past the twenty-four keys is a miss, like a tempo that is not a number:
+		// cheaper to re-scan than to teach the column about it.
+		[byte] if *byte < 24 => Some(Some(Key {
+			root: byte % 12,
+			minor: *byte >= 12,
+		})),
+		_ => None,
+	}
+}
+
 fn decode_trim(payload: &[u8]) -> Option<Option<Trim>> {
 	match payload.len() {
 		0 => Some(None),
@@ -667,6 +703,27 @@ mod tests {
 		// A stored number that could not be printed as a tempo is a miss rather than a column
 		// showing it: the record is thrown away and the file is scanned again.
 		assert_eq!(decode_tempo(&f32::NAN.to_le_bytes()), None, "not a number");
+	}
+
+	#[test]
+	fn a_key_and_the_absence_of_one_are_different_answers() {
+		// Arrange / Act / Assert: the same three-way split the tempo has — a key, the scanned
+		// absence of one, and bytes no build of this app wrote (PLAN §14e).
+		let f_sharp_minor = Key {
+			root: 6,
+			minor: true,
+		};
+		assert_eq!(
+			decode_key(&encode_key(Some(f_sharp_minor))),
+			Some(Some(f_sharp_minor))
+		);
+		assert_eq!(
+			decode_key(&encode_key(None)),
+			Some(None),
+			"scanned, and there is no key in it"
+		);
+		assert_eq!(decode_key(&[24]), None, "past the twenty-four keys");
+		assert_eq!(decode_key(&[0, 0]), None, "two bytes");
 		assert_eq!(decode_tempo(&(-4.0_f32).to_le_bytes()), None, "negative");
 		assert_eq!(decode_tempo(&[1, 2, 3]), None, "the wrong shape");
 	}
@@ -702,6 +759,10 @@ mod tests {
 				end: Duration::from_secs(9),
 			}),
 			tempo: Some(128.5),
+			key: Some(Key {
+				root: 9,
+				minor: true,
+			}),
 		};
 
 		// Act / Assert: a miss before anything is stored, and one answer after — all three
@@ -773,6 +834,7 @@ mod tests {
 				peaks: vec![0.0],
 				trim: None,
 				tempo: None,
+				key: None,
 			},
 		);
 

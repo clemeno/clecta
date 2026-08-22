@@ -1008,6 +1008,7 @@ mod tests {
 				end: Duration::from_secs(200),
 			}),
 			tempo: Some(128.5),
+			..Ready::default()
 		};
 		queue.measured(
 			&PathBuf::from("/m/a.mp3"),

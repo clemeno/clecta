@@ -3014,6 +3014,36 @@ change rather than an argument with §11a's first sentence.
 
 ---
 
+## 14e. The key (`waveform.rs`, `cache.rs`, `ui/browser.rs`, `ui/queue.rs`)
+
+The fourth answer from the one decode, and §14a's promise kept literally: a struct, a field, a
+`push` and a `finish`, all in `waveform.rs`. `Chroma` keeps a decimated copy of the waveform — a
+boxcar mean over sixteen interleaved samples, which is a crude low-pass, a 16× decimation and a
+rough mono mix in one — because unlike the other three accumulators a key is in the signal
+itself, not in its loudness. `finish` runs the textbook Krumhansl–Schmuckler detector over it: a
+Hann window and a Goertzel bin per note across three octaves (C3–B5) per roughly-three-second
+frame, the thirty-six magnitudes totalled into twelve pitch classes, and the totals correlated
+against Krumhansl's two listener-measured profiles at every rotation. The best of the
+twenty-four correlations is the key. Digital silence has no variance to correlate and is `None` —
+the same "scanned, and there is none" the tempo gives.
+
+Goertzel rather than an FFT for the same reason the tempo's phasor was hand-turned (§14d):
+thirty-six named frequencies are cheaper than two thousand unnamed ones, and cost no new
+dependency (§12). The boxcar's aliasing is accepted and marked (`ponytail:` in the code) — the
+correlation is robust to broadband noise folding down, and the upgrade is a real low-pass the
+day the detector is wrong in a way a listener notices.
+
+The store gets a fifth table, `keys` — one byte per file — and the all-or-nothing rule (§11a) is
+once again the migration: a store written before keys existed misses on every file and re-scans
+once, with nothing bumped and nothing thrown away.
+
+The column sits just before the tempo in the files pane and the queues, because a set is matched
+by key before it is matched by speed. Sharps only, an `m` for the minors: one spelling per pitch
+class. Not the Camelot wheel's numbers — that is a convention on top of this notation, addable
+where the label is printed if it is ever missed.
+
+---
+
 ## 15. The decision log
 
 Rows are appended, never rewritten: a decision that changes gets a new row pointing back at
@@ -3088,6 +3118,7 @@ decided.
 | Q58 | Where the two-stage collapse lives | **On a type in `select.rs`, generic over what was pressed.** Q50 built the machine as two `Option` fields on the app, and both of its shipped bugs (Q50's stale index, Q53's missing cancel) were a clear-site an arm forgot or ordered wrongly — nine arms each remembered which of the two fields to clear and in what order, and none of it was testable, because the interface was two raw fields. `select::Collapse<T>` makes the ordering rules methods: `arm` and `disarm` abandon an older pending click synchronously (the row arms' own clear, Q53), `pressed_anywhere` touches pending only (the raw listener's side of the same rule), `release` promotes, `cancel` claims both stages, `due` spends. Generic because the panes remember a pressed row differently (§9a); `Pressed` itself stays in `app.rs`. Q53's ordering hazard is now an assertion — the armed stage survives an anywhere-press, the pending stage does not | §9a, Q50, Q53 |
 | Q59 | Who owns what a run has learned about files | **One module, `known.rs`, and one door in.** The answers from three jobs — a track's own scan, a folder scan, a queue measurement — landed in three places (the trims the players and the handover read, the pane's marks, the queues' rows), and the fan-out was a method on the app that only two of the three producers went through; the rule that holds it together, "a job that could not say says nothing" (Q45), was enforced by prose at every producer. `Known` owns the trims and the fan-out — `learned` takes the browser and the queues as arguments, so the app stays the owner of its panes and the module stays pure and testable — and `Facts` moves in with it, because it is the vocabulary of the door. The pane's own map stays on `Browser` deliberately: it is a copy of the store's answer about *one listing*, with a listing's lifetime, not the run's | §14c, §11c, Q45 |
 | Q60 | What Unload does, and what it asks first | **Empty the player, and ask only while the sound is on.** The button sits beside **Load…** and puts the player back to `Empty` — track, playhead, waveform and the scanning flag all go; the fader stays, because it is a mixer setting rather than track state. The pairing is Q48's: `Deck::unloaded` moves the model and the audio together, with no `Option<String>` return because dropping a source is the one thing a device cannot refuse. The scanning flag must go *here*: the `Scanned` guard drops a result for a track no longer loaded, so nothing else would ever stop the animation. The confirmation is the same rfd modal the destructive buttons use, and only for a playing player — unloading a stopped track costs one Load to undo, while cutting audible playback is the mistake a modal exists for. Auto-load cannot refill the emptied player: `advance` runs only when a track *ends* (§7a), and an unloaded player has no track to end | §7, Q48, §7a |
+| Q61 | Which key detector, and where it lives | **Krumhansl–Schmuckler over a Goertzel chroma, as the fourth accumulator in `waveform.rs`.** The scan already decodes every sample (§14a), so the key rides the same pass — §14a's "a struct, a field, a `push` and a `finish`" promise, kept. The profiles are Krumhansl & Kessler's listener measurements, the standard baseline detector; Goertzel over an FFT because thirty-six named notes cost no dependency (§12); a boxcar decimation whose aliasing is accepted and marked, because the correlation is robust to it. A fifth cache table on the all-or-nothing rule (§11a), so an old store re-scans once instead of migrating. The column goes just before the tempo in both panes — a set is matched by key before it is matched by speed — and prints sharps only, `m` for minor, no Camelot numbers | §14e, §11a, §12 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

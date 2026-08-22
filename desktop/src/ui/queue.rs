@@ -259,6 +259,7 @@ fn rows<'a>(
 				// The tempo leads, because a set is ordered by it before it is timed (PLAN §14d),
 				// and the music's own length goes in front of the file's (PLAN §14c) — the number
 				// the queue is actually planned against, then the one everything else agrees with.
+				text(ui::format_key(item.ready.map(|ready| ready.key))).size(11),
 				text(ui::format_tempo(ui::corrected_tempo(
 					tempos,
 					&item.path,

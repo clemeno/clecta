@@ -19,6 +19,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::waveform::Key;
+
 /// How many rows a scrolling list builds per frame, however long it is (PLAN §9).
 ///
 /// A window is clamped to 4096 points tall (`settings.rs`), so no pane can show more than
@@ -237,6 +239,16 @@ pub fn format_lengths(music: Option<Duration>, duration: Option<Option<Duration>
 pub fn format_tempo(tempo: Option<Option<f32>>) -> String {
 	match tempo {
 		Some(Some(tempo)) => format!("{tempo:.2}"),
+		Some(None) => "--".to_string(),
+		None => String::new(),
+	}
+}
+
+/// A detected key (PLAN §14e): the same two layers and three answers the tempo has, and it
+/// sits in the column just before it — a set is matched by key before it is matched by speed.
+pub fn format_key(key: Option<Option<Key>>) -> String {
+	match key {
+		Some(Some(key)) => key.label(),
 		Some(None) => "--".to_string(),
 		None => String::new(),
 	}
@@ -519,6 +531,24 @@ mod tests {
 			format_tempo(Some(Some(174.005))),
 			"174.01",
 			"half a hundredth"
+		);
+	}
+
+	#[test]
+	fn a_key_is_a_name_or_it_is_one_of_the_two_kinds_of_nothing() {
+		// Act / Assert: the tempo's three answers again, one column to its left (PLAN §14e).
+		assert_eq!(format_key(None), "", "nobody has scanned it");
+		assert_eq!(
+			format_key(Some(None)),
+			"--",
+			"scanned, and there is no key in it"
+		);
+		assert_eq!(
+			format_key(Some(Some(Key {
+				root: 9,
+				minor: true
+			}))),
+			"Am"
 		);
 	}
 

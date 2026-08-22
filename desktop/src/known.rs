@@ -101,6 +101,7 @@ mod tests {
 	use crate::deck::DeckId;
 	use crate::queue::Queue;
 	use crate::queues::QueueId;
+	use crate::waveform::Key;
 
 	fn path() -> PathBuf {
 		PathBuf::from("/m/a.mp3")
@@ -128,6 +129,10 @@ mod tests {
 			trim: Some(Trim {
 				start: Duration::from_secs(1),
 				end: Duration::from_secs(9),
+			}),
+			key: Some(Key {
+				root: 0,
+				minor: false,
 			}),
 		};
 

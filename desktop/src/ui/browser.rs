@@ -15,10 +15,12 @@ use crate::app::Message;
 use crate::browser::{Browser, Entry};
 use crate::deck::DeckId;
 use crate::ui;
+use crate::waveform::Key;
 
 /// Fixed column widths, in pixels. The name column takes what is left.
 const MARK_WIDTH: f32 = 14.0;
 const GLYPH_WIDTH: f32 = 18.0;
+const KEY_WIDTH: f32 = 34.0;
 const TEMPO_WIDTH: f32 = 46.0;
 const MUSIC_WIDTH: f32 = 48.0;
 const SIZE_WIDTH: f32 = 80.0;
@@ -126,6 +128,7 @@ pub fn view<'a>(
 				browser.is_selected(&entry.path),
 				mark,
 				sweep,
+				ready.map(|ready| ready.key),
 				// The correction, where there is one, is applied here rather than kept in the
 				// pane's map (PLAN §14d) — so the map stays a report of what the store said.
 				ui::corrected_tempo(tempos, &entry.path, ready.map(|ready| ready.tempo)),
@@ -271,6 +274,7 @@ fn file_row<'a>(
 	selected: bool,
 	mark: Option<Mark>,
 	sweep: f32,
+	key: Option<Option<Key>>,
 	tempo: Option<Option<f32>>,
 	music: Option<Option<Duration>>,
 ) -> Element<'a, Message> {
@@ -292,6 +296,12 @@ fn file_row<'a>(
 		mark,
 		text(entry.kind.glyph()).size(13).width(GLYPH_WIDTH),
 		text(&entry.name).size(13).width(Fill),
+		// The key just before the tempo (PLAN §14e): a set is matched by key before it is
+		// matched by speed, so the eye reads them as one pair.
+		text(ui::format_key(key))
+			.size(12)
+			.width(KEY_WIDTH)
+			.align_x(Right),
 		text(ui::format_tempo(tempo))
 			.size(12)
 			.width(TEMPO_WIDTH)

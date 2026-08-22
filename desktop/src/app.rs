@@ -1489,11 +1489,19 @@ impl Clecta {
 				// the *file*, whatever is loaded in the player by now (PLAN §14c).
 				let trim = result.as_ref().ok().and_then(|scan| scan.trim);
 				let tempo = result.as_ref().ok().and_then(|scan| scan.tempo);
+				let musical = result.as_ref().ok().and_then(|scan| scan.key);
 				self.known.remember(&path, trim);
 				if result.is_ok() {
 					// Loading a track prepares it, so its row gets the same mark the folder scan
 					// would have given it (PLAN §11c) — one rule, whoever asked for the decode.
-					self.browser.mark_prepared(&path, Ready { tempo, trim });
+					self.browser.mark_prepared(
+						&path,
+						Ready {
+							tempo,
+							trim,
+							key: musical,
+						},
+					);
 				}
 
 				// A scan takes a moment, and a player can be given a second track inside it.
@@ -2789,6 +2797,7 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 				ready: scan.ok().map(|scan| Ready {
 					trim: scan.trim,
 					tempo: scan.tempo,
+					key: scan.key,
 				}),
 				duration: cached_duration(&cache, &path),
 				path,

@@ -617,6 +617,7 @@ mod tests {
 				start: Duration::ZERO,
 				end: Duration::from_secs(215),
 			}),
+			..Ready::default()
 		};
 		browser.marked_prepared(HashMap::from([
 			(row("1.mp3"), scanned),
@@ -649,6 +650,7 @@ mod tests {
 				start: Duration::ZERO,
 				end: Duration::from_secs(180),
 			}),
+			..Ready::default()
 		};
 		browser.mark_prepared(&row("1.mp3"), rescanned);
 		browser.mark_prepared(&PathBuf::from("/elsewhere/1.mp3"), Ready::default());
