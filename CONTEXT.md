@@ -69,6 +69,11 @@ The folder tree beside the files pane. It lists folders; it does not list files.
 The row a Shift-click measures its range from. Moves on a plain or command press, stays
 put for a range.
 
+**Collapse**:
+What a plain press on an already-selected row still owes: narrowing the selection to that
+row. Deferred to the release and past it, so a drag or a double click can claim the click
+first.
+
 ## What is known about a file
 
 **File**:

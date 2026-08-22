@@ -1245,7 +1245,8 @@ press, the double click's load, ⌘A, Escape — cancels the pending collapse ra
 a stale click fire under a newer gesture. "A new press" means *any* press: the raw listener
 that already takes every release for the drag takes every press for this (Q53), because a
 widget that emits at its release — a deck button, held across the tick — is a press the row
-arms never see. The timer is the price every file manager pays for
+arms never see. The two stages and their ordering rules live on one type
+(`select::Collapse`, Q58), so the arms only say which gesture happened. The timer is the price every file manager pays for
 the same promise: the visible narrowing lags the click by the double-click interval. It is
 also why Q33's estimate of "one remembered path and a branch" was short by exactly one
 timer — the branch was free, the double click was not.
@@ -1959,7 +1960,11 @@ otherwise pure; anything needing a device or a real folder is manual.
   both ends and does not care which way it was dragged. `defers` gets its own: exactly the
   press that would destroy what a drag is about to carry — plain, on a selected row — and
   nothing else, because both press arms ask it (Q50) and an inline condition written out
-  twice is the pair that drifts.
+  twice is the pair that drifts. The two-stage collapse itself is tested here now too (Q58):
+  press–release–timer firing the click exactly once; a press anywhere abandoning the pending
+  stage and only that stage, whichever side of the row's own message it lands on — Q53's
+  ordering rule as an assertion; a claimed click owing nothing at either stage; and a new
+  press abandoning an older click's deferral by itself, without waiting for the raw listener.
 - **`browser.rs`** — extension → category (audio / video / other), the natural-numeric
   sort, the hidden filter. Then the selection (§9a): a plain click replacing, a command click
   adding *and* taking away, a shift-click that can be adjusted by shift-clicking again, and a
@@ -3072,6 +3077,7 @@ decided.
 | Q55 | Where the settings file's two queue orderings are zipped | **Beside the fields that define them, in both directions.** The file stores the queues' paths per player (`cues` has no slot for the shared queue) and their three switches per drawn queue, and `boot` and `settings()` each converted between the orderings by hand, index by index — a swapped index was silent, and the settings tests never reached the zip. `Settings::queues()` and `record_queues` are now inverses of each other in the file's own module, next to the serde pins, and a round-trip test drives three deliberately different queues through both — the first thing that would catch Cue 2's paths landing under Cue 1's switches | §7a, §11, Q54 |
 | Q56 | Whether the Notice needs a module | **A door, not a module.** The one-line notice (CONTEXT.md) is a field, and a field is a fine home — what was smeared was its *delivery*: four arms each re-wrote "a device's refusal replaces the line, silence means fine", and `accept_drop` was a forwarder with one caller that failed the deletion test. The rule is now one method (`noted`) and the forwarder is inlined into the OS-drop arm. `Deck` keeps returning `Option<String>` on purpose: that return is Q48's pairing speaking, and it is what lets every transport edge be checked with no device in the room | §7, §10, Q48 |
 | Q57 | Where the handover's two decisions live | **Both on `Handover`.** §7b derives the *when* and the *where* from the one whole-vs-trimmed choice (Q51), but the code had them in different homes: `hands_over_early` was a free function taking the setting as its first argument, and the where — seek to the music's first edge, or leave the load at the top — was an inline condition in `advance` that no test reached. Both are methods on the setting now, `hands_over_early` and `starts_at`, each tested; `advance` keeps only what must stay in `app.rs` — the take, the load, the verify — because those are IO, and the seam between decision and execution is the same one `Deck::moved` draws (Q48) | §7b, Q51, Q48 |
+| Q58 | Where the two-stage collapse lives | **On a type in `select.rs`, generic over what was pressed.** Q50 built the machine as two `Option` fields on the app, and both of its shipped bugs (Q50's stale index, Q53's missing cancel) were a clear-site an arm forgot or ordered wrongly — nine arms each remembered which of the two fields to clear and in what order, and none of it was testable, because the interface was two raw fields. `select::Collapse<T>` makes the ordering rules methods: `arm` and `disarm` abandon an older pending click synchronously (the row arms' own clear, Q53), `pressed_anywhere` touches pending only (the raw listener's side of the same rule), `release` promotes, `cancel` claims both stages, `due` spends. Generic because the panes remember a pressed row differently (§9a); `Pressed` itself stays in `app.rs`. Q53's ordering hazard is now an assertion — the armed stage survives an anywhere-press, the pending stage does not | §9a, Q50, Q53 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
