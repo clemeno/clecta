@@ -17,11 +17,12 @@ than inventing a local substitute.
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
-## Git is read-only for agents
+## Git: agents commit, the maintainer pushes
 
-The maintainer runs `git commit` and `git push` themselves. Agents may use read-only git
-(`status`, `log`, `diff`, `show`, `blame`, `branch`, `tag -l`) freely and must not stage, commit,
-push, merge, rebase or reset. `gh issue` writes are fine — they touch the tracker, not the branch.
+Agents may stage and commit on their own; the maintainer reviews every commit and runs `git push`
+themselves. Never push, and never rewrite anything already pushed — unpushed history is the
+agent's to shape, pushed history is fixed. `gh issue` writes are fine — they touch the tracker,
+not the branch.
 
 ## Pull requests as a triage surface
 
