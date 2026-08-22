@@ -93,6 +93,12 @@ impl Engine {
 		Ok(duration)
 	}
 
+	/// Drop whatever one player holds, leaving it silent and empty. The one transport
+	/// change that cannot fail: nothing is decoded and nothing is sought.
+	pub fn clear(&self, id: DeckId) {
+		self.player(id).clear();
+	}
+
 	pub fn play(&self, id: DeckId) {
 		self.player(id).play();
 	}

@@ -79,6 +79,10 @@ pub fn view(
 				button(text("Load…").size(13))
 					.padding([6, 12])
 					.on_press(Message::LoadPressed(id)),
+				// Dead when there is nothing to take out, like every control in this panel.
+				button(text("Unload").size(13))
+					.padding([6, 12])
+					.on_press_maybe(loaded.then_some(Message::UnloadPressed(id))),
 			]
 			.spacing(6)
 			.align_y(Center),

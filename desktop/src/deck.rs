@@ -277,6 +277,27 @@ impl Deck {
 		// went wrong is the file, and that is the more useful of the two things to say.
 		reload.or(self.moved(id, Event::Ended, engine))
 	}
+
+	/// Take the track out of the player: back to `Empty`, as if nothing had ever been
+	/// loaded — except the fader, which is a mixer setting rather than track state, and
+	/// survives the way it survives a load.
+	///
+	/// `scanning` goes too, deliberately: the `Scanned` guard in `update` drops a result
+	/// for a track that is no longer loaded, so a scan still running for the unloaded
+	/// track would otherwise leave the strip animating forever.
+	///
+	/// No return, unlike `moved`: dropping a source is the one thing a device cannot
+	/// refuse.
+	pub fn unloaded(&mut self, id: DeckId, engine: &Option<Engine>) {
+		if let Some(engine) = engine {
+			engine.clear(id);
+		}
+		self.transport = Transport::Empty;
+		self.track = None;
+		self.position = Duration::ZERO;
+		self.peaks = Vec::new();
+		self.scanning = false;
+	}
 }
 
 /// Which player a file lands on when the gesture carries no aim — an OS drop (PLAN §10),
@@ -359,6 +380,33 @@ mod tests {
 	/// No audio device in the room, which is what the `Option` is for — and a real state the
 	/// app runs in when an interface is unplugged (PLAN §11).
 	const SILENT: Option<Engine> = None;
+
+	#[test]
+	fn unloading_empties_everything_but_the_fader() {
+		// Arrange: a playing player mid-track, mid-scan, fader ridden down — and no device
+		// (Q48), so what is checked is the model.
+		let mut player = deck(Transport::Playing);
+		player.position = Duration::from_secs(90);
+		player.peaks = vec![0.5];
+		player.scanning = true;
+		player.fader = 0.3;
+
+		// Act
+		player.unloaded(DeckId::One, &SILENT);
+
+		// Assert: the empty state, except the fader — a mixer setting, not track state.
+		// `scanning` must go with the track: the `Scanned` guard drops a result for a track
+		// no longer loaded, so nothing else would ever stop the animation.
+		assert_eq!(player.transport, Transport::Empty);
+		assert!(player.track.is_none());
+		assert_eq!(player.position, Duration::ZERO);
+		assert!(player.peaks.is_empty());
+		assert!(!player.scanning);
+		assert_eq!(
+			player.fader, 0.3,
+			"the fader is the mixer's, not the track's"
+		);
+	}
 
 	#[test]
 	fn a_seek_leaves_the_transport_alone_unless_it_was_at_the_top() {

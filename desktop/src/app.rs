@@ -300,6 +300,8 @@ pub enum Message {
 	Transport(DeckId, deck::Event),
 	/// The per-player **Load…** button — the third door that always works (PLAN §10).
 	LoadPressed(DeckId),
+	/// The per-player **Unload** button: take the track out and leave the player empty.
+	UnloadPressed(DeckId),
 	/// Load the selected row into a named player.
 	LoadSelected(DeckId),
 	/// Load a file into the player an unaimed gesture lands on.
@@ -830,6 +832,30 @@ impl Clecta {
 				{
 					return self.load(id, file);
 				}
+			}
+
+			Message::UnloadPressed(id) => {
+				// Asked only while the sound is on: unloading a stopped track costs one Load
+				// to undo, but cutting audible playback is the mistake a modal exists for —
+				// the same dialog the two destructive buttons in the corrections pane use.
+				if self.decks[id.index()].is_playing() {
+					let confirmed = rfd::MessageDialog::new()
+						.set_level(rfd::MessageLevel::Warning)
+						.set_title("Unload the playing track")
+						.set_description(format!(
+							"{} is playing {}.\n\nUnload it and cut the sound?",
+							id.label(),
+							self.decks[id.index()].title(),
+						))
+						.set_buttons(rfd::MessageButtons::OkCancel)
+						.show() == rfd::MessageDialogResult::Ok;
+					if !confirmed {
+						return Task::none();
+					}
+				}
+
+				self.decks[id.index()].unloaded(id, &self.engine);
+				self.notice = format!("{}: unloaded", id.label());
 			}
 
 			Message::LoadSelected(id) => return self.load_batch(id, self.browser.selected_media()),
