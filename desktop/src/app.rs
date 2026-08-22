@@ -1386,7 +1386,15 @@ impl Clecta {
 				// hover would decline the drop with a notice, not swallow it.
 				let first = std::mem::take(&mut self.os_hover);
 				let target = deck::idle_target(&self.decks[0], &self.decks[1]);
-				return self.accept_drop(target, path, first);
+				// The policy itself is deck.rs's (`drop_outcome`, PLAN §10); this arm only
+				// carries its answer, which is why it no longer goes through a forwarder.
+				return match deck::drop_outcome(path, first) {
+					DropOutcome::Load(path) => self.load(target, path),
+					DropOutcome::Decline(reason) => {
+						self.notice = reason;
+						Task::none()
+					}
+				};
 			}
 
 			Message::DragOver(target) => self.hover = Some(target),
@@ -1669,9 +1677,8 @@ impl Clecta {
 				// There is no end-of-track callback in rodio; `empty()` going true on the
 				// tick is the signal (PLAN §7). What that then means for the player is the
 				// deck's business, not this loop's.
-				if let Some(notice) = self.decks[id.index()].ended(id, &self.engine) {
-					self.notice = notice;
-				}
+				let notice = self.decks[id.index()].ended(id, &self.engine);
+				self.noted(notice);
 				ended.push(id);
 			} else {
 				let position = engine.position(id);
@@ -1685,11 +1692,8 @@ impl Clecta {
 					// and still playing — so it is the same rewind the button does, and the
 					// handover replaces the track a moment later. Doing nothing would leave the
 					// tail audible under the next track if the load failed.
-					if let Some(notice) =
-						self.decks[id.index()].moved(id, deck::Event::Stop, &self.engine)
-					{
-						self.notice = notice;
-					}
+					let notice = self.decks[id.index()].moved(id, deck::Event::Stop, &self.engine);
+					self.noted(notice);
 					ended.push(id);
 				}
 			}
@@ -2117,6 +2121,17 @@ impl Clecta {
 		self.queues.get_mut(queue).insert_many(index, items);
 	}
 
+	/// The one door a device's refusal comes through (Q56).
+	///
+	/// `None` is the ordinary case and means nothing worth a line happened; a `Some` replaces
+	/// whatever the bar was showing, because the newest failure is the one the user can still
+	/// act on. Four arms each re-wrote this rule before it had a name.
+	fn noted(&mut self, notice: Option<String>) {
+		if let Some(notice) = notice {
+			self.notice = notice;
+		}
+	}
+
 	/// Apply a transport event to both the model and the audio thread, in that order of
 	/// authority: the state machine decides, the engine follows.
 	/// Move a player's playhead to a fraction of its track, and change nothing else.
@@ -2161,15 +2176,13 @@ impl Clecta {
 	/// which was already true of a click on the strip and is why the rule lives here rather
 	/// than on the buttons that made it obvious.
 	fn seek_to(&mut self, id: DeckId, to: Duration) {
-		if let Some(notice) = self.decks[id.index()].seek(id, to, &self.engine) {
-			self.notice = notice;
-		}
+		let notice = self.decks[id.index()].seek(id, to, &self.engine);
+		self.noted(notice);
 	}
 
 	fn transport(&mut self, id: DeckId, event: deck::Event) {
-		if let Some(notice) = self.decks[id.index()].moved(id, event, &self.engine) {
-			self.notice = notice;
-		}
+		let notice = self.decks[id.index()].moved(id, event, &self.engine);
+		self.noted(notice);
 	}
 
 	/// Decode a file into a player, and start the waveform scan behind it. A failure leaves
@@ -2210,18 +2223,6 @@ impl Clecta {
 			// "cannot decode x.mp4" into "cannot decode x.mp4: unsupported codec".
 			Err(error) => {
 				self.notice = format!("{}: {error:#}", id.label());
-				Task::none()
-			}
-		}
-	}
-
-	/// Apply the drop policy, then load or explain. Both gestures come through here, so a
-	/// folder is declined the same way whichever way it arrived (PLAN §10).
-	fn accept_drop(&mut self, id: DeckId, path: PathBuf, first: bool) -> Task<Message> {
-		match deck::drop_outcome(path, first) {
-			DropOutcome::Load(path) => self.load(id, path),
-			DropOutcome::Decline(reason) => {
-				self.notice = reason;
 				Task::none()
 			}
 		}
