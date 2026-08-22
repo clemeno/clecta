@@ -636,12 +636,12 @@ mod tests {
 
 		// A row that is not there selects nothing rather than a phantom index — the guard the
 		// rest of this module assumes.
-		let mut short = list_of_one();
+		let mut short = queue_of_one();
 		short.click(5, Click::Replace);
 		assert!(chosen(&short).is_empty());
 	}
 
-	fn list_of_one() -> Queue {
+	fn queue_of_one() -> Queue {
 		filled(&["a.mp3"])
 	}
 

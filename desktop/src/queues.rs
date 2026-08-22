@@ -273,7 +273,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_player_takes_from_its_own_cue_before_the_shared_list() {
+	fn a_player_takes_from_its_own_cue_before_the_shared_queue() {
 		// Arrange: both queues have something to offer.
 		let both = three(&["a.mp3"], &["b.mp3"], &[]);
 
@@ -294,7 +294,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_list_that_hands_nothing_over_is_skipped_rather_than_blocking() {
+	fn a_queue_that_hands_nothing_over_is_skipped_rather_than_blocking() {
 		// Arrange: a full cue with Auto-load off, and a shared queue with it on (PLAN §7a).
 		let mut queues = three(&["a.mp3"], &["b.mp3"], &[]);
 		queues.get_mut(QueueId::Cue(DeckId::One)).auto_load = false;
@@ -328,7 +328,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_row_on_its_way_out_of_a_list_is_not_its_own_duplicate() {
+	fn a_row_on_its_way_out_of_a_queue_is_not_its_own_duplicate() {
 		// Arrange: the same track in two queues, and the shared queue's copy is being moved.
 		let queues = three(&[], &["a.mp3"], &["a.mp3"]);
 		let moving = [(QueueId::Shared, 0)];

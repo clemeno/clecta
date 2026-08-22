@@ -43,7 +43,7 @@ const TRIMS: TableDefinition<&str, &[u8]> = TableDefinition::new("trims");
 /// The promise above kept a second time, and the case that shows the design was right: the tempo
 /// (PLAN §14d) is worked out by the same pass again, and again it gets a table rather than a
 /// field — so a build that knows about tempi reads every trim already on disk, and the one thing
-/// a hand-edited tempo will need (PLAN §14d) is a store of its own it can be cleared from without
+/// a corrected tempo will need (PLAN §14d) is a store of its own it can be cleared from without
 /// touching a waveform.
 const TEMPOS: TableDefinition<&str, &[u8]> = TableDefinition::new("tempos");
 

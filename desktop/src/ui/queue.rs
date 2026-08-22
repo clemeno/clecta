@@ -60,7 +60,7 @@ pub struct Dragging {
 /// One id per queue, because three panels sharing one would scroll together. Written out as an
 /// array rather than built with `format!` because `Id::new` takes a `&'static str` — and
 /// indexed by `QueueId::index`, which is the same order everything else about the queues uses.
-const SCROLL_IDS: [&str; 3] = ["queue-cue-1", "queue-common", "queue-cue-2"];
+const SCROLL_IDS: [&str; 3] = ["queue-cue-1", "queue-shared", "queue-cue-2"];
 
 pub fn scroll_id(queue: QueueId) -> iced::advanced::widget::Id {
 	iced::advanced::widget::Id::new(SCROLL_IDS[queue.index()])

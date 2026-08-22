@@ -92,6 +92,8 @@ mod tests {
 		);
 		assert!(!Click::Toggle.defers(true), "a toggle acts on the press");
 		assert!(!Click::Range.defers(true), "a range acts on the press");
+		assert!(!Click::Toggle.defers(false));
+		assert!(!Click::Range.defers(false));
 	}
 
 	#[test]

@@ -579,8 +579,10 @@ pub struct Clecta {
 enum Pressed {
 	/// A files-pane row, by path, because a refresh renumbers rows underneath it (PLAN §9).
 	Row(PathBuf),
-	/// A queue row, by queue and index, like every other queue message (PLAN §7a).
-	Queue(QueueId, usize),
+	/// A queue row, by queue and index like every other queue message (PLAN §7a) — plus the
+	/// path that was under the press, so the delayed click can prove the index still names
+	/// the same row when it finally fires.
+	Queue(QueueId, usize, PathBuf),
 }
 
 /// Which row was right-clicked, and everything the menu over it needs to know.
@@ -923,8 +925,11 @@ impl Clecta {
 			Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
 
 			Message::SelectAll => {
-				// "All" must not narrow to one a third of a second later (Q50).
+				// "All" must not narrow to one a third of a second later — and both stages
+				// go: a deferral still held by a pressed button would be promoted by its
+				// release and fire anyway (Q50).
 				self.pending = None;
+				self.collapse = None;
 				self.browser.select_all();
 			}
 
@@ -932,8 +937,10 @@ impl Clecta {
 			// there is nothing over it: "never mind" means the most recent thing, which is the
 			// panel the user is looking at.
 			Message::SelectionCleared => {
-				// Escape is "never mind", and that includes the collapse a click still owes.
+				// Escape is "never mind", and that includes the collapse a click still owes —
+				// at either stage, or a release after the Escape would revive it (Q50).
 				self.pending = None;
+				self.collapse = None;
 				if self.menu.take().is_none() && self.correcting.take().is_none() {
 					self.browser.clear_selection();
 				}
@@ -1068,7 +1075,10 @@ impl Clecta {
 				let kind = self.click_kind();
 				let queue = self.queues.get_mut(id);
 				if kind.defers(queue.is_selected(index)) {
-					self.collapse = Some(Pressed::Queue(id, index));
+					self.collapse = queue
+						.items()
+						.get(index)
+						.map(|item| Pressed::Queue(id, index, item.path.clone()));
 				} else {
 					queue.click(index, kind);
 					self.collapse = None;
@@ -1455,11 +1465,18 @@ impl Clecta {
 				// selection in the meantime has already cancelled it.
 				match self.pending.take() {
 					Some(Pressed::Row(path)) => self.browser.click(&path, Click::Replace),
-					// Guarded, because a queue can shrink between the release and the timer:
-					// a handover takes the top row on its own clock, and clicking an index
-					// past the end would select a row that is not there (PLAN §7a).
-					Some(Pressed::Queue(id, index))
-						if index < self.queues.get(id).items().len() =>
+					// A queue can move under the timer — a handover takes the top row on its
+					// own clock — and an index alone cannot see that: after a shift it stays
+					// in range and names the row *below* the one pressed. So the click fires
+					// only if the index still holds the very track that was under the press,
+					// and is dropped otherwise (Q50).
+					Some(Pressed::Queue(id, index, path))
+						if self
+							.queues
+							.get(id)
+							.items()
+							.get(index)
+							.is_some_and(|item| item.path == path) =>
 					{
 						self.queues.get_mut(id).click(index, Click::Replace);
 					}
