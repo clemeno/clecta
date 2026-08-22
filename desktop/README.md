@@ -195,11 +195,11 @@ cargo build --release --target x86_64-apple-darwin
   the app says what it measured and you overrule it. `--` for a file with no tempo in it at all,
   blank until it is scanned (PLAN §14d).
 - **Correcting a tempo by hand.** Right-click a row — in the files pane or in a queue — for a menu
-  with **Edit BPM…**, and a panel with `/2`, the number, and `×2`. That is the whole editor,
+  with **Correct tempo…**, and a panel with `/2`, the number, and `×2`. That is the whole editor,
   because an octave is the only error a detector makes that you can see at a glance, and the two
   buttons are exactly reversible. Nothing is written until **Apply**; Cancel, Escape and a click
   outside are the same thing. A correction lives in `settings.json`, not the cache, because
-  nothing can work it out again: **Clear cache** takes the detected numbers, **Clear BPM edits**
+  nothing can work it out again: **Clear cache** takes the detected numbers, **Clear tempo corrections**
   takes yours, and each asks first (PLAN §14d).
 
 ## What does not, yet
@@ -425,11 +425,11 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   an older build has lost its `✓` and needs one more Prepare folder run**, which is the price of
   a mark that means one thing (PLAN §14d, §11c).
 - **Correcting one.** *Not checked yet.* The rule is tested and the panel is not: that a
-  right-click opens the menu from both panes and never from a `.txt`, that **Edit BPM…** is dead
+  right-click opens the menu from both panes and never from a `.txt`, that **Correct tempo…** is dead
   on a row nothing has scanned, that `/2` then `×2` puts the number back exactly, that Cancel,
   Escape and a click outside all leave the row as it was, that **Apply** changes the number in the
   files pane *and* in every queue holding that file at once, that it survives a relaunch and a
-  **Clear cache**, and that **Clear BPM edits** asks first and puts every detected number back
+  **Clear cache**, and that **Clear tempo corrections** asks first and puts every detected number back
   (PLAN §14d).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever

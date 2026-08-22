@@ -15,7 +15,7 @@ use iced::{Center, Element, Fill, Theme};
 
 use crate::app::{DropTarget, Message, Zone};
 use crate::cache::Ready;
-use crate::queue::{Queue, Transition};
+use crate::queue::{Handover, Queue};
 use crate::queues::QueueId;
 use crate::ui;
 
@@ -191,7 +191,7 @@ fn header(id: QueueId, addable: bool) -> Element<'static, Message> {
 /// A `pick_list` rather than a third checkbox, for the reason the crossfader's curve is one:
 /// the two positions are not "on" and "off" but two different behaviours, both of which want
 /// naming. It goes dead with the other switch for the same reason **Auto-play** does — a queue
-/// that hands nothing over has no transition to make.
+/// that hands nothing over has no handover to make.
 fn switches(id: QueueId, queue: &Queue) -> Element<'static, Message> {
 	let auto_load = queue.auto_load;
 
@@ -206,8 +206,8 @@ fn switches(id: QueueId, queue: &Queue) -> Element<'static, Message> {
 		]
 		.spacing(10)
 		.align_y(Center),
-		pick_list(Transition::ALL, Some(queue.transition), move |transition| {
-			Message::QueueTransition(id, transition)
+		pick_list(Handover::ALL, Some(queue.handover), move |handover| {
+			Message::QueueHandover(id, handover)
 		})
 		.text_size(11)
 		.padding([1, 5])
@@ -259,7 +259,7 @@ fn rows<'a>(
 				// The tempo leads, because a set is ordered by it before it is timed (PLAN §14d),
 				// and the music's own length goes in front of the file's (PLAN §14c) — the number
 				// the queue is actually planned against, then the one everything else agrees with.
-				text(ui::format_tempo(ui::edited_tempo(
+				text(ui::format_tempo(ui::corrected_tempo(
 					tempos,
 					&item.path,
 					item.ready.map(|ready| ready.tempo)

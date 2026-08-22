@@ -30,7 +30,7 @@ use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
-use crate::queue::{self, Queue, Transition};
+use crate::queue::{self, Handover, Queue};
 use crate::queues::{QueueId, Queues};
 use crate::select::Click;
 use crate::settings::Settings;
@@ -317,14 +317,14 @@ pub enum Message {
 	QueueMenuOpened(QueueId, usize),
 	/// The menu or the editor was dismissed — its own button, a click outside it, or Escape.
 	MenuDismissed,
-	/// **Edit BPM…** on the open menu.
-	TempoEditOpened,
+	/// **Correct tempo…** on the open menu.
+	TempoCorrectionOpened,
 	/// `/2` or `×2`, as the factor itself: the two buttons differ by nothing else.
 	TempoScaled(f32),
-	/// **Apply** — the edited tempo becomes this file's, until it is edited again.
+	/// **Apply** — the corrected tempo becomes this file's, until it is corrected again.
 	TempoApplied,
-	/// **Clear BPM edits**, which asks first.
-	ClearTempoEditsPressed,
+	/// **Clear tempo corrections**, which asks first.
+	ClearCorrectionsPressed,
 	/// ⌘A / Ctrl+A — every row the files pane is showing.
 	SelectAll,
 	/// Escape — nothing selected.
@@ -373,9 +373,9 @@ pub enum Message {
 	QueueAutoLoad(QueueId, bool),
 	/// Its **Auto-play** switch: whether a track handed over that way then starts by itself.
 	QueueAutoPlay(QueueId, bool),
-	/// Its **transition**: whether the track it hands over waits for the file to run out, or
+	/// Its **handover**: whether the track it hands over waits for the file to run out, or
 	/// takes over when the music stops (PLAN §7b).
-	QueueTransition(QueueId, Transition),
+	QueueHandover(QueueId, Handover),
 	/// A disclosure arrow in the tree.
 	FolderToggled(PathBuf),
 	/// The tree's fold button.
@@ -550,7 +550,7 @@ pub struct Clecta {
 	menu: Option<RowMenu>,
 	/// The tempo editor, while it is open. Never both this and `menu`: opening the editor is
 	/// what closes the menu, so the two are one overlay and one Escape.
-	editing: Option<TempoEdit>,
+	correcting: Option<TempoCorrection>,
 }
 
 /// Which row was right-clicked, and everything the menu over it needs to know.
@@ -571,7 +571,7 @@ struct RowMenu {
 /// The value lives here rather than in the map until **Apply**, which is the whole of what
 /// Cancel means — halving a tempo four times and changing your mind leaves nothing behind.
 #[derive(Debug, Clone)]
-struct TempoEdit {
+struct TempoCorrection {
 	path: PathBuf,
 	name: String,
 	value: f32,
@@ -617,7 +617,7 @@ impl Clecta {
 		for (index, queue) in queues.iter_mut().enumerate() {
 			queue.auto_load = settings.auto_load[index];
 			queue.auto_play = settings.auto_play[index];
-			queue.transition = settings.transition[index];
+			queue.handover = settings.handover[index];
 		}
 
 		let mut app = Self {
@@ -651,7 +651,7 @@ impl Clecta {
 			sweep: 0,
 			tempos: settings.tempos,
 			menu: None,
-			editing: None,
+			correcting: None,
 		};
 		app.apply_gains();
 
@@ -698,7 +698,7 @@ impl Clecta {
 			// above, which is per player.
 			auto_load: QueueId::ALL.map(|id| self.queues.get(id).auto_load),
 			auto_play: QueueId::ALL.map(|id| self.queues.get(id).auto_play),
-			transition: QueueId::ALL.map(|id| self.queues.get(id).transition),
+			handover: QueueId::ALL.map(|id| self.queues.get(id).handover),
 			tempos: self.tempos.clone(),
 		}
 	}
@@ -872,7 +872,7 @@ impl Clecta {
 			// there is nothing over it: "never mind" means the most recent thing, which is the
 			// panel the user is looking at.
 			Message::SelectionCleared => {
-				if self.menu.take().is_none() && self.editing.take().is_none() {
+				if self.menu.take().is_none() && self.correcting.take().is_none() {
 					self.browser.clear_selection();
 				}
 			}
@@ -905,16 +905,16 @@ impl Clecta {
 
 			Message::MenuDismissed => {
 				self.menu = None;
-				self.editing = None;
+				self.correcting = None;
 			}
 
 			// The menu closes as the editor opens: they are one panel in two states, and two
 			// panels over each other would be two ways to dismiss one thing.
-			Message::TempoEditOpened => {
+			Message::TempoCorrectionOpened => {
 				if let Some(menu) = self.menu.take()
 					&& let Some(value) = menu.tempo
 				{
-					self.editing = Some(TempoEdit {
+					self.correcting = Some(TempoCorrection {
 						detected: self.browser.ready(&menu.path).and_then(|ready| ready.tempo),
 						path: menu.path,
 						name: menu.name,
@@ -926,33 +926,33 @@ impl Clecta {
 			// Held in the editor and nowhere else until **Apply**, which is what makes Cancel
 			// free: nothing has been written, so there is nothing to put back.
 			Message::TempoScaled(factor) => {
-				if let Some(edit) = self.editing.as_mut() {
-					let scaled = edit.value * factor;
+				if let Some(correction) = self.correcting.as_mut() {
+					let scaled = correction.value * factor;
 					// The guard is for the map and the column downstream, not for this button: a
 					// tempo halved out of every sensible range is the user's business, but one
 					// that stopped being a number would be drawn.
 					if scaled.is_finite() && scaled > 0.0 {
-						edit.value = scaled;
+						correction.value = scaled;
 					}
 				}
 			}
 
 			Message::TempoApplied => {
-				if let Some(edit) = self.editing.take() {
-					self.tempos.insert(edit.path, edit.value);
+				if let Some(correction) = self.correcting.take() {
+					self.tempos.insert(correction.path, correction.value);
 					// A correction is a setting, so it is saved the way every other setting is —
 					// on the throttle, not immediately (PLAN §11).
 					self.dirty = true;
 				}
 			}
 
-			Message::ClearTempoEditsPressed => {
+			Message::ClearCorrectionsPressed => {
 				// The same warning **Clear cache** shows, and deliberately a different sentence:
 				// that one costs time, this one costs answers nothing can work out again
 				// (PLAN §14d).
 				let confirmed = rfd::MessageDialog::new()
 					.set_level(rfd::MessageLevel::Warning)
-					.set_title("Clear the BPM edits")
+					.set_title("Clear the tempo corrections")
 					.set_description(
 						"Throw away every tempo you have corrected by hand?\n\n\
 						 Every row goes back to what the detector said. Nothing else is touched.",
@@ -966,7 +966,7 @@ impl Clecta {
 					let cleared = self.tempos.len();
 					self.tempos.clear();
 					self.dirty = true;
-					self.notice = format!("cleared {cleared} BPM edits");
+					self.notice = format!("cleared {cleared} tempo corrections");
 				}
 			}
 
@@ -1186,8 +1186,8 @@ impl Clecta {
 
 			// The third of them, and the same kind of thing: it changes what happens at the end
 			// of a track, not what is in the queue.
-			Message::QueueTransition(id, transition) => {
-				self.queues.get_mut(id).transition = transition;
+			Message::QueueHandover(id, handover) => {
+				self.queues.get_mut(id).handover = handover;
 				self.dirty = true;
 			}
 
@@ -1611,7 +1611,7 @@ impl Clecta {
 		};
 
 		queue::hands_over_early(
-			self.queues.get(source).transition,
+			self.queues.get(source).handover,
 			position,
 			self.trims.get(&track.path).copied(),
 		)
@@ -1645,7 +1645,7 @@ impl Clecta {
 		// start it. On a mixer an unrequested fade-in is a mistake that cannot be taken back,
 		// which is why that is a switch and not the default.
 		let queue = self.queues.get(source);
-		let (auto_play, transition) = (queue.auto_play, queue.transition);
+		let (auto_play, handover) = (queue.auto_play, queue.handover);
 		let path = item.path;
 		let loading = Task::batch([self.queued(), self.load(id, path.clone())]);
 
@@ -1661,11 +1661,11 @@ impl Clecta {
 			return loading;
 		}
 
-		// The other half of the transition setting (PLAN §7b): a queue that skips the blanks at
+		// The other half of the handover setting (PLAN §7b): a queue that skips the blanks at
 		// the end of one track also skips them at the start of the next. Silently 0:00 for a
 		// track nobody has scanned — the folder scan is what makes this exact, and until then
 		// the app plays the file it was given from the top.
-		if transition == Transition::Trimmed
+		if handover == Handover::Trimmed
 			&& let Some(start) = self.trims.get(&path).map(|trim| trim.start)
 		{
 			self.seek_to(id, start);
@@ -2311,13 +2311,13 @@ impl Clecta {
 
 		// The one place anything is drawn over the window (PLAN §14d). Built last and only when
 		// there is something to draw, so the app that has no menu open is the app as it was.
-		match (&self.menu, &self.editing) {
+		match (&self.menu, &self.correcting) {
 			(Some(menu), _) => {
 				ui::tempo::over(window.into(), ui::tempo::menu(&menu.name, menu.tempo))
 			}
-			(_, Some(edit)) => ui::tempo::over(
+			(_, Some(correction)) => ui::tempo::over(
 				window.into(),
-				ui::tempo::editor(&edit.name, edit.value, edit.detected),
+				ui::tempo::editor(&correction.name, correction.value, correction.detected),
 			),
 			_ => window.into(),
 		}

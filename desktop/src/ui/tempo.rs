@@ -64,7 +64,10 @@ pub fn menu<'a>(name: &'a str, tempo: Option<f32>) -> Element<'a, Message> {
 
 	panel(column![
 		text(name).size(12).width(Fill),
-		entry("Edit BPM…", tempo.map(|_| Message::TempoEditOpened)),
+		entry(
+			"Correct tempo…",
+			tempo.map(|_| Message::TempoCorrectionOpened)
+		),
 		text(match tempo {
 			Some(_) => "",
 			None => "nothing has scanned this file yet",

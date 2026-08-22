@@ -128,7 +128,7 @@ pub fn view<'a>(
 				sweep,
 				// The correction, where there is one, is applied here rather than kept in the
 				// pane's map (PLAN §14d) — so the map stays a report of what the store said.
-				ui::edited_tempo(tempos, &entry.path, ready.map(|ready| ready.tempo)),
+				ui::corrected_tempo(tempos, &entry.path, ready.map(|ready| ready.tempo)),
 				ready.map(|ready| ready.music()),
 			)
 		});
@@ -154,7 +154,7 @@ pub fn view<'a>(
 fn header(
 	browser: &Browser,
 	scanning: Option<(usize, usize)>,
-	edited: bool,
+	corrected: bool,
 ) -> Element<'_, Message> {
 	let folder = match &browser.folder {
 		Some(folder) => folder.display().to_string(),
@@ -196,7 +196,7 @@ fn header(
 		]
 		.spacing(6)
 		.align_y(iced::Center),
-		preparation(browser, scanning, edited),
+		preparation(browser, scanning, corrected),
 	]
 	.spacing(6)
 	.into()
@@ -211,7 +211,7 @@ fn header(
 fn preparation(
 	browser: &Browser,
 	scanning: Option<(usize, usize)>,
-	edited: bool,
+	corrected: bool,
 ) -> Element<'_, Message> {
 	if let Some((done, total)) = scanning {
 		return row![
@@ -245,9 +245,9 @@ fn preparation(
 			.on_press(Message::ClearCachePressed),
 		// Beside it, because they are the same shape of button and deliberately not the same
 		// thing: that one throws away work, this one throws away *decisions* (PLAN §14d).
-		button(text("Clear BPM edits").size(12))
+		button(text("Clear tempo corrections").size(12))
 			.padding([3, 8])
-			.on_press_maybe(edited.then_some(Message::ClearTempoEditsPressed)),
+			.on_press_maybe(corrected.then_some(Message::ClearCorrectionsPressed)),
 	]
 	.spacing(6)
 	.align_y(iced::Center)

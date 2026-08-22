@@ -26,7 +26,7 @@ use crate::waveform::Trim;
 /// because it is drawn in a `pick_list` — the same pair `mixer::Curve` needs for the same
 /// reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum Transition {
+pub enum Handover {
 	/// Hand over when the file runs out, wherever the music stopped. The app's behaviour
 	/// before this setting existed, and the default for the same reason every load lands on
 	/// `Stopped`: cutting a track short is not something to start doing unasked.
@@ -38,15 +38,15 @@ pub enum Transition {
 	Trimmed,
 }
 
-impl Transition {
-	pub const ALL: [Transition; 2] = [Transition::Whole, Transition::Trimmed];
+impl Handover {
+	pub const ALL: [Handover; 2] = [Handover::Whole, Handover::Trimmed];
 }
 
-impl std::fmt::Display for Transition {
+impl std::fmt::Display for Handover {
 	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		formatter.write_str(match self {
-			Transition::Whole => "Whole track",
-			Transition::Trimmed => "Skip blanks",
+			Handover::Whole => "Whole track",
+			Handover::Trimmed => "Skip blanks",
 		})
 	}
 }
@@ -130,7 +130,7 @@ pub struct Queue {
 	/// is what keeps it one question rather than two: *this* queue decides when its own track
 	/// takes over, so Cue 1 can run an evening back to back while **Next up** stays a shelf
 	/// that plays whatever it is handed, whole.
-	pub transition: Transition,
+	pub handover: Handover,
 }
 
 impl Default for Queue {
@@ -146,7 +146,7 @@ impl Default for Queue {
 			// audio nobody asked for is a mistake that cannot be taken back. Someone who wants
 			// the evening to run itself says so once, per queue.
 			auto_play: false,
-			transition: Transition::default(),
+			handover: Handover::default(),
 		}
 	}
 }
@@ -487,8 +487,8 @@ impl Queue {
 /// The caller has already asked `next_source` whether there *is* a next track. That is the
 /// fourth condition and it is deliberately not here: cutting the run-out off the last track of
 /// the evening would leave a player stopped early for no benefit at all.
-pub fn hands_over_early(transition: Transition, position: Duration, trim: Option<Trim>) -> bool {
-	transition == Transition::Trimmed && trim.is_some_and(|trim| position >= trim.end)
+pub fn hands_over_early(handover: Handover, position: Duration, trim: Option<Trim>) -> bool {
+	handover == Handover::Trimmed && trim.is_some_and(|trim| position >= trim.end)
 }
 
 #[cfg(test)]
@@ -1013,25 +1013,22 @@ mod tests {
 			end: Duration::from_secs(228),
 		});
 		let early =
-			|transition, seconds| hands_over_early(transition, Duration::from_secs(seconds), trim);
+			|handover, seconds| hands_over_early(handover, Duration::from_secs(seconds), trim);
 
 		// Act / Assert: the run-out is what gets skipped, and only for a queue that asked.
-		assert!(!early(Transition::Trimmed, 227), "still playing music");
-		assert!(early(Transition::Trimmed, 228), "the music has stopped");
-		assert!(early(Transition::Trimmed, 239), "seeked into the run-out");
-		assert!(
-			!early(Transition::Whole, 239),
-			"this queue plays files whole"
-		);
+		assert!(!early(Handover::Trimmed, 227), "still playing music");
+		assert!(early(Handover::Trimmed, 228), "the music has stopped");
+		assert!(early(Handover::Trimmed, 239), "seeked into the run-out");
+		assert!(!early(Handover::Whole, 239), "this queue plays files whole");
 
 		// A track nobody has scanned plays whole, whatever the setting says: there is no
 		// second edge to reach, so there is nothing to cut to (PLAN §14c).
 		assert!(
-			!hands_over_early(Transition::Trimmed, Duration::from_secs(600), None),
+			!hands_over_early(Handover::Trimmed, Duration::from_secs(600), None),
 			"never scanned"
 		);
 
 		// And a fresh queue plays whole, which is what the app did before the setting existed.
-		assert_eq!(Queue::default().transition, Transition::Whole);
+		assert_eq!(Queue::default().handover, Handover::Whole);
 	}
 }

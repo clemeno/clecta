@@ -2129,7 +2129,7 @@ otherwise pure; anything needing a device or a real folder is manual.
   `2:58 / 3:15`, including the one order that would otherwise print a separator with nothing
   after it — scanned before it was measured. `format_tempo` gets the same treatment (§14d): the
   two kinds of nothing, and a number that is always two decimals — including a round 128, a
-  127.999 that rounds up to it, and a hundredth landing exactly on the boundary. `edited_tempo` is
+  127.999 that rounds up to it, and a hundredth landing exactly on the boundary. `corrected_tempo` is
   the third, and it is the whole of how a correction reaches a row: it replaces whatever the
   detector said, including the `--` of a file scanned and found to beat at nothing, and it shows
   on a file nothing has scanned at all — while a file nobody corrected comes back in exactly the
@@ -2876,7 +2876,7 @@ device and no window (§12).
 65–200 BPM, reported as found. A detector that quietly doubles a 70 and halves a 174 is one that
 cannot be argued with — and it will be wrong sometimes, because half-time and double-time are
 genuinely both true about a lot of music. So the app reports what it measured and the *person*
-overrules it. **Edit BPM** is the other half of that decision, and the rest of this section.
+overrules it. **Correct tempo** is the other half of that decision, and the rest of this section.
 
 ### The editor: two buttons, because that is what a wrong tempo is wrong by
 
@@ -2918,13 +2918,13 @@ it out again. Putting it in the cache would have made **Clear cache** a button t
 answers, which is a different button from the one that is there now.
 
 So the two are cleared apart. **Clear cache** takes the detected tempos with the waveforms;
-**Clear BPM edits**, beside it and dead when there are none, takes only the corrections and asks
+**Clear tempo corrections**, beside it and dead when there are none, takes only the corrections and asks
 first. The wording of the two warnings is deliberately different: one costs the time to work
 things out again, the other costs decisions.
 
 ### Applied where the row is drawn, not written into the model
 
-The correction reaches the screen through one function, `ui::edited_tempo`, called as each row is
+The correction reaches the screen through one function, `ui::corrected_tempo`, called as each row is
 built. The alternative — writing the new value into the files pane's map and into every queue
 holding that file — is four places to keep in step, and it has no answer at all to **Clear BPM
 edits**: putting the detected numbers back would mean re-reading the store for the pane and

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::MIN_PANE;
 use crate::mixer::Curve;
 use crate::paths;
-use crate::queue::Transition;
+use crate::queue::Handover;
 
 const FILE: &str = "settings.json";
 
@@ -83,7 +83,10 @@ pub struct Settings {
 	/// reasoning as the two switches above, and nothing sanitizes it for the same reason: serde
 	/// has already rejected anything that is not one of the two variants, and a file that
 	/// predates the field reads as `Whole` — what the app did before there was a choice.
-	pub transition: [Transition; 3],
+	/// The key stays `transition` for the same reason `shared` keeps `common`: the file is
+	/// older than the word, and a renamed key would silently reset every queue to `Whole`.
+	#[serde(rename = "transition")]
+	pub handover: [Handover; 3],
 	/// Tempos corrected by hand, by file (PLAN §14d).
 	///
 	/// **Here and not in the cache**, which is the whole decision: a detected tempo is worked out
@@ -118,7 +121,7 @@ impl Default for Settings {
 			shared: Vec::new(),
 			auto_load: [true; 3],
 			auto_play: [false; 3],
-			transition: [Transition::Whole; 3],
+			handover: [Handover::Whole; 3],
 			tempos: BTreeMap::new(),
 		}
 	}
@@ -266,8 +269,8 @@ mod tests {
 			shared: vec![queued("clecta-common.wav")],
 			auto_load: [false, true, false],
 			auto_play: [true, false, true],
-			transition: [Transition::Trimmed, Transition::Whole, Transition::Trimmed],
-			tempos: BTreeMap::from([(queued("clecta-edited.mp3"), 128.5)]),
+			handover: [Handover::Trimmed, Handover::Whole, Handover::Trimmed],
+			tempos: BTreeMap::from([(queued("clecta-corrected.mp3"), 128.5)]),
 		}
 	}
 
@@ -291,6 +294,10 @@ mod tests {
 		assert!(
 			!text.contains("\"shared\""),
 			"the new word never reaches the file"
+		);
+		assert!(
+			text.contains("\"transition\"") && !text.contains("\"handover\""),
+			"the handover points keep their old key too"
 		);
 	}
 
@@ -329,8 +336,8 @@ mod tests {
 		assert_eq!(settings.auto_load, [true; 3], "a file that predates them");
 		assert_eq!(settings.auto_play, [false; 3]);
 		assert_eq!(
-			settings.transition,
-			[Transition::Whole; 3],
+			settings.handover,
+			[Handover::Whole; 3],
 			"and files play whole until someone says otherwise"
 		);
 

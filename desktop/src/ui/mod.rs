@@ -254,12 +254,12 @@ pub fn format_tempo(tempo: Option<Option<f32>>) -> String {
 ///
 /// A correction shows even on a file nothing has scanned — a folder cleared from the cache keeps
 /// the number a person put there, which is exactly what makes it worth keeping in the other file.
-pub fn edited_tempo(
-	edits: &BTreeMap<PathBuf, f32>,
+pub fn corrected_tempo(
+	corrections: &BTreeMap<PathBuf, f32>,
 	path: &Path,
 	detected: Option<Option<f32>>,
 ) -> Option<Option<f32>> {
-	match edits.get(path) {
+	match corrections.get(path) {
 		Some(tempo) => Some(Some(*tempo)),
 		None => detected,
 	}
@@ -527,27 +527,30 @@ mod tests {
 		// Arrange: one file corrected by hand, one left alone (PLAN §14d).
 		let corrected = PathBuf::from("/music/half-time.mp3");
 		let alone = PathBuf::from("/music/as-found.mp3");
-		let edits = BTreeMap::from([(corrected.clone(), 87.0_f32)]);
+		let corrections = BTreeMap::from([(corrected.clone(), 87.0_f32)]);
 
 		// Act / Assert: the correction replaces what the detector said, whatever that was —
 		// including a file it found no tempo in at all, which would otherwise draw `--` for ever.
 		assert_eq!(
-			edited_tempo(&edits, &corrected, Some(Some(174.0))),
+			corrected_tempo(&corrections, &corrected, Some(Some(174.0))),
 			Some(Some(87.0))
 		);
 		assert_eq!(
-			edited_tempo(&edits, &corrected, Some(None)),
+			corrected_tempo(&corrections, &corrected, Some(None)),
 			Some(Some(87.0)),
 			"scanned and found nothing"
 		);
 
 		// And it shows even on a file nothing has scanned — a folder dropped from the cache
 		// keeps the number a person put there, which is why it lives in the other file.
-		assert_eq!(edited_tempo(&edits, &corrected, None), Some(Some(87.0)));
+		assert_eq!(
+			corrected_tempo(&corrections, &corrected, None),
+			Some(Some(87.0))
+		);
 
 		// A file nobody corrected is left exactly as it was found, in all three of its states.
 		for detected in [None, Some(None), Some(Some(128.0))] {
-			assert_eq!(edited_tempo(&edits, &alone, detected), detected);
+			assert_eq!(corrected_tempo(&corrections, &alone, detected), detected);
 		}
 	}
 
