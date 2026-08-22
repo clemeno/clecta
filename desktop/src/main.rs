@@ -14,8 +14,8 @@ mod deck;
 mod fsio;
 mod mixer;
 mod paths;
-mod playlist;
-mod queues;
+mod queue; // one queue: its rows, its selection, its handover rules
+mod queues; // the set of three: what is only true of them together
 mod select;
 mod settings;
 mod tree;

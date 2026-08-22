@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::MIN_PANE;
 use crate::mixer::Curve;
 use crate::paths;
-use crate::playlist::Transition;
+use crate::queue::Transition;
 
 const FILE: &str = "settings.json";
 
@@ -58,17 +58,20 @@ pub struct Settings {
 	/// The two per-player queues, in player order, and the shared one (PLAN §7a).
 	///
 	/// The only *unbounded* thing this file holds, which is the reason to say out loud that
-	/// it is worth it: a cue list built over an evening and lost to a quit is worse than no
-	/// cue list. Stored as plain paths — a queue is an ordered list of files and nothing
+	/// it is worth it: a cue built over an evening and lost to a quit is worse than no
+	/// cue. Stored as plain paths — a queue is an ordered list of files and nothing
 	/// else, so there is no state here that could go stale except the files themselves.
 	pub cues: [Vec<PathBuf>; 2],
-	pub common: Vec<PathBuf>,
-	/// Whether each list hands its top track to a player that has run out, and whether that
+	/// The key stays `common` — it is older than the word. Renaming it would read every
+	/// existing file's shared queue as absent, and `#[serde(default)]` would empty it.
+	#[serde(rename = "common")]
+	pub shared: Vec<PathBuf>,
+	/// Whether each queue hands its top track to a player that has run out, and whether that
 	/// track then starts by itself (PLAN §7a).
 	///
-	/// Indexed by `ListId::index` — Cue 1, Next up, Cue 2 — which is deliberately **not** the
-	/// order `cues` above is in: that pair is per player and has no slot for the shared list.
-	/// Three of each, in the order the lists are drawn, so a hand-edited file reads left to
+	/// Indexed by `QueueId::index` — Cue 1, Next up, Cue 2 — which is deliberately **not** the
+	/// order `cues` above is in: that pair is per player and has no slot for the shared queue.
+	/// Three of each, in the order the queues are drawn, so a hand-edited file reads left to
 	/// right.
 	///
 	/// Nothing sanitizes them, because a `bool` has no wrong value and serde has already
@@ -76,7 +79,7 @@ pub struct Settings {
 	/// which is what the app did before the switches existed.
 	pub auto_load: [bool; 3],
 	pub auto_play: [bool; 3],
-	/// When each list's track takes over from the one playing (PLAN §7b). Same order and same
+	/// When each queue's track takes over from the one playing (PLAN §7b). Same order and same
 	/// reasoning as the two switches above, and nothing sanitizes it for the same reason: serde
 	/// has already rejected anything that is not one of the two variants, and a file that
 	/// predates the field reads as `Whole` — what the app did before there was a choice.
@@ -112,7 +115,7 @@ impl Default for Settings {
 			// rest of a default window to the browser.
 			decks_height: 480.0,
 			cues: [Vec::new(), Vec::new()],
-			common: Vec::new(),
+			shared: Vec::new(),
 			auto_load: [true; 3],
 			auto_play: [false; 3],
 			transition: [Transition::Whole; 3],
@@ -214,7 +217,7 @@ impl Settings {
 		for queue in self
 			.cues
 			.iter_mut()
-			.chain(std::iter::once(&mut self.common))
+			.chain(std::iter::once(&mut self.shared))
 		{
 			queue.retain(|path| path.is_file() && crate::browser::kind_of(path).is_media());
 		}
@@ -260,7 +263,7 @@ mod tests {
 				vec![queued("clecta-cue-one.mp3")],
 				vec![queued("clecta-cue-two.flac")],
 			],
-			common: vec![queued("clecta-common.wav")],
+			shared: vec![queued("clecta-common.wav")],
 			auto_load: [false, true, false],
 			auto_play: [true, false, true],
 			transition: [Transition::Trimmed, Transition::Whole, Transition::Trimmed],
@@ -279,6 +282,16 @@ mod tests {
 
 		// Assert
 		assert_eq!(restored, settings);
+		// The disk promise behind the `shared` field's serde rename: the file keeps the key
+		// it has always had, so an existing shared queue survives the word changing.
+		assert!(
+			text.contains("\"common\""),
+			"the on-disk key is still `common`"
+		);
+		assert!(
+			!text.contains("\"shared\""),
+			"the new word never reaches the file"
+		);
 	}
 
 	#[test]
@@ -392,7 +405,7 @@ mod tests {
 		let real = queued("clecta-queue-survivor.mp3");
 		let sleeve = queued("clecta-queue-sleeve.jpg");
 		let settings = Settings {
-			common: vec![
+			shared: vec![
 				PathBuf::from("/nowhere/gone.mp3"),
 				real.clone(),
 				sleeve.clone(),
@@ -401,13 +414,13 @@ mod tests {
 		};
 
 		// Act
-		let common = settings.sanitized().common;
+		let shared = settings.sanitized().shared;
 
 		// Assert: a queue is a promise about what plays next, and the worst moment to
 		// discover a broken one is when a track ends and the next is due. The good row
-		// survives — one bad path does not empty the list.
-		assert_eq!(common, vec![real], "kept the one that can still play");
-		assert!(!common.contains(&sleeve), "a .jpg is not a queueable track");
+		// survives — one bad path does not empty the queue.
+		assert_eq!(shared, vec![real], "kept the one that can still play");
+		assert!(!shared.contains(&sleeve), "a .jpg is not a queueable track");
 	}
 
 	#[test]

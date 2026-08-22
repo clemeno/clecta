@@ -216,9 +216,9 @@ clecta/
         ├── tree.rs      the folder tree's model: nodes, expansion, path arithmetic (§9)
         ├── fsio.rs      std::fs reads run off the GUI thread: list a dir, list its subfolders, the roots (§9)
         ├── paths.rs     clecta-data/ beside the app if writable, else the per-user dir; the .app walk-up (§11)
-        ├── playlist.rs  PURE arithmetic for **one** list: its rows, its selection, and what
+        ├── queue.rs  PURE arithmetic for **one** queue: its rows, its selection, and what
         │                every edit does to that selection (§7a)
-        ├── queues.rs    PURE, and about the **set** of three: `ListId`, the lists themselves,
+        ├── queues.rs    PURE, and about the **set** of three: `QueueId`, the queues themselves,
         │                where each is scrolled to, which files are out being measured, and the
         │                three questions only the set can answer — is this a duplicate, what
         │                needs measuring, where does the next track come from (§7a, Q47)
@@ -233,7 +233,7 @@ clecta/
             │                window, and the selected-row fill all three queues are drawn with
             ├── deck.rs      one player's panel: title, transport buttons, time, drop ring
             ├── mixer.rs     the two faders and the crossfader
-            ├── playlist.rs  one queue's panel: add, select, reorder, send to a neighbour, the two switches (§7a)
+            ├── queue.rs  one queue's panel: add, select, reorder, send to a neighbour, the two switches (§7a)
             ├── browser.rs   the files pane and its rows
             ├── tree.rs      the folder tree pane, its splitter and its fold button
             └── waveform.rs  the custom advanced::Widget: a bar per pixel column, the playhead, the scrub (§14a)
@@ -503,7 +503,7 @@ Two things the docs did not mention, both found by running it rather than readin
 
 ---
 
-## 7a. The queues (`playlist.rs`, `ui/playlist.rs`)
+## 7a. The queues (`queue.rs`, `ui/queue.rs`)
 
 Three queues, drawn as a second row inside the players panel: **Cue 1** under Player 1, **Cue
 2** under Player 2, and **Next up** under the mixer, shared between them.
@@ -590,7 +590,7 @@ through `queued`, because nothing was added and there is nothing new to measure.
 
 ### The selection is the hard part
 
-Everything in `playlist.rs` is `Vec` arithmetic, and all of it exists to answer one question:
+Everything in `queue.rs` is `Vec` arithmetic, and all of it exists to answer one question:
 **what happens to the highlighted row when the queue moves under it?** A row that stays
 highlighted while a different track slides beneath it is worse than no highlight at all — the
 next button press then acts on something the user did not point at.
@@ -710,7 +710,7 @@ two rows of any queue**. Four gestures, one mechanism, and the mechanism is the 
 had — generalised in two places rather than duplicated.
 
 **What is carried** is `Drag { item, from }`, and `from` is the whole difference between a
-copy and a move: `None` means the files pane, so the folder keeps its file; `Some((list,
+copy and a move: `None` means the files pane, so the folder keeps its file; `Some((queue,
 index))` means a row, which leaves that queue when it lands. Dropping a queued row onto a
 player therefore takes it out of the queue — it is jumping the queue, which is the same thing
 the queue would have done for it later.
@@ -846,14 +846,14 @@ are applied **by path across all three queues**, not by index into one, because 
 edited while the lookup runs — and a queue may hold the same track twice, so one answer settles
 both rows.
 
-`Playlist::total` returns the sum **and whether it is the whole truth**, and the footer prints
+`Queue::total` returns the sum **and whether it is the whole truth**, and the footer prints
 a `+` when it is not. A row still being measured and a row nothing can measure both leave the
 `+` on. The alternative is arithmetic that quietly counts a missing track as zero, and a number
 that exists to be planned against must not do that.
 
 ---
 
-## 7b. The handover point (`playlist.rs`, `app.rs`)
+## 7b. The handover point (`queue.rs`, `app.rs`)
 
 A track ends twice. The file runs out, which is what §7a's handover waits for — and before
 that, somewhere earlier, the *music* stops. In between sits whatever the encoder padded, the
@@ -905,7 +905,7 @@ Three conditions, and each of them is a reason not to cut:
    the silence it saves.
 
 The third is why `cuts_early` lives in `app.rs` and `hands_over_early` — the pure part, and the
-tested one — lives in `playlist.rs`. The rule is arithmetic; knowing whether a queue has
+tested one — lives in `queue.rs`. The rule is arithmetic; knowing whether a queue has
 anything left is the app's business.
 
 The 50 ms tick puts the cut up to a tick late, which is a twentieth of a second of run-out that
@@ -1197,7 +1197,7 @@ gave 4, and three seconds of an idle folder gave nothing at all.
 
 ---
 
-## 9a. Selecting more than one row (`select.rs`, `browser.rs`, `playlist.rs`)
+## 9a. Selecting more than one row (`select.rs`, `browser.rs`, `queue.rs`)
 
 Every door into a player and every door into a queue used to take one file, because the pane
 could only hold one row selected. Loosening that is one change to a field and a long tail of
@@ -1282,7 +1282,7 @@ unlabelled on the one target nobody has run is not worth three words.
 
 Which is why the answer is an `Admission` and not a filtered list: the `←` / `→` buttons have
 to filter the **rows** and the **tracks** by the same test, so what leaves one queue is exactly
-what arrives in the other. `Admission::keeps(position)` is that test, and `playlist::duplicates`
+what arrives in the other. `Admission::keeps(position)` is that test, and `queue::duplicates`
 is the pure half that finds them.
 
 ### Two more keys, and what they are not
@@ -1673,7 +1673,7 @@ is still nothing (8 KB at most), and an array that is **bit-identical to a fresh
 cached waveform can never be the suspect when something looks wrong. A length is eight bytes
 of nanoseconds, or **no bytes at all** for a file that had none — the empty payload is how
 "asked, and there is no length" is told apart from "never asked", which is the same distinction
-`playlist::Item::duration` draws in memory and for the same reason.
+`queue::Item::duration` draws in memory and for the same reason.
 
 ### The stamp, and what it is deliberately not
 
@@ -2014,7 +2014,7 @@ otherwise pure; anything needing a device or a real folder is manual.
   of nothing — silence, a clip too short to hold two of the slowest beats it is asked about, a rate
   the decoder would not answer for, and a stream of `NaN`s, all of which have to be *no tempo*
   rather than a number somebody would act on.
-- **`playlist.rs`** — the queues (§7a), and almost every test is about the *selection* rather
+- **`queue.rs`** — the queues (§7a), and almost every test is about the *selection* rather
   than the queue: an insert above it carries it down, a remove above it pulls it up, removing
   the selected row lands on whatever slid into its place, removing the last row falls back to
   the new last, and a shift takes the highlight with the track it moved. Plus the two rules
@@ -2165,7 +2165,7 @@ otherwise pure; anything needing a device or a real folder is manual.
   reads the playing time and the tempo back out of the same answer (§14c, §14d): a scanned file
   gives the seconds between its edges and the beats it runs at, one scanned and found silent gives
   a mark with neither, and the one still missing a table gives nothing at all.
-- **`ui/playlist.rs`** — `running_time`: how many tracks, how long they run, and the `+` that
+- **`ui/queue.rs`** — `running_time`: how many tracks, how long they run, and the `+` that
   says the total is a floor rather than a figure. An empty queue says *nothing at all* rather
   than `0 · 0:00`, because three empty panels each announcing their emptiness is furniture.
   `arrows(first, last, count)` is the second (§9a), and it is two off-by-ones against opposite
@@ -2747,7 +2747,7 @@ job that finds out — a track's own scan, a queue measurement reading the cache
 working it out — and read by the three places that need it: the early cut, the track it starts
 next, and the button above the strip.
 
-A map rather than a field on `Deck` and another on `playlist::Item`, because the same answer
+A map rather than a field on `Deck` and another on `queue::Item`, because the same answer
 serves a loaded track, a queued one, and one that is neither yet. **A miss is the ordinary
 state** and means *play this whole*: nothing here is required for the app to work, which is
 what makes §11b's button an optimization rather than a step.
@@ -2795,7 +2795,7 @@ The two panes need different rules for *not knowing*, and both are in `format_le
 length is a header parse the queues pay for on every edit, so **not measured** (blank) and
 **measured, no length** (`--:--`) are worth telling apart. A playing time is a full decode and
 is only ever read, so a missing one means nothing more than nobody has scanned this yet — the
-same rule the trims map follows (above), and the reason `Playlist::measured` applies its two
+same rule the trims map follows (above), and the reason `Queue::measured` applies its two
 halves under two different tests. Filtering both on `duration.is_none()` would have meant that
 a row measured when it was queued could never learn its playing time afterwards, which is
 precisely the order it happens in.
@@ -2825,7 +2825,7 @@ around.
 
 ---
 
-## 14d. The tempo (`waveform.rs`, `audio.rs`, `cache.rs`, `ui/browser.rs`, `ui/playlist.rs`)
+## 14d. The tempo (`waveform.rs`, `audio.rs`, `cache.rs`, `ui/browser.rs`, `ui/queue.rs`)
 
 The third thing one decode can say about a file, after its shape (§14a) and its edges (§14c):
 how fast it beats. It is the number a set is *grouped* by before it is timed, which is why it
@@ -3034,9 +3034,9 @@ change rather than an argument with §11a's first sentence.
 | Q44 | Whether the store answers per table or per question | **Per question. `scan`, `store_scan`, `ready` — and the four tables go private.** Eight of `Cache`'s twelve methods were a getter and a setter each, every one a one-line forward to the same two private functions, and the real rule — that a hit means every table a decode fills — lived *outside* them: once in the app's `cached_scan` and once in `prepared`, with a comment admitting the two were kept in step by hand. Adding the tempo proved the comment right by breaking both at once. The rule is now one array and one function; the caller asks whether a file has been scanned and is told. Three consequences fell out rather than being aimed at: **one write transaction**, so a half-stored scan is no longer possible (three writes could leave a waveform with no tempo, which reads as a miss for ever and re-stores identically every launch); **one read transaction**, which was the `ponytail:` note on `prepared`; and the queues and the files pane finally agreeing about one file, since `cached_facts` was reading tables one at a time and would show a queue row's playing time for a track the pane refused to tick. `durations` keeps its own pair on purpose — a length is a header parse, and folding it in would make asking for a running time decode the whole file | §11a, §11c, §7a, §14c, §14d |
 | Q45 | Whether a row keeps a scan's answers as one thing or as loose fields | **As one thing, and the same one everywhere.** Three facts about a file were being carried by five types with overlapping fields — `Scan`, `Facts`, `Ready`, `Trim`, `Item` — and the seams between them were where the app disagreed with itself. `Item` held `music` and `tempo` as two independent `Option`s that were set by two copies of the same rule, so "a playing time with no tempo beside it" was representable and meaningless; `Facts` held the same pair a second time; and the queue row then wrote `item.tempo.map(Some)` to re-inflate a two-layer answer it had flattened on the way in. All three now hold one `Ready`, so a queue row and a files-pane row are drawn by the *same expression* — which is the real test of whether two panes agree, rather than two comments saying they should. `duration` stays a separate field with its own two layers, for the reason in Q44: a length is a header parse, a scan is a decode, and they arrive at different moments under different rules | §7a, §14c, §14d, §11a |
 | Q46 | Whether the three accumulators are three things or one | **One `Scanner`, with the three behind it.** `Fold`, `Edges` and `Tempo` are identical in shape — `Default`, `push`, `finish` — and were never independent: they are three answers to one expensive question, and the expense is the decode they share. Driving them separately meant every caller knowing there were three, that two of the three need the sample rate and the channel count and one does not, and that all three must be fed *every* sample or their answers stop being about the same audio. That loop was written four times: once in `audio::scan` and once in each of the three test modules. It is now written once, and the three stay separate types *behind* the interface, still tested one at a time — an internal seam is still a seam, it is just not part of what the module promises. A fourth fact is now a struct, a field, a `push` and a `finish`, all in one file. The same tidying moved `sweep_band` and `seek_fraction` out to `ui/waveform.rs`: they take a width in pixels and never ask `waveform` anything, so they were in the pure module because it was the pure module and not because they belonged there (Q42's rule, applied the other way round) | §14a, §14b, §12, §5 |
-| Q47 | Where the rules about the *set* of three queues live | **In `queues.rs`, with the queues.** Thirteen messages, twelve `update` arms and three `Clecta` fields described one thing that had no module: an array of three queues, an array of three scroll offsets and a set of paths in flight, all indexed by `ListId::index()` on every queue arm — 42 of those lookups in `app.rs` alone, five of them inside `QueueShift`. The tell was already in `playlist.rs`, which had grown three free functions taking `&[Playlist; 3]`: a type with no name doing a job with no home. So `Playlist` is now one queue and `Queues` is the set, and the split is not arbitrary — a duplicate is a duplicate if *any* of the three holds it, a file is measured once however many rows hold it, and the next track comes from a player's own cue *or* the shared pool. None of those is a question a single queue can answer. `ListId` moved with them, and `index()` stayed public for one caller: the view, whose three `scrollable` ids are a `[&'static str; 3]` because iced wants a `&'static str`. `update` no longer uses it at all. Two smaller things fell out: asking what needs measuring and recording it as in flight became **one** call (`take_unmeasured`) rather than two lines beside each other, which is the pair that goes wrong the day they stop being beside each other; and the queue scroll offsets left `Clecta` for the module that owns the queues, which is where the files pane has always kept its own | §7a, §9, §5 |
+| Q47 | Where the rules about the *set* of three queues live | **In `queues.rs`, with the queues.** Thirteen messages, twelve `update` arms and three `Clecta` fields described one thing that had no module: an array of three queues, an array of three scroll offsets and a set of paths in flight, all indexed by `QueueId::index()` on every queue arm — 42 of those lookups in `app.rs` alone, five of them inside `QueueShift`. The tell was already in `queue.rs`, which had grown three free functions taking `&[Queue; 3]`: a type with no name doing a job with no home. So `Queue` is now one queue and `Queues` is the set, and the split is not arbitrary — a duplicate is a duplicate if *any* of the three holds it, a file is measured once however many rows hold it, and the next track comes from a player's own cue *or* the shared pool. None of those is a question a single queue can answer. `QueueId` moved with them, and `index()` stayed public for one caller: the view, whose three `scrollable` ids are a `[&'static str; 3]` because iced wants a `&'static str`. `update` no longer uses it at all. Two smaller things fell out: asking what needs measuring and recording it as in flight became **one** call (`take_unmeasured`) rather than two lines beside each other, which is the pair that goes wrong the day they stop being beside each other; and the queue scroll offsets left `Clecta` for the module that owns the queues, which is where the files pane has always kept its own | §7a, §9, §5 |
 | Q48 | Where the pure transport decision meets the audio | **In `Deck`, once — `moved`, `seek`, `ended` — with the engine passed in as the `Option` it already was.** `transition` was pure and well tested and `Engine` was untestable, and the app was re-pairing the two by hand in four places: `transport`, both legs of `poll_players`, and `seek_to`. Four pairings drifted, as four of anything does. The playhead was zeroed in three of them and not the fourth; the notice line was formatted in five places with one near-miss; and `seek_to` wrote `Stopped → Paused` straight into the field, inventing a transport edge the state machine had never heard of and nothing could test. All of it is now one method each, and `update` calls one line per gesture. The engine is `&Option<Engine>` rather than a trait, because the `Option` is not a testing device — the app really does run with no output device (§11) — and passing `None` leaves exactly the state machine, which is the second adapter the seam needed without inventing one. `deck.rs` names `audio::Engine` and still names no rodio type, so the seam §4 cares about is where it was | §7, §7b, §14b, §11, §12 |
-| Q49 | Where the product's words are defined | **A root `CONTEXT.md`, one entry per word, opinionated.** Four words — playlist, list, queue, cue — were naming three objects, and "transition" was naming a transport change, the handover and the handover point all at once; a glossary that picks one word per thing is what turns the next rename from a taste argument into a bug report. The split of authority is in `docs/agents/domain.md`: this plan wins on decisions, the glossary wins on vocabulary, and a term defined in both places is a bug here. The plan's prose was swept to obey it, and the code follows in the renames the glossary demanded — `Playlist` → `Queue`, `Transition` → `Handover`, `edited` → `corrected` — each with its `settings.json` key pinned by serde so no saved setting resets | CONTEXT.md, §7a, §7b, §14d |
+| Q49 | Where the product's words are defined | **A root `CONTEXT.md`, one entry per word, opinionated.** Four words — playlist, list, queue, cue — were naming three objects, and "transition" was naming a transport change, the handover and the handover point all at once; a glossary that picks one word per thing is what turns the next rename from a taste argument into a bug report. The split of authority is in `docs/agents/domain.md`: this plan wins on decisions, the glossary wins on vocabulary, and a term defined in both places is a bug here. The plan's prose was swept to obey it, and the code follows in the renames the glossary demanded — `Queue` → `Queue`, `Transition` → `Handover`, `edited` → `corrected` — each with its `settings.json` key pinned by serde so no saved setting resets | CONTEXT.md, §7a, §7b, §14d |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

@@ -30,8 +30,8 @@ use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
-use crate::playlist::{self, Playlist, Transition};
-use crate::queues::{ListId, Queues};
+use crate::queue::{self, Queue, Transition};
+use crate::queues::{QueueId, Queues};
 use crate::select::Click;
 use crate::settings::Settings;
 use crate::tree::Tree;
@@ -161,12 +161,12 @@ pub enum Section {
 pub enum DropTarget {
 	/// Load it into this player, now.
 	Player(DeckId),
-	/// Put it in this list, **above** this row. `index == len` is past the last row, which is
+	/// Put it in this queue, **above** this row. `index == len` is past the last row, which is
 	/// the one index that names no row — the caret sits between rows, not on them.
-	Row(ListId, usize),
+	Row(QueueId, usize),
 }
 
-/// The panel a pointer can leave, which is coarser than what it can land on: a list has as
+/// The panel a pointer can leave, which is coarser than what it can land on: a queue has as
 /// many targets as it has rows, but leaving it is one event.
 ///
 /// Leaving is separate from entering because the two arrive in an order nothing guarantees.
@@ -174,7 +174,7 @@ pub enum DropTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Zone {
 	Player(DeckId),
-	List(ListId),
+	Queue(QueueId),
 }
 
 impl DropTarget {
@@ -182,7 +182,7 @@ impl DropTarget {
 	fn zone(self) -> Zone {
 		match self {
 			DropTarget::Player(id) => Zone::Player(id),
-			DropTarget::Row(list, _) => Zone::List(list),
+			DropTarget::Row(queue, _) => Zone::Queue(queue),
 		}
 	}
 }
@@ -196,8 +196,8 @@ impl DropTarget {
 /// is, and a drag out of a queue takes the rows with it.
 #[derive(Debug, Clone)]
 pub struct Drag {
-	items: Vec<playlist::Item>,
-	from: Option<(ListId, Vec<usize>)>,
+	items: Vec<queue::Item>,
+	from: Option<(QueueId, Vec<usize>)>,
 }
 
 /// What a background job worked out about one file (PLAN §7a, §11a, §14c).
@@ -245,9 +245,9 @@ impl Admission {
 	/// Whether the track at this position in the batch survives the answer.
 	///
 	/// A position rather than a path, so a caller can filter rows and tracks together with the
-	/// same test — which is what the `←` / `→` buttons need, since what leaves one list has to
+	/// same test — which is what the `←` / `→` buttons need, since what leaves one queue has to
 	/// be exactly what arrives in the other.
-	fn keeps(self, index: usize, duplicates: &[(usize, ListId)]) -> bool {
+	fn keeps(self, index: usize, duplicates: &[(usize, QueueId)]) -> bool {
 		match self {
 			Admission::All => true,
 			Admission::Fresh => !duplicates.iter().any(|(duplicate, _)| *duplicate == index),
@@ -311,10 +311,10 @@ pub enum Message {
 	/// The modifiers changed. Tracked because a `mouse_area` press does not carry them, and a
 	/// click has to know whether it is a plain one, a toggle or a range.
 	ModifiersChanged(Modifiers),
-	/// A row was right-clicked: the files pane names it by path, a queue by list and row, and
+	/// A row was right-clicked: the files pane names it by path, a queue by queue and row, and
 	/// both open the same menu (PLAN §14d).
 	RowMenuOpened(PathBuf),
-	QueueMenuOpened(ListId, usize),
+	QueueMenuOpened(QueueId, usize),
 	/// The menu or the editor was dismissed — its own button, a click outside it, or Escape.
 	MenuDismissed,
 	/// **Edit BPM…** on the open menu.
@@ -344,15 +344,15 @@ pub enum Message {
 	Scrolled(scrollable::Viewport),
 	/// A queue row was clicked. The index, not the path: a queue may hold the same track
 	/// twice (PLAN §7a).
-	QueueSelected(ListId, usize),
+	QueueSelected(QueueId, usize),
 	/// A queue row was double-clicked: play it now, out of turn.
-	QueueLoad(ListId, usize),
+	QueueLoad(QueueId, usize),
 	/// A queue was scrolled, to this absolute offset. Not a preference — the view needs it to
 	/// know which rows are worth building, exactly as the files pane does (PLAN §9).
-	QueueScrolled(ListId, f32),
-	/// A drag entered (`true`) or left (`false`) one of a list's scroll edges: its header,
+	QueueScrolled(QueueId, f32),
+	/// A drag entered (`true`) or left (`false`) one of a queue's scroll edges: its header,
 	/// which scrolls up, or its footer, which scrolls down (PLAN §7a).
-	ScrollEdge(ListId, bool, bool),
+	ScrollEdge(QueueId, bool, bool),
 	/// One step of that scroll. Sent only while an edge is armed.
 	ScrollStep,
 	/// What the queues' tracks turned out to be, looked up off the GUI thread. A batch rather
@@ -361,21 +361,21 @@ pub enum Message {
 	Measured(Vec<Facts>),
 	/// Add the browser's selection to a queue — at the top when `true`, at the end when
 	/// `false`.
-	QueueAdd(ListId, bool),
+	QueueAdd(QueueId, bool),
 	/// Take the selected row out of a queue.
-	QueueRemove(ListId),
+	QueueRemove(QueueId),
 	/// Move the selected row one place up (`true`) or down (`false`).
-	QueueMove(ListId, bool),
+	QueueMove(QueueId, bool),
 	/// Send the selected row to the neighbouring queue, right (`true`) or left (`false`).
-	QueueShift(ListId, bool),
+	QueueShift(QueueId, bool),
 	/// A queue's **Auto-load** switch: whether it hands its top track to a player that has
 	/// just run out (PLAN §7a).
-	QueueAutoLoad(ListId, bool),
+	QueueAutoLoad(QueueId, bool),
 	/// Its **Auto-play** switch: whether a track handed over that way then starts by itself.
-	QueueAutoPlay(ListId, bool),
+	QueueAutoPlay(QueueId, bool),
 	/// Its **transition**: whether the track it hands over waits for the file to run out, or
 	/// takes over when the music stops (PLAN §7b).
-	QueueTransition(ListId, Transition),
+	QueueTransition(QueueId, Transition),
 	/// A disclosure arrow in the tree.
 	FolderToggled(PathBuf),
 	/// The tree's fold button.
@@ -497,14 +497,14 @@ pub struct Clecta {
 	/// settle timer the same way `dirty` drives the autosave: it exists only while this is
 	/// true, so a folder nothing is happening in costs nothing (PLAN §9).
 	stale: bool,
-	/// The three queues, indexed by `ListId::index` (PLAN §7a): one in front of each player,
+	/// The three queues, indexed by `QueueId::index` (PLAN §7a): one in front of each player,
 	/// and the shared one between them.
 	queues: Queues,
 	/// How far down each of them is scrolled, in the same order. Not persisted, for the same
-	/// reason the files pane's offset is not: where a list is scrolled to is not a setting.
-	/// The list whose edge a drag is resting on, and which way it is scrolling. `None` at
+	/// reason the files pane's offset is not: where a queue is scrolled to is not a setting.
+	/// The queue whose edge a drag is resting on, and which way it is scrolling. `None` at
 	/// rest, which is what gates the timer that does the scrolling.
-	autoscroll: Option<(ListId, bool)>,
+	autoscroll: Option<(QueueId, bool)>,
 	/// The tracks whose length is being looked up right now. A row stays *unmeasured* until
 	/// its answer lands, so without this a second edit arriving mid-lookup would send the same
 	/// file off to be opened and parsed all over again (PLAN §7a).
@@ -519,7 +519,7 @@ pub struct Clecta {
 	/// the cache, a folder scan working it out — and read by the three places that need it:
 	/// the handover's early cut, the track it starts next, and the button above the strip.
 	///
-	/// A map rather than a field on `Deck` and another on `playlist::Item`, because the same
+	/// A map rather than a field on `Deck` and another on `queue::Item`, because the same
 	/// answer serves a loaded track and a queued one and a track that is neither yet. A miss
 	/// is the ordinary state and means *play this whole*: nothing here is required for the app
 	/// to work, which is what makes the folder scan an optimization rather than a step.
@@ -557,7 +557,7 @@ pub struct Clecta {
 ///
 /// The name and the tempo are **copied** rather than looked up again when the menu is drawn: the
 /// menu is opened from two panes that name a row differently — the files pane by path, a queue by
-/// list and index — and a queue can be edited underneath an open menu.
+/// queue and index — and a queue can be edited underneath an open menu.
 #[derive(Debug, Clone)]
 struct RowMenu {
 	path: PathBuf,
@@ -605,14 +605,14 @@ impl Clecta {
 			deck.fader = fader;
 		}
 
-		// The three lists, each with its own two switches (PLAN §7a). Built here rather than
-		// inside the struct below because a restored list is its paths *and* its switches, and
+		// The three queues, each with its own two switches (PLAN §7a). Built here rather than
+		// inside the struct below because a restored queue is its paths *and* its switches, and
 		// the switches are stored in draw order while the paths are not — `cues` is per player
-		// and has no slot for the shared list.
+		// and has no slot for the shared queue.
 		let mut queues = [
-			Playlist::from_paths(settings.cues[0].clone()),
-			Playlist::from_paths(settings.common.clone()),
-			Playlist::from_paths(settings.cues[1].clone()),
+			Queue::from_paths(settings.cues[0].clone()),
+			Queue::from_paths(settings.shared.clone()),
+			Queue::from_paths(settings.cues[1].clone()),
 		];
 		for (index, queue) in queues.iter_mut().enumerate() {
 			queue.auto_load = settings.auto_load[index];
@@ -690,15 +690,15 @@ impl Clecta {
 			window: self.window,
 			decks_height: self.decks_height,
 			cues: [
-				self.queues.get(ListId::Cue(DeckId::One)).paths(),
-				self.queues.get(ListId::Cue(DeckId::Two)).paths(),
+				self.queues.get(QueueId::Cue(DeckId::One)).paths(),
+				self.queues.get(QueueId::Cue(DeckId::Two)).paths(),
 			],
-			common: self.queues.get(ListId::Common).paths(),
-			// In draw order, which is the order the lists are stored in here — unlike `cues`
+			shared: self.queues.get(QueueId::Shared).paths(),
+			// In draw order, which is the order the queues are stored in here — unlike `cues`
 			// above, which is per player.
-			auto_load: ListId::ALL.map(|id| self.queues.get(id).auto_load),
-			auto_play: ListId::ALL.map(|id| self.queues.get(id).auto_play),
-			transition: ListId::ALL.map(|id| self.queues.get(id).transition),
+			auto_load: QueueId::ALL.map(|id| self.queues.get(id).auto_load),
+			auto_play: QueueId::ALL.map(|id| self.queues.get(id).auto_play),
+			transition: QueueId::ALL.map(|id| self.queues.get(id).transition),
 			tempos: self.tempos.clone(),
 		}
 	}
@@ -855,11 +855,11 @@ impl Clecta {
 				}
 
 				// From the pane, so a drop *copies*: the files stay in the folder.
-				let items: Vec<playlist::Item> = self
+				let items: Vec<queue::Item> = self
 					.browser
 					.selected_media()
 					.into_iter()
-					.map(playlist::Item::new)
+					.map(queue::Item::new)
 					.collect();
 				self.drag = (!items.is_empty()).then_some(Drag { items, from: None });
 			}
@@ -1000,39 +1000,39 @@ impl Clecta {
 				// both jobs, and a plain press on an already-selected row leaves the selection
 				// alone so that a multi-row drag has something to carry.
 				let kind = self.click_kind();
-				let list = self.queues.get_mut(id);
-				if !(list.is_selected(index) && kind == Click::Replace) {
-					list.click(index, kind);
+				let queue = self.queues.get_mut(id);
+				if !(queue.is_selected(index) && kind == Click::Replace) {
+					queue.click(index, kind);
 				}
 
-				let list = self.queues.get(id);
-				let rows: Vec<usize> = list.selection().collect();
-				// From a list, so a drop *moves*: the rows leave here when they land.
+				let queue = self.queues.get(id);
+				let rows: Vec<usize> = queue.selection().collect();
+				// From a queue, so a drop *moves*: the rows leave here when they land.
 				self.drag = (!rows.is_empty()).then(|| Drag {
-					items: list.selected_items(),
+					items: queue.selected_items(),
 					from: Some((id, rows)),
 				});
 			}
 
-			// A double click plays queued rows now, out of turn — the one way from a list to
+			// A double click plays queued rows now, out of turn — the one way from a queue to
 			// a player that is neither a drag nor waiting for a track to end (PLAN §7a). It
 			// takes them with it, exactly as a drag onto a player does and as the handover
 			// itself does: the queue is what is still to come.
-			Message::QueueLoad(list, index) => {
-				// A cue plays on the player it belongs to; the shared list has no player of its
+			Message::QueueLoad(queue, index) => {
+				// A cue plays on the player it belongs to; the shared queue has no player of its
 				// own, so it uses the same "whichever is free" rule an unaimed drop does.
-				let id = match list {
-					ListId::Cue(id) => id,
-					ListId::Common => deck::idle_target(&self.decks[0], &self.decks[1]),
+				let id = match queue {
+					QueueId::Cue(id) => id,
+					QueueId::Shared => deck::idle_target(&self.decks[0], &self.decks[1]),
 				};
 
 				// The selection when the double-clicked row is part of it, that row alone when
 				// it is not — the same rule the files pane's double click follows (PLAN §9a).
-				let taken = if self.queues.get(list).is_selected(index) {
-					self.queues.get_mut(list).take_selected()
+				let taken = if self.queues.get(queue).is_selected(index) {
+					self.queues.get_mut(queue).take_selected()
 				} else {
 					self.queues
-						.get_mut(list)
+						.get_mut(queue)
 						.remove(index)
 						.into_iter()
 						.collect()
@@ -1042,7 +1042,7 @@ impl Clecta {
 				}
 
 				// The press that opened this double click armed a drag, and the rows it was
-				// carrying have just left the list. Disarmed here rather than left to the
+				// carrying have just left the queue. Disarmed here rather than left to the
 				// release, which would otherwise drop rows that no longer exist.
 				self.drag = None;
 
@@ -1051,7 +1051,7 @@ impl Clecta {
 			}
 
 			// Not persisted and deliberately not `dirty`, exactly like the files pane's own
-			// offset: where a list is scrolled to is not a setting.
+			// offset: where a queue is scrolled to is not a setting.
 			Message::QueueScrolled(id, offset) => self.queues.scrolled(id, offset),
 
 			Message::ScrollEdge(id, up, entering) => {
@@ -1078,7 +1078,7 @@ impl Clecta {
 						AUTOSCROLL_STEP
 					};
 					return operation::scroll_by(
-						ui::playlist::scroll_id(id),
+						ui::queue::scroll_id(id),
 						AbsoluteOffset { x: 0.0, y: step },
 					);
 				}
@@ -1096,16 +1096,16 @@ impl Clecta {
 				// Read from the *browser*, not from a payload on the message: the buttons were
 				// drawn from this same selection, so carrying the paths would be carrying a copy
 				// of something that cannot have changed in between.
-				let items: Vec<playlist::Item> = self
+				let items: Vec<queue::Item> = self
 					.browser
 					.selected_media()
 					.into_iter()
-					.map(playlist::Item::new)
+					.map(queue::Item::new)
 					.collect();
 
 				let duplicates = self.queues.duplicates(&items, &[]);
 				let admission = self.admits(&items, &duplicates);
-				let items: Vec<playlist::Item> = items
+				let items: Vec<queue::Item> = items
 					.into_iter()
 					.enumerate()
 					.filter(|(index, _)| admission.keeps(*index, &duplicates))
@@ -1137,7 +1137,7 @@ impl Clecta {
 			}
 
 			Message::QueueShift(id, right) => {
-				// Both halves or neither: tracks taken out of one list and not put into
+				// Both halves or neither: tracks taken out of one queue and not put into
 				// another are tracks the user just lost. Which is also why the rows are *looked
 				// at* before they are taken — a warning the user cancels must leave them where
 				// they were, and putting them back afterwards would have to rebuild the
@@ -1148,13 +1148,13 @@ impl Clecta {
 
 				let rows: Vec<usize> = self.queues.get(id).selection().collect();
 				let items = self.queues.get(id).selected_items();
-				let moving: Vec<(ListId, usize)> = rows.iter().map(|&index| (id, index)).collect();
+				let moving: Vec<(QueueId, usize)> = rows.iter().map(|&index| (id, index)).collect();
 
 				// The warning can leave *some* of them standing, so the rows and the tracks are
-				// filtered together — what leaves the list is exactly what arrives in the other.
+				// filtered together — what leaves the queue is exactly what arrives in the other.
 				let duplicates = self.queues.duplicates(&items, &moving);
 				let admission = self.admits(&items, &duplicates);
-				let (rows, items): (Vec<usize>, Vec<playlist::Item>) = rows
+				let (rows, items): (Vec<usize>, Vec<queue::Item>) = rows
 					.into_iter()
 					.zip(items)
 					.enumerate()
@@ -1185,7 +1185,7 @@ impl Clecta {
 			}
 
 			// The third of them, and the same kind of thing: it changes what happens at the end
-			// of a track, not what is in the list.
+			// of a track, not what is in the queue.
 			Message::QueueTransition(id, transition) => {
 				self.queues.get_mut(id).transition = transition;
 				self.dirty = true;
@@ -1332,7 +1332,7 @@ impl Clecta {
 				self.decks_drag = false;
 				// Cleared here rather than left to a leave: the edges are only `mouse_area`s
 				// while a drag is in flight, so releasing *on* one destroys the widget that
-				// would have reported the pointer leaving it, and the list would scroll for
+				// would have reported the pointer leaving it, and the queue would scroll for
 				// ever (PLAN §7a).
 				self.autoscroll = None;
 				let target = self.hover.take();
@@ -1345,20 +1345,20 @@ impl Clecta {
 				match target {
 					// Onto a player: the first plays now, jumping whatever queue it came from,
 					// and the rest go to the top of that player's cue (PLAN §9a) — so rows
-					// dragged out of a list leave the list, exactly as they would have if the
-					// list had handed them over itself (PLAN §7a).
+					// dragged out of a queue leave the queue, exactly as they would have if the
+					// queue had handed them over itself (PLAN §7a).
 					Some(DropTarget::Player(id)) => {
 						let mut tasks = Vec::new();
-						if let Some((list, rows)) = &drag.from {
-							self.queues.get_mut(*list).take_rows(rows);
+						if let Some((queue, rows)) = &drag.from {
+							self.queues.get_mut(*queue).take_rows(rows);
 							tasks.push(self.queued());
 						}
 						let paths = drag.items.into_iter().map(|item| item.path).collect();
 						tasks.push(self.load_batch(id, paths));
 						return Task::batch(tasks);
 					}
-					Some(DropTarget::Row(list, index)) => {
-						self.drop_into(list, index, drag);
+					Some(DropTarget::Row(queue, index)) => {
+						self.drop_into(queue, index, drag);
 						return self.queued();
 					}
 					// A drag that landed on nothing is a plain click, and a click has already
@@ -1571,7 +1571,7 @@ impl Clecta {
 				let position = engine.position(id);
 				self.decks[id.index()].position = position;
 
-				// The *other* end of a track (PLAN §7b): the music has stopped, and the list
+				// The *other* end of a track (PLAN §7b): the music has stopped, and the queue
 				// waiting behind this player asked not to sit through the run-out.
 				if self.cuts_early(id, position) {
 					// **Stop**, not `Ended`, and that is the whole difference from the branch
@@ -1597,8 +1597,8 @@ impl Clecta {
 	/// Whether the track playing on this player should give way now rather than at the end of
 	/// its file (PLAN §7b).
 	///
-	/// Asked of the list that would *supply* the next track, which is the same rule the two
-	/// switches follow (PLAN §7a): the list waiting behind a player is what says how it wants
+	/// Asked of the queue that would *supply* the next track, which is the same rule the two
+	/// switches follow (PLAN §7a): the queue waiting behind a player is what says how it wants
 	/// to take over. And it is asked at all only when there is something to take over — the
 	/// last track of the evening plays its run-out, because cutting it short would leave a
 	/// player stopped early for nothing.
@@ -1610,7 +1610,7 @@ impl Clecta {
 			return false;
 		};
 
-		playlist::hands_over_early(
+		queue::hands_over_early(
 			self.queues.get(source).transition,
 			position,
 			self.trims.get(&track.path).copied(),
@@ -1621,18 +1621,18 @@ impl Clecta {
 	///
 	/// **Only from here**, which is the whole dispatch rule: a track ending is the one event
 	/// that pulls from a queue. A player sitting empty at startup is left alone, so adding
-	/// files to a list never loads anything by itself and every automatic load can be traced
+	/// files to a queue never loads anything by itself and every automatic load can be traced
 	/// back to a track the user heard end.
 	///
 	/// The track is *taken* rather than marked played: a queue is what is still to come, so
-	/// the row leaving the list as it reaches the player is what makes the list mean that.
+	/// the row leaving the queue as it reaches the player is what makes the queue mean that.
 	///
-	/// Both switches belong to the **source list**, not to the player: the list that gave the
-	/// track is the list that says whether it plays, so Cue 1 can run the evening by itself
+	/// Both switches belong to the **source queue**, not to the player: the queue that gave the
+	/// track is the queue that says whether it plays, so Cue 1 can run the evening by itself
 	/// while the shared pool stays a shelf someone takes from by hand (PLAN §7a).
 	fn advance(&mut self, id: DeckId) -> Task<Message> {
-		// A list with **Auto-load** off offers nothing however full it is, so this is also
-		// where switching every list off leaves the player simply stopped.
+		// A queue with **Auto-load** off offers nothing however full it is, so this is also
+		// where switching every queue off leaves the player simply stopped.
 		let Some(source) = self.queues.next_source(id) else {
 			return Task::none();
 		};
@@ -1641,11 +1641,11 @@ impl Clecta {
 		};
 
 		// Lands on `Stopped`, like every other load (PLAN §7): the next track is ready at
-		// 0:00 and audible only when someone presses Play — unless this list was told to
+		// 0:00 and audible only when someone presses Play — unless this queue was told to
 		// start it. On a mixer an unrequested fade-in is a mistake that cannot be taken back,
 		// which is why that is a switch and not the default.
-		let list = self.queues.get(source);
-		let (auto_play, transition) = (list.auto_play, list.transition);
+		let queue = self.queues.get(source);
+		let (auto_play, transition) = (queue.auto_play, queue.transition);
 		let path = item.path;
 		let loading = Task::batch([self.queued(), self.load(id, path.clone())]);
 
@@ -1661,7 +1661,7 @@ impl Clecta {
 			return loading;
 		}
 
-		// The other half of the transition setting (PLAN §7b): a list that skips the blanks at
+		// The other half of the transition setting (PLAN §7b): a queue that skips the blanks at
 		// the end of one track also skips them at the start of the next. Silently 0:00 for a
 		// track nobody has scanned — the folder scan is what makes this exact, and until then
 		// the app plays the file it was given from the top.
@@ -1700,9 +1700,9 @@ impl Clecta {
 			return Task::none();
 		};
 
-		let rest: Vec<playlist::Item> = paths.map(playlist::Item::new).collect();
+		let rest: Vec<queue::Item> = paths.map(queue::Item::new).collect();
 		if !rest.is_empty() {
-			self.queues.get_mut(ListId::Cue(id)).insert_many(0, rest);
+			self.queues.get_mut(QueueId::Cue(id)).insert_many(0, rest);
 			return Task::batch([self.load(id, first), self.queued()]);
 		}
 
@@ -1711,7 +1711,7 @@ impl Clecta {
 
 	/// Remember what a job worked out about one file, and settle every queued row holding it.
 	///
-	/// Applied to all three lists, because a track can be moved between them while the answer
+	/// Applied to all three queues, because a track can be moved between them while the answer
 	/// is being looked up — and by path, so one answer settles every row holding that file. A
 	/// row that has been removed in the meantime simply matches nothing.
 	fn learned(&mut self, facts: &Facts) {
@@ -1721,7 +1721,7 @@ impl Clecta {
 		{
 			self.browser.mark_prepared(&facts.path, ready);
 		}
-		// Which also lets go of the file: this answer is done with it whatever the lists have
+		// Which also lets go of the file: this answer is done with it whatever the queues have
 		// done with the rows, and a path left in flight would never be looked up again.
 		self.queues
 			.measured(&facts.path, facts.duration, facts.ready);
@@ -1826,7 +1826,7 @@ impl Clecta {
 	/// (PLAN §7a, §9a).
 	///
 	/// `All` without a word when none of them is queued anywhere, which is the ordinary case
-	/// and costs a scan of three short lists. Otherwise the app **asks**, because queueing a
+	/// and costs a scan of three short queues. Otherwise the app **asks**, because queueing a
 	/// track twice is sometimes exactly what someone means and sometimes a mistake, and nothing
 	/// in the app can tell those apart. A silent refusal would be the app deciding; a silent
 	/// accept is what left the mistake possible.
@@ -1846,21 +1846,21 @@ impl Clecta {
 	/// A modal, which blocks the GUI thread while it is open — the playhead stops with it,
 	/// exactly as it does for the **Load…** dialog. Parentless, like every dialog in the app,
 	/// which is what puts `CFUserNotificationDisplayAlert` in the macOS log (PLAN §7a).
-	fn admits(&self, items: &[playlist::Item], duplicates: &[(usize, ListId)]) -> Admission {
+	fn admits(&self, items: &[queue::Item], duplicates: &[(usize, QueueId)]) -> Admission {
 		if duplicates.is_empty() {
 			return Admission::All;
 		}
 
-		// Named rather than counted, up to a point: a list of forty names is not a question
+		// Named rather than counted, up to a point: a queue of forty names is not a question
 		// anyone reads, and the count is the part that decides the answer.
 		const NAMED: usize = 6;
 		let named: Vec<String> = duplicates
 			.iter()
 			.take(NAMED)
-			.filter_map(|(index, list)| {
+			.filter_map(|(index, queue)| {
 				items
 					.get(*index)
-					.map(|item| format!("    {} ({})", item.name, list.label()))
+					.map(|item| format!("    {} ({})", item.name, queue.label()))
 			})
 			.collect();
 		let rest = duplicates.len().saturating_sub(named.len());
@@ -1967,33 +1967,33 @@ impl Clecta {
 		)
 	}
 
-	/// Put what a drag was carrying into a list, above row `index` (PLAN §7a, §9a).
+	/// Put what a drag was carrying into a queue, above row `index` (PLAN §7a, §9a).
 	///
 	/// Three cases, and the first is the one worth separating: rows dragged **within their own
-	/// list** are a reorder, not a remove followed by an insert. Doing it as two steps would
+	/// queue** are a reorder, not a remove followed by an insert. Doing it as two steps would
 	/// need the caret index adjusting for the holes the rows left behind, which is what
 	/// `relocate` exists to get right — so it is called rather than reimplemented here.
-	fn drop_into(&mut self, list: ListId, index: usize, drag: Drag) {
+	fn drop_into(&mut self, queue: QueueId, index: usize, drag: Drag) {
 		// A reorder is the one drop that cannot produce a duplicate: the rows are already
-		// somewhere in this list and are only moving inside it. Asked before anything is
-		// touched, because a cancelled drop must leave every list exactly as it was.
+		// somewhere in this queue and are only moving inside it. Asked before anything is
+		// touched, because a cancelled drop must leave every queue exactly as it was.
 		if let Some((source, rows)) = &drag.from
-			&& *source == list
+			&& *source == queue
 		{
-			self.queues.get_mut(list).relocate(rows, index);
+			self.queues.get_mut(queue).relocate(rows, index);
 			return;
 		}
 
-		// The rows on their way out, so a track dragged from one list to another does not warn
+		// The rows on their way out, so a track dragged from one queue to another does not warn
 		// about colliding with itself.
-		let moving: Vec<(ListId, usize)> = match &drag.from {
+		let moving: Vec<(QueueId, usize)> = match &drag.from {
 			Some((source, rows)) => rows.iter().map(|&row| (*source, row)).collect(),
 			None => Vec::new(),
 		};
 
 		let duplicates = self.queues.duplicates(&drag.items, &moving);
 		let admission = self.admits(&drag.items, &duplicates);
-		let items: Vec<playlist::Item> = drag
+		let items: Vec<queue::Item> = drag
 			.items
 			.into_iter()
 			.enumerate()
@@ -2004,7 +2004,7 @@ impl Clecta {
 			return;
 		}
 
-		// Across two lists: taken out of one and put into the other, in that order. The index
+		// Across two queues: taken out of one and put into the other, in that order. The index
 		// is the caret in the *destination*, which the removal cannot have moved. From the
 		// files pane there is nothing to take out — a drop from there is a copy, so the folder
 		// keeps its files.
@@ -2020,7 +2020,7 @@ impl Clecta {
 			self.queues.get_mut(*source).take_rows(&rows);
 		}
 
-		self.queues.get_mut(list).insert_many(index, items);
+		self.queues.get_mut(queue).insert_many(index, items);
 	}
 
 	/// Apply a transport event to both the model and the audio thread, in that order of
@@ -2142,7 +2142,7 @@ impl Clecta {
 			Some(deck::idle_target(&self.decks[0], &self.decks[1]))
 		} else if self.drag.is_some() {
 			// An in-app drag is truly aimed: the pointer is ours the whole way. A drag headed
-			// for a *list* lights no player — the caret in that list is showing where it goes,
+			// for a *queue* lights no player — the caret in that queue is showing where it goes,
 			// and two indicators at once would each be half a lie.
 			match self.hover {
 				Some(DropTarget::Player(id)) => Some(id),
@@ -2153,13 +2153,13 @@ impl Clecta {
 		}
 	}
 
-	/// Where a release would put the dragged row in this list, if that is where it is headed.
+	/// Where a release would put the dragged row in this queue, if that is where it is headed.
 	///
-	/// `None` at rest and for the two lists the pointer is not over, so exactly one caret is
+	/// `None` at rest and for the two queues the pointer is not over, so exactly one caret is
 	/// ever drawn — the same "one indicator, and it tells the truth" rule as the drop ring.
-	fn insertion(&self, list: ListId) -> Option<usize> {
+	fn insertion(&self, queue: QueueId) -> Option<usize> {
 		match self.hover {
-			Some(DropTarget::Row(id, index)) if id == list && self.drag.is_some() => Some(index),
+			Some(DropTarget::Row(id, index)) if id == queue && self.drag.is_some() => Some(index),
 			_ => None,
 		}
 	}
@@ -2339,30 +2339,30 @@ impl Clecta {
 	/// The top section: two players with the mixer strip between them (PLAN §6).
 	/// The players, the mixer, and the queue under each of them (PLAN §6, §7a).
 	///
-	/// Three columns, and each column is its control above its list. The controls are all
-	/// fixed-size rows, so they take what they need and the **list takes the rest** — which
+	/// Three columns, and each column is its control above its queue. The controls are all
+	/// fixed-size rows, so they take what they need and the **queue takes the rest** — which
 	/// is what makes dragging the divider grow the queues rather than pad the players with
 	/// empty space.
 	fn decks_view(&self) -> Element<'_, Message> {
 		let ring = self.drop_ring();
-		// Asked once for all three lists: they each draw the same two add buttons, and the
-		// answer is a property of the files pane rather than of any list.
+		// Asked once for all three queues: they each draw the same two add buttons, and the
+		// answer is a property of the files pane rather than of any queue.
 		let addable = self.browser.has_media_selection();
 
-		let queue = |id: ListId| {
-			ui::playlist::view(
+		let queue = |id: QueueId| {
+			ui::queue::view(
 				id,
 				self.queues.get(id),
 				addable,
 				self.queues.scroll(id),
 				&self.tempos,
 				// One value rather than three arguments, and `None` at rest: everything a
-				// list does differently during a drag arrives together.
-				self.drag.is_some().then(|| ui::playlist::Dragging {
+				// queue does differently during a drag arrives together.
+				self.drag.is_some().then(|| ui::queue::Dragging {
 					insertion: self.insertion(id),
 					edge: self
 						.autoscroll
-						.and_then(|(list, up)| (list == id).then_some(up)),
+						.and_then(|(queue, up)| (queue == id).then_some(up)),
 				}),
 			)
 		};
@@ -2370,7 +2370,7 @@ impl Clecta {
 		row![
 			column![
 				self.deck_view(DeckId::One, ring),
-				queue(ListId::Cue(DeckId::One))
+				queue(QueueId::Cue(DeckId::One))
 			]
 			.spacing(8),
 			column![
@@ -2380,13 +2380,13 @@ impl Clecta {
 					self.crossfader,
 					self.curve,
 				)),
-				queue(ListId::Common),
+				queue(QueueId::Shared),
 			]
 			.spacing(8)
 			.width(MIXER_WIDTH),
 			column![
 				self.deck_view(DeckId::Two, ring),
-				queue(ListId::Cue(DeckId::Two))
+				queue(QueueId::Cue(DeckId::Two))
 			]
 			.spacing(8),
 		]

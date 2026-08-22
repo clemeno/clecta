@@ -251,7 +251,7 @@ impl Cache {
 
 	/// A track's length, if it has already been looked up.
 	///
-	/// Two layers, matching `playlist::Item::duration` exactly: the outer is *was this in the
+	/// Two layers, matching `queue::Item::duration` exactly: the outer is *was this in the
 	/// cache*, the inner is *did the file have a length*. A file the decoder could not answer
 	/// for is worth remembering as much as one it could, or every launch would re-open it.
 	pub fn duration(&self, path: &Path, stamp: Stamp) -> Option<Option<Duration>> {
