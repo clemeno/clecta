@@ -75,6 +75,15 @@ const WATCH_SETTLE: Duration = Duration::from_millis(500);
 const AUTOSCROLL: Duration = Duration::from_millis(30);
 const AUTOSCROLL_STEP: f32 = 8.0;
 
+/// How long a released click's collapse waits before it fires (PLAN §9a, Q50).
+///
+/// Just past iced's double-click window — 300 ms and six pixels, `mouse::Click` in
+/// `iced_core` — because the release that owes the collapse may be the first half of a
+/// double click whose load acts on the whole selection, and that message only arrives
+/// with the second press. `ponytail:` the coupling is by value, not by name; if iced ever
+/// exposes its click interval, this should read it instead.
+const COLLAPSE_AFTER: Duration = Duration::from_millis(350);
+
 /// Width of the files pane, as a fraction. The *height* of the top section is not a
 /// fraction at all — see `Clecta::view` (PLAN §6).
 const TREE_RATIO: f32 = 0.68;
@@ -449,6 +458,8 @@ pub enum Message {
 	DragOut(Zone),
 	/// The left button came up, wherever it is. The end of any in-app drag.
 	DragReleased,
+	/// The double-click window closed on a released click that still owes a collapse (Q50).
+	CollapseDue,
 }
 
 pub struct Clecta {
@@ -551,6 +562,25 @@ pub struct Clecta {
 	/// The tempo editor, while it is open. Never both this and `menu`: opening the editor is
 	/// what closes the menu, so the two are one overlay and one Escape.
 	correcting: Option<TempoCorrection>,
+	/// Armed by a deferring press (`Click::defers`), spent by the release it belongs to.
+	collapse: Option<Pressed>,
+	/// What that release left to do, waiting out the double-click window (Q50). Anything that
+	/// acts on the selection in the meantime — another press, a double click's load, ⌘A,
+	/// Escape — cancels it, so a stale click can never fire under a newer gesture.
+	pending: Option<Pressed>,
+}
+
+/// A plain press on an already-selected row, remembered so the release can finish it.
+///
+/// The press itself must leave the selection alone — it is arming a drag that may want to
+/// carry all of it (PLAN §9a) — so collapsing to one row is deferred twice: to the release,
+/// and past it to `COLLAPSE_AFTER`, because the release may open a double click (Q50).
+#[derive(Debug, Clone)]
+enum Pressed {
+	/// A files-pane row, by path, because a refresh renumbers rows underneath it (PLAN §9).
+	Row(PathBuf),
+	/// A queue row, by queue and index, like every other queue message (PLAN §7a).
+	Queue(QueueId, usize),
 }
 
 /// Which row was right-clicked, and everything the menu over it needs to know.
@@ -652,6 +682,8 @@ impl Clecta {
 			tempos: settings.tempos,
 			menu: None,
 			correcting: None,
+			collapse: None,
+			pending: None,
 		};
 		app.apply_gains();
 
@@ -791,6 +823,15 @@ impl Clecta {
 			Subscription::none()
 		};
 
+		// The collapse a released click still owes (PLAN §9a, Q50), once the double-click
+		// window has passed. Ticks only while one is actually pending — and that is at most
+		// one tick, because the arm below takes the pending state that gates this.
+		let collapse = if self.pending.is_some() {
+			time::every(COLLAPSE_AFTER).map(|_| Message::CollapseDue)
+		} else {
+			Subscription::none()
+		};
+
 		Subscription::batch([
 			tick,
 			autosave,
@@ -799,6 +840,7 @@ impl Clecta {
 			watcher,
 			settle,
 			scrolling,
+			collapse,
 			keyboard(),
 			window::resize_events().map(|(_, size)| Message::WindowResized(size)),
 			window::close_requests().map(|_| Message::CloseRequested),
@@ -832,6 +874,11 @@ impl Clecta {
 			// deselected it — and a gesture that names a file should still do something with
 			// that file.
 			Message::LoadUnaimed(path) => {
+				// The double click claims the press: this load acts on the whole selection,
+				// so the collapse the first click deferred must not fire after it (Q50).
+				self.collapse = None;
+				self.pending = None;
+
 				let id = deck::idle_target(&self.decks[0], &self.decks[1]);
 				let batch = if self.browser.is_selected(&path) {
 					self.browser.selected_media()
@@ -842,6 +889,10 @@ impl Clecta {
 			}
 
 			Message::RowSelected(path) => {
+				// A press is the start of a new gesture, so a collapse an older click still
+				// owes is abandoned rather than allowed to fire under this one (Q50).
+				self.pending = None;
+
 				// The press both moves the selection and arms a drag with it. A release that
 				// is not over a player disarms it and nothing else happens — which is
 				// exactly what a plain click is (PLAN §10).
@@ -849,9 +900,14 @@ impl Clecta {
 				// **A plain press on a row that is already selected leaves the selection
 				// alone**, which is what makes a multi-row drag possible at all: collapsing to
 				// one row here would destroy the very selection the drag is about to carry
-				// (PLAN §9a).
-				if !(self.browser.is_selected(&path) && self.click_kind() == Click::Replace) {
-					self.browser.click(&path, self.click_kind());
+				// (PLAN §9a). The release finishes what the press deferred, once nothing
+				// else claims the click (Q50).
+				let kind = self.click_kind();
+				if kind.defers(self.browser.is_selected(&path)) {
+					self.collapse = Some(Pressed::Row(path.clone()));
+				} else {
+					self.browser.click(&path, kind);
+					self.collapse = None;
 				}
 
 				// From the pane, so a drop *copies*: the files stay in the folder.
@@ -866,12 +922,18 @@ impl Clecta {
 
 			Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
 
-			Message::SelectAll => self.browser.select_all(),
+			Message::SelectAll => {
+				// "All" must not narrow to one a third of a second later (Q50).
+				self.pending = None;
+				self.browser.select_all();
+			}
 
 			// Escape closes whatever is over the window first, and only clears the selection when
 			// there is nothing over it: "never mind" means the most recent thing, which is the
 			// panel the user is looking at.
 			Message::SelectionCleared => {
+				// Escape is "never mind", and that includes the collapse a click still owes.
+				self.pending = None;
 				if self.menu.take().is_none() && self.correcting.take().is_none() {
 					self.browser.clear_selection();
 				}
@@ -994,15 +1056,22 @@ impl Clecta {
 			Message::FolderTouched => self.stale = true,
 
 			Message::QueueSelected(id, index) => {
+				// Abandoned on a new press, exactly as in the files pane (Q50).
+				self.pending = None;
+
 				// The press both moves the selection and arms a drag with it, exactly as a
 				// press in the files pane does (PLAN §10, §9a) — and for the same reason:
 				// there is no separate gesture to start a drag with, so the press has to do
 				// both jobs, and a plain press on an already-selected row leaves the selection
-				// alone so that a multi-row drag has something to carry.
+				// alone so that a multi-row drag has something to carry. The release finishes
+				// what the press deferred, once nothing else claims the click (Q50).
 				let kind = self.click_kind();
 				let queue = self.queues.get_mut(id);
-				if !(queue.is_selected(index) && kind == Click::Replace) {
+				if kind.defers(queue.is_selected(index)) {
+					self.collapse = Some(Pressed::Queue(id, index));
+				} else {
 					queue.click(index, kind);
+					self.collapse = None;
 				}
 
 				let queue = self.queues.get(id);
@@ -1019,6 +1088,12 @@ impl Clecta {
 			// takes them with it, exactly as a drag onto a player does and as the handover
 			// itself does: the queue is what is still to come.
 			Message::QueueLoad(queue, index) => {
+				// The double click claims the press, exactly as in the files pane (Q50) —
+				// and here the rows leave the queue, so a collapse held back by the timer
+				// would land on an index that no longer names them.
+				self.collapse = None;
+				self.pending = None;
+
 				// A cue plays on the player it belongs to; the shared queue has no player of its
 				// own, so it uses the same "whichever is free" rule an unaimed drop does.
 				let id = match queue {
@@ -1336,9 +1411,14 @@ impl Clecta {
 				// ever (PLAN §7a).
 				self.autoscroll = None;
 				let target = self.hover.take();
+				// What the press deferred, if anything. Taken before the drag's early return,
+				// because a press on an already-selected row that is not media arms no drag —
+				// and its release is still a plain click that finishes the deferral (Q50).
+				let collapse = self.collapse.take();
 				// Disarmed on every release, whatever it was over, so nothing is left
 				// armed behind a drag the user thought better of.
 				let Some(drag) = self.drag.take() else {
+					self.pending = collapse;
 					return Task::none();
 				};
 
@@ -1361,9 +1441,29 @@ impl Clecta {
 						self.drop_into(queue, index, drag);
 						return self.queued();
 					}
-					// A drag that landed on nothing is a plain click, and a click has already
-					// done its work: the press selected the row.
-					None => {}
+					// A drag that landed on nothing is a plain click. The press selected the
+					// row — unless it deferred (PLAN §9a), in which case the collapse now
+					// waits out the double-click window rather than firing here: the load a
+					// double click sends acts on the whole selection, and its message only
+					// arrives with the second press (Q50).
+					None => self.pending = collapse,
+				}
+			}
+
+			Message::CollapseDue => {
+				// A delayed plain click, and exactly that — every path that reshapes the
+				// selection in the meantime has already cancelled it.
+				match self.pending.take() {
+					Some(Pressed::Row(path)) => self.browser.click(&path, Click::Replace),
+					// Guarded, because a queue can shrink between the release and the timer:
+					// a handover takes the top row on its own clock, and clicking an index
+					// past the end would select a row that is not there (PLAN §7a).
+					Some(Pressed::Queue(id, index))
+						if index < self.queues.get(id).items().len() =>
+					{
+						self.queues.get_mut(id).click(index, Click::Replace);
+					}
+					_ => {}
 				}
 			}
 

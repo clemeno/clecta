@@ -88,7 +88,9 @@ cargo build --release --target x86_64-apple-darwin
   stop the player early (PLAN §7b, §14c).
 - **Select as many rows as you like.** Click to select, ⌘/Ctrl-click to add or remove one,
   Shift-click for everything in between, ⌘A for every row the pane is showing, Escape for none
-  — in the files pane and in all three queues. Everything that worked on one file works on the
+  — in the files pane and in all three queues. Clicking a selected row narrows the selection
+  to it on release, file-manager style — after a beat, because the click might still turn out
+  to be a drag or a double click, both of which carry the whole selection (PLAN §9a). Everything that worked on one file works on the
   selection, **top to bottom**: **→ Player 1** plays the first and puts the rest at the top of
   that player's cue, **⤒ ⤓** queue all of them in order, a drag carries the lot, and
   **✕ ▲ ▼ ← →** act on every selected row. Queueing a batch where some tracks are already
@@ -431,6 +433,11 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   files pane *and* in every queue holding that file at once, that it survives a relaunch and a
   **Clear cache**, and that **Clear tempo corrections** asks first and puts every detected number back
   (PLAN §14d).
+
+- **Narrowing a selection.** *Not checked yet.* The rule (`Click::defers`) is tested and the
+  timing is not: that clicking one row of five narrows to it a beat later, that dragging the
+  five to a queue does **not** narrow them, that double-clicking one still loads all five, and
+  that ⌘A or Escape inside the beat wins over the pending collapse (PLAN §9a, Q50).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.

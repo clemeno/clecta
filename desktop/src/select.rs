@@ -39,6 +39,18 @@ impl Click {
 			Click::Replace
 		}
 	}
+
+	/// Whether a press leaves the selection alone until its release.
+	///
+	/// A plain press on a row that is already selected must not collapse the selection — it
+	/// is arming a drag that may want to carry all of it (PLAN §9a). If nothing else claims
+	/// the click, the release finishes the job the press deferred, which is
+	/// collapse-on-release (Q50). Both panes ask this same question, at the press and again
+	/// at the release, which is why it has a name instead of being the same two conditions
+	/// written four times.
+	pub fn defers(self, already_selected: bool) -> bool {
+		already_selected && self == Click::Replace
+	}
 }
 
 /// The rows between two, in order, whichever way round they were clicked.
@@ -66,6 +78,20 @@ mod tests {
 		// Shift-click, and the wrong answer there scatters a selection rather than extending
 		// it — which takes a lot of clicks to put back.
 		assert_eq!(Click::of(true, true), Click::Range, "shift wins");
+	}
+
+	#[test]
+	fn only_a_plain_press_on_a_selected_row_defers() {
+		// Arrange / Act / Assert: deferring exists for the drag's sake, so it is exactly the
+		// press that would otherwise destroy what the drag is about to carry — a plain press
+		// on a selected row — and nothing else (PLAN §9a, Q50).
+		assert!(Click::Replace.defers(true));
+		assert!(
+			!Click::Replace.defers(false),
+			"an unselected row is a plain click"
+		);
+		assert!(!Click::Toggle.defers(true), "a toggle acts on the press");
+		assert!(!Click::Range.defers(true), "a range acts on the press");
 	}
 
 	#[test]

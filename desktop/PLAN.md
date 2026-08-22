@@ -1231,11 +1231,21 @@ the drag (§10). That collides with multi-select immediately: collapsing to one 
 press would destroy the selection the drag is about to carry. So **a plain press on a row that
 is already selected leaves the selection alone**, and the drag picks up all of it.
 
-`ponytail:` the other half of that trade is missing — in a file manager, a plain press on a
-selected row collapses the selection *on release*, once it is clear no drag happened. Here it
-does not collapse at all, so narrowing five rows to one means clicking a different row first,
-or Escape. The fix is one remembered path and a branch in the release arm, and it is worth
-writing the day that feels wrong rather than now.
+The other half of that trade is the release: in a file manager, a plain press on a selected
+row collapses the selection once it is clear no drag happened — and now it does here too
+(Q50). The press remembers the row it deferred on (`Click::defers`, the same test both press
+arms already made inline), and the release turns that memory into a plain click. Two things
+claim the click first and cancel it. A drag that lands on a target takes the collapse with
+it, because releasing a carried selection must not also narrow it. And a **double click**
+acts on the whole selection (the table below) but arrives *after* its first click's release —
+so the release does not collapse either; it leaves the job pending, and a timer fires it once
+the double-click window (300 ms and six pixels, in iced's `mouse::Click`) has passed with
+nothing else claiming the press. Anything that acts on the selection in the meantime — a new
+press, the double click's load, ⌘A, Escape — cancels the pending collapse rather than letting
+a stale click fire under a newer gesture. The timer is the price every file manager pays for
+the same promise: the visible narrowing lags the click by the double-click interval. It is
+also why Q33's estimate of "one remembered path and a branch" was short by exactly one
+timer — the branch was free, the double click was not.
 
 ### What each door now means
 
@@ -1940,7 +1950,10 @@ otherwise pure; anything needing a device or a real folder is manual.
 - **`select.rs`** — the click rule (§9a), which is four lines and two of them are wrong in a
   way nobody notices until a set is half selected: which of the three a press is, including
   **shift winning over the command key** when both are held, and a range that is inclusive at
-  both ends and does not care which way it was dragged.
+  both ends and does not care which way it was dragged. `defers` gets its own: exactly the
+  press that would destroy what a drag is about to carry — plain, on a selected row — and
+  nothing else, because both press arms and the release ask it (Q50) and an inline condition
+  asked four times is the pair that drifts.
 - **`browser.rs`** — extension → category (audio / video / other), the natural-numeric
   sort, the hidden filter. Then the selection (§9a): a plain click replacing, a command click
   adding *and* taking away, a shift-click that can be adjusted by shift-clicking again, and a
@@ -3037,6 +3050,7 @@ change rather than an argument with §11a's first sentence.
 | Q47 | Where the rules about the *set* of three queues live | **In `queues.rs`, with the queues.** Thirteen messages, twelve `update` arms and three `Clecta` fields described one thing that had no module: an array of three queues, an array of three scroll offsets and a set of paths in flight, all indexed by `QueueId::index()` on every queue arm — 42 of those lookups in `app.rs` alone, five of them inside `QueueShift`. The tell was already in `queue.rs`, which had grown three free functions taking `&[Queue; 3]`: a type with no name doing a job with no home. So `Queue` is now one queue and `Queues` is the set, and the split is not arbitrary — a duplicate is a duplicate if *any* of the three holds it, a file is measured once however many rows hold it, and the next track comes from a player's own cue *or* the shared pool. None of those is a question a single queue can answer. `QueueId` moved with them, and `index()` stayed public for one caller: the view, whose three `scrollable` ids are a `[&'static str; 3]` because iced wants a `&'static str`. `update` no longer uses it at all. Two smaller things fell out: asking what needs measuring and recording it as in flight became **one** call (`take_unmeasured`) rather than two lines beside each other, which is the pair that goes wrong the day they stop being beside each other; and the queue scroll offsets left `Clecta` for the module that owns the queues, which is where the files pane has always kept its own | §7a, §9, §5 |
 | Q48 | Where the pure transport decision meets the audio | **In `Deck`, once — `moved`, `seek`, `ended` — with the engine passed in as the `Option` it already was.** `transition` was pure and well tested and `Engine` was untestable, and the app was re-pairing the two by hand in four places: `transport`, both legs of `poll_players`, and `seek_to`. Four pairings drifted, as four of anything does. The playhead was zeroed in three of them and not the fourth; the notice line was formatted in five places with one near-miss; and `seek_to` wrote `Stopped → Paused` straight into the field, inventing a transport edge the state machine had never heard of and nothing could test. All of it is now one method each, and `update` calls one line per gesture. The engine is `&Option<Engine>` rather than a trait, because the `Option` is not a testing device — the app really does run with no output device (§11) — and passing `None` leaves exactly the state machine, which is the second adapter the seam needed without inventing one. `deck.rs` names `audio::Engine` and still names no rodio type, so the seam §4 cares about is where it was | §7, §7b, §14b, §11, §12 |
 | Q49 | Where the product's words are defined | **A root `CONTEXT.md`, one entry per word, opinionated.** Four words — playlist, list, queue, cue — were naming three objects, and "transition" was naming a transport change, the handover and the handover point all at once; a glossary that picks one word per thing is what turns the next rename from a taste argument into a bug report. The split of authority is in `docs/agents/domain.md`: this plan wins on decisions, the glossary wins on vocabulary, and a term defined in both places is a bug here. The plan's prose was swept to obey it, and the code follows in the renames the glossary demanded — `Queue` → `Queue`, `Transition` → `Handover`, `edited` → `corrected` — each with its `settings.json` key pinned by serde so no saved setting resets | CONTEXT.md, §7a, §7b, §14d |
+| Q50 | Whether a release may collapse a selection after all | **Yes — on a timer, and the timer is the decision.** Q33 declined to collapse on the *press* (it would destroy the selection a drag was about to carry) and priced the release at one remembered path and a branch. Building it found the price wrong: a double click acts on the whole selection (§9a) but its message arrives *after* the first click's release, so a release that collapsed immediately would narrow five rows to one and then load one. No message tells the two apart — only time does, which is how every file manager answers the same question. So the release leaves the collapse *pending* and a subscription fires it after `COLLAPSE_AFTER` (350 ms, just past iced's 300 ms double-click window — a coupling by value, marked in the constant); any gesture that acts on the selection first — a new press, the double click's load, ⌘A, Escape — cancels it. The pane remembers the row by path and a queue by index, for the reasons their selections already differ (§9a), and the queue's delayed click is guarded against a queue that shrank in the meantime — a handover takes the top row on its own clock | §9a, §10, §7a |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
