@@ -30,7 +30,7 @@ use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
 use crate::mixer::{self, Curve};
-use crate::queue::{self, Handover, Queue};
+use crate::queue::{self, Handover};
 use crate::queues::{QueueId, Queues};
 use crate::select::Click;
 use crate::settings::Settings;
@@ -653,21 +653,6 @@ impl Clecta {
 			deck.fader = fader;
 		}
 
-		// The three queues, each with its own two switches (PLAN §7a). Built here rather than
-		// inside the struct below because a restored queue is its paths *and* its switches, and
-		// the switches are stored in draw order while the paths are not — `cues` is per player
-		// and has no slot for the shared queue.
-		let mut queues = [
-			Queue::from_paths(settings.cues[0].clone()),
-			Queue::from_paths(settings.shared.clone()),
-			Queue::from_paths(settings.cues[1].clone()),
-		];
-		for (index, queue) in queues.iter_mut().enumerate() {
-			queue.auto_load = settings.auto_load[index];
-			queue.auto_play = settings.auto_play[index];
-			queue.handover = settings.handover[index];
-		}
-
 		let mut app = Self {
 			engine,
 			decks,
@@ -687,7 +672,8 @@ impl Clecta {
 			notice,
 			dirty: false,
 			stale: false,
-			queues: Queues::restored(queues),
+			// The zip between the file's two orderings is the file's own business (Q55).
+			queues: Queues::restored(settings.queues()),
 			autoscroll: None,
 			// Opened here rather than lazily, for the same reason `Settings::load` is read
 			// before the window exists: it is one small file, once, and everything after it
@@ -732,25 +718,20 @@ impl Clecta {
 
 	/// The state worth keeping, gathered for the one write at exit (PLAN §11).
 	fn settings(&self) -> Settings {
-		Settings {
+		let mut settings = Settings {
 			curve: self.curve,
 			faders: [self.decks[0].fader, self.decks[1].fader],
 			crossfader: self.crossfader,
 			folder: self.browser.folder.clone(),
 			window: self.window,
 			decks_height: self.decks_height,
-			cues: [
-				self.queues.get(QueueId::Cue(DeckId::One)).paths(),
-				self.queues.get(QueueId::Cue(DeckId::Two)).paths(),
-			],
-			shared: self.queues.get(QueueId::Shared).paths(),
-			// In draw order, which is the order the queues are stored in here — unlike `cues`
-			// above, which is per player.
-			auto_load: QueueId::ALL.map(|id| self.queues.get(id).auto_load),
-			auto_play: QueueId::ALL.map(|id| self.queues.get(id).auto_play),
-			handover: QueueId::ALL.map(|id| self.queues.get(id).handover),
 			tempos: self.tempos.clone(),
-		}
+			// The queue fields, filled in below: the zip into the file's two orderings sits
+			// beside the fields that define them (Q55).
+			..Settings::default()
+		};
+		settings.record_queues(&self.queues);
+		settings
 	}
 
 	/// The window title. Shows the loaded tracks once there are any, so the app is

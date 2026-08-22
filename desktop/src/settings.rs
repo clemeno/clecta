@@ -15,9 +15,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::app::MIN_PANE;
+use crate::deck::DeckId;
 use crate::mixer::Curve;
 use crate::paths;
-use crate::queue::Handover;
+use crate::queue::{Handover, Queue};
+use crate::queues::{QueueId, Queues};
 
 const FILE: &str = "settings.json";
 
@@ -128,6 +130,38 @@ impl Default for Settings {
 }
 
 impl Settings {
+	/// The three queues this file restores, in draw order — the one place its two orderings
+	/// meet. `cues` is per player and has no slot for the shared queue, while the three switch
+	/// arrays are per drawn queue (PLAN §7a); zipping them used to be `boot`'s job, done index
+	/// by index, and a swapped index there was silent — nothing checked that Cue 2's paths got
+	/// Cue 2's switches.
+	pub fn queues(&self) -> [Queue; 3] {
+		let mut queues = [
+			Queue::from_paths(self.cues[0].clone()),
+			Queue::from_paths(self.shared.clone()),
+			Queue::from_paths(self.cues[1].clone()),
+		];
+		for (index, queue) in queues.iter_mut().enumerate() {
+			queue.auto_load = self.auto_load[index];
+			queue.auto_play = self.auto_play[index];
+			queue.handover = self.handover[index];
+		}
+		queues
+	}
+
+	/// The same three queues written back into the file's two orderings — the inverse of
+	/// `queues`, kept beside it and beside the serde pins so the three cannot drift apart.
+	pub fn record_queues(&mut self, queues: &Queues) {
+		self.cues = [
+			queues.get(QueueId::Cue(DeckId::One)).paths(),
+			queues.get(QueueId::Cue(DeckId::Two)).paths(),
+		];
+		self.shared = queues.get(QueueId::Shared).paths();
+		self.auto_load = QueueId::ALL.map(|id| queues.get(id).auto_load);
+		self.auto_play = QueueId::ALL.map(|id| queues.get(id).auto_play);
+		self.handover = QueueId::ALL.map(|id| queues.get(id).handover);
+	}
+
 	/// Read the settings file, or return defaults.
 	pub fn load() -> Self {
 		let path = paths::data_dir().join(FILE);
@@ -272,6 +306,29 @@ mod tests {
 			handover: [Handover::Trimmed, Handover::Whole, Handover::Trimmed],
 			tempos: BTreeMap::from([(queued("clecta-corrected.mp3"), 128.5)]),
 		}
+	}
+
+	#[test]
+	fn the_files_two_orderings_zip_back_into_the_queues_they_came_from() {
+		// Arrange: three queues that are all different — distinct paths and a distinct switch
+		// pattern each, so a swapped index anywhere shows up as a mismatch.
+		let mut one = Queue::from_paths(vec![PathBuf::from("/m/one.mp3")]);
+		one.auto_load = false;
+		one.handover = Handover::Trimmed;
+		let mut shared = Queue::from_paths(vec![PathBuf::from("/m/shared.mp3")]);
+		shared.auto_play = true;
+		let two = Queue::from_paths(vec![PathBuf::from("/m/two.mp3")]);
+		let queues = Queues::restored([one.clone(), shared.clone(), two.clone()]);
+
+		// Act: into the file's two orderings and back out.
+		let mut settings = Settings::default();
+		settings.record_queues(&queues);
+		let restored = settings.queues();
+
+		// Assert: each queue keeps its own paths *and* its own switches. The paths are stored
+		// per player and the switches per drawn queue, and a swapped index between those two
+		// orderings was silent until this test.
+		assert_eq!(restored, [one, shared, two]);
 	}
 
 	#[test]
