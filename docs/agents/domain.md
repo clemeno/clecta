@@ -5,10 +5,11 @@ How the engineering skills should consume this repo's domain documentation when 
 ## Before exploring, read these
 
 - **`desktop/PLAN.md`** — the standing design record. It predates this file, it is written to explain
-  *why* every choice was made, and its §15 is the decision log (Q1…). It is the closest thing this
-  repo has to a `CONTEXT.md`, and it wins over anything below when they disagree.
+  *why* every choice was made, and its §15 is the decision log (Q1…). It wins on **decisions**.
+- **`CONTEXT.md`** at the repo root — the product glossary. It wins on **vocabulary**: which word
+  names which concept, and which synonyms are retired. A term defined in both places is a bug in
+  `PLAN.md`; the plan keeps its *reasoning* and points here for the *word*.
 - **`desktop/README.md`** — the feature list, the per-module test table and the manual-check list.
-- **`CONTEXT.md`** at the repo root, if it ever exists.
 - **`docs/adr/`** — read ADRs that touch the area you're about to work in.
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
@@ -20,6 +21,7 @@ Single-context. One crate, rooted at `desktop/`, not at the repo root:
 ```
 /
 ├── AGENTS.md
+├── CONTEXT.md                         ← the product glossary (vocabulary wins here)
 ├── docs/
 │   ├── agents/                        ← this file, and the tracker + label config
 │   └── adr/                           ← if and when a decision needs one
@@ -36,11 +38,11 @@ already the place the maintainer reads and the place every `ponytail:` comment p
 Reach for `docs/adr/` only for a decision `PLAN.md` has no section for: repo-level process, tooling,
 release policy, or anything that outlives the crate.
 
-## Use the plan's vocabulary
+## Use the glossary's vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as `PLAN.md` uses it — *deck*, *queue*, *scan*, *trim*, *prepared*, and so on. Don't drift to synonyms.
+When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as `CONTEXT.md` defines it — *deck*, *queue*, *scan*, *trim*, *prepared*, and so on. Its `_Avoid_` lines are rulings, not suggestions: *playlist*, *list* (as the name of a queue) and *transition* (as the name of a handover) are retired.
 
-If the concept you need isn't in `PLAN.md` yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+If the concept you need isn't in `CONTEXT.md` yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
 
 ## Flag conflicts
 

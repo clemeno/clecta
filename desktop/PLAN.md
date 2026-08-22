@@ -16,6 +16,9 @@ code is meant to be read as much as run, so this plan is didactic — it explain
 each choice was made, and every deliberate shortcut carries a `ponytail:` note so
 "simple" reads as intent, not ignorance.
 
+The product's **vocabulary** lives in [`../CONTEXT.md`](../CONTEXT.md): this plan wins on
+decisions, that file wins on words, and a term defined in both places is a bug here (Q49).
+
 Status: **v0.1 complete, and the first piece of v2 landed.** Two players with a working
 transport, the mixer strip, the browser (files pane + folder tree), portable persistence,
 both drop gestures, `bundle-macos.sh` (§11) and the CI workflow with its supply-chain gate
@@ -227,7 +230,7 @@ clecta/
         │                Q46). The strip's pixel geometry lives with the widget, not here
         └── ui/
             ├── mod.rs       what more than one pane shares: the formatting helpers, the row
-            │                window, and the selected-row fill all three lists are drawn with
+            │                window, and the selected-row fill all three queues are drawn with
             ├── deck.rs      one player's panel: title, transport buttons, time, drop ring
             ├── mixer.rs     the two faders and the crossfader
             ├── playlist.rs  one queue's panel: add, select, reorder, send to a neighbour, the two switches (§7a)
@@ -502,7 +505,7 @@ Two things the docs did not mention, both found by running it rather than readin
 
 ## 7a. The queues (`playlist.rs`, `ui/playlist.rs`)
 
-Three lists, drawn as a second row inside the players panel: **Cue 1** under Player 1, **Cue
+Three queues, drawn as a second row inside the players panel: **Cue 1** under Player 1, **Cue
 2** under Player 2, and **Next up** under the mixer, shared between them.
 
 ### rodio's queue is the wrong queue
@@ -530,29 +533,29 @@ time, which is the arrangement everything else in §7 was built on.
 ### One rule for when a queue is read
 
 **A track ending is the only event that pulls from a queue.** Not a player sitting empty at
-startup, not a file being added to a list, not a load that failed. That is what makes every
-automatic load traceable to a track the user heard end, and it means adding files to a list
+startup, not a file being added to a queue, not a load that failed. That is what makes every
+automatic load traceable to a track the user heard end, and it means adding files to a queue
 never causes a sound.
 
 When a player's track ends, `next_source` decides where the replacement comes from: **its own
-cue first, the shared list second.** A track deliberately cued to Player 1 outranks the pool,
+cue first, the shared queue second.** A track deliberately cued to Player 1 outranks the pool,
 which is what makes the pool "whatever is free" rather than a third queue with rules of its
-own. Both empty, and the player just stops, as it always did — and a list whose **Auto-load**
+own. Both empty, and the player just stops, as it always did — and a queue whose **Auto-load**
 is switched off counts as having nothing to offer, however full it is (below).
 
 The new track **lands on `Stopped`**, like every other load (§7). It is ready at 0:00 with its
 waveform scanning, and audible only when someone presses Play. On a mixer an unrequested
 fade-in is a mistake that cannot be taken back, and §7's "a successful load always lands on
-Stopped" did not need an exception carved into it — a list told to start its tracks presses
+Stopped" did not need an exception carved into it — a queue told to start its tracks presses
 Play *afterwards*, which is a second event and not a fourth kind of load.
 
-The track is *taken* out of the list rather than marked as played: a queue is what is still to
-come, so the row leaving as it reaches the player is what makes the list mean that.
+The track is *taken* out of the queue rather than marked as played: a queue is what is still to
+come, so the row leaving as it reaches the player is what makes the queue mean that.
 
-### The two switches, and why they are per list
+### The two switches, and why they are per queue
 
 Both paragraphs above describe a policy, and a policy the whole app is in is a policy that is
-wrong for someone. So each list carries **Auto-load** and **Auto-play**: whether it hands its
+wrong for someone. So each queue carries **Auto-load** and **Auto-play**: whether it hands its
 top track over when a player runs out, and whether that track then starts by itself. They ship
 on and off respectively, which is exactly what the app did before they existed.
 
@@ -560,16 +563,16 @@ Two switches rather than one three-way setting, because they answer two question
 **middle position is the useful one**: load without playing is the default above, and a single
 toggle would offer only the two ends of the range.
 
-Per *list* rather than per player, which is what makes them worth having. Cue 1 can run the
+Per *queue* rather than per player, which is what makes them worth having. Cue 1 can run the
 evening by itself while **Next up** sits there as a shelf someone takes from by hand — one
 setting each, rather than a mode the whole app is in. It also means the switches that decide
-whether a track plays belong to **the list that gave it**, not to the player that received it,
+whether a track plays belong to **the queue that gave it**, not to the player that received it,
 which is the rule `advance` reads them by.
 
-A list with **Auto-load** off is *skipped*, not blocking: `next_source` passes over it and asks
-the next one, so switching a cue off still lets the shared list feed that player. The switch
-belongs to one list and says nothing about the other. Switch every list off and the player
-simply stops with full lists in front of it, which is what switching every list off asks for.
+A queue with **Auto-load** off is *skipped*, not blocking: `next_source` passes over it and asks
+the next one, so switching a cue off still lets the shared queue feed that player. The switch
+belongs to one queue and says nothing about the other. Switch every queue off and the player
+simply stops with full queues in front of it, which is what switching every queue off asks for.
 
 Two rules keep the automatic start honest:
 
@@ -588,7 +591,7 @@ through `queued`, because nothing was added and there is nothing new to measure.
 ### The selection is the hard part
 
 Everything in `playlist.rs` is `Vec` arithmetic, and all of it exists to answer one question:
-**what happens to the highlighted row when the list moves under it?** A row that stays
+**what happens to the highlighted row when the queue moves under it?** A row that stays
 highlighted while a different track slides beneath it is worse than no highlight at all — the
 next button press then acts on something the user did not point at.
 
@@ -600,7 +603,7 @@ queue may hold the same track twice and a path does not name a row — and every
 - removing the selected row leaves the highlight on **the row that slid into its place**, so
   pressing remove three times removes three consecutive rows rather than needing a re-aim
   after each;
-- removing the last row falls back to the new last row, and an empty list selects nothing;
+- removing the last row falls back to the new last row, and an empty queue selects nothing;
 - `shift` swaps two rows **and follows whichever of them was selected** — the one a
   swap-only implementation gets wrong.
 
@@ -611,16 +614,16 @@ the selection was left pointing at a track that was gone. Written out longhand i
 
 ### What the buttons are
 
-Per list: **⤒** and **⤓** add the files pane's selection to the top or the end. They live on
-each list rather than in the browser's header because there are three lists and two ways in:
-six buttons in one header would each need a label saying which list they meant, where a button
-sitting *on* a list needs none.
+Per queue: **⤒** and **⤓** add the files pane's selection to the top or the end. They live on
+each queue rather than in the browser's header because there are three queues and two ways in:
+six buttons in one header would each need a label saying which queue they meant, where a button
+sitting *on* a queue needs none.
 
-**✕** removes the selected row, **▲ ▼** move it, and **← →** send it to the neighbouring list,
-appended. The arrows sit at the outer edges of each list's footer, facing the list they send
-to, so the pair either side of a gap reads as one control *between* two lists. Neighbours
-only: Cue 1 and Cue 2 are not adjacent, so a track cannot be thrown across the shared list
-without stopping there — which is the point of the middle list being in the middle.
+**✕** removes the selected row, **▲ ▼** move it, and **← →** send it to the neighbouring queue,
+appended. The arrows sit at the outer edges of each queue's footer, facing the queue they send
+to, so the pair either side of a gap reads as one control *between* two queues. Neighbours
+only: Cue 1 and Cue 2 are not adjacent, so a track cannot be thrown across the shared queue
+without stopping there — which is the point of the middle queue being in the middle.
 
 Every button is **dead rather than absent** when it cannot act, and dead for a specific
 reason each time: nothing selected, already at the top, already at the bottom, no neighbour in
@@ -628,32 +631,32 @@ that direction, nothing addable selected in the browser.
 
 ### Queueing a track that is already queued
 
-Adding a track that is already in a list **asks**, with a native OK / Cancel dialog naming
+Adding a track that is already in a queue **asks**, with a native OK / Cancel dialog naming
 where it already is. Not a refusal: playing something twice in a set is a thing people do, and
 so is adding it twice by accident, and nothing in the app can tell those apart. A silent
 refusal would be the app deciding on the user's behalf; the silent accept it replaces is what
 left the mistake possible in the first place. Asking is the only honest option, and it costs
 one click in the case that was already deliberate.
 
-**All three lists are searched, not just the one being added to.** The mistake worth catching
+**All three queues are searched, not just the one being added to.** The mistake worth catching
 is a track that plays twice in an evening, and Cue 1 and Cue 2 each holding it does that
-exactly as surely as one list holding it twice — the duplicate is in the *set*, not in a list.
+exactly as surely as one queue holding it twice — the duplicate is in the *set*, not in a queue.
 That is also why the message names where it already is rather than only saying that it is.
 
 Four ways in are checked and two are not, and the two say what the rule is: `⤒` / `⤓`, a drop
-from the files pane, a drop from another list, and `← →` all put a track somewhere it was not.
-A **reorder** inside one list and a **drag onto a player** cannot produce a duplicate, so
+from the files pane, a drop from another queue, and `← →` all put a track somewhere it was not.
+A **reorder** inside one queue and a **drag onto a player** cannot produce a duplicate, so
 neither asks.
 
 Two details are load-bearing:
 
-- **A row on its way out is not its own duplicate.** A cross-list move — dragged, or sent with
-  `← →` — finds the row in the list it is leaving. `already_queued` takes the row being moved
-  and skips it, or every single cross-list move would ask a question with one honest answer.
+- **A row on its way out is not its own duplicate.** A cross-queue move — dragged, or sent with
+  `← →` — finds the row in the queue it is leaving. `already_queued` takes the row being moved
+  and skips it, or every single cross-queue move would ask a question with one honest answer.
   The exception is the *row*, not the track: a second copy somewhere else still counts.
 - **Nothing is touched before the answer.** `← →` used to take the row out and then append it;
   it now looks at the selected row, asks, and only then takes it, because a cancelled warning
-  has to leave the list exactly as it was — and putting a row back afterwards would mean
+  has to leave the queue exactly as it was — and putting a row back afterwards would mean
   rebuilding the selection that came out with it.
 
 `ponytail:` a native modal blocks the GUI thread while it is open, so the playhead stops with
@@ -682,19 +685,19 @@ they are (Q38).
 ### Playing a queued track now
 
 A **double click** on a queued row loads it into a player immediately, taking it out of the
-list as it goes. It is the third way a track leaves a queue, and the three agree: a drag onto
+queue as it goes. It is the third way a track leaves a queue, and the three agree: a drag onto
 a player, a double click, and the handover at the end of a track all *take* the row, because a
 queue is what is still to come and a track that has reached a player is no longer that.
 
 Which player is the only decision in it, and it is already made elsewhere: a **cue** plays on
-the player it sits under, because that is what a cue means. The **shared** list has no player
+the player it sits under, because that is what a cue means. The **shared** queue has no player
 of its own, so it uses `deck::idle_target` — the same "whichever is free" rule an unaimed OS
 drop uses (§10), and the same rule the automatic handover would have applied a minute later.
 
 Double click rather than a fifth button in the footer, for two reasons and neither is space:
 the files pane already loads on a double click (§9), so the gesture is the one the app has
 already taught; and a footer button would need the same five-way disabled logic as the rest,
-where a double click on an empty list is a double click on nothing.
+where a double click on an empty queue is a double click on nothing.
 
 The press that opens a double click has already armed a drag (§10), and the row it is carrying
 is about to be removed — so the load **disarms it explicitly** rather than letting the release
@@ -702,41 +705,41 @@ find a row that is no longer there.
 
 ### Dragging
 
-A drag can now start in the files pane **or in any list**, and land on a player **or between
-two rows of any list**. Four gestures, one mechanism, and the mechanism is the one §10 already
+A drag can now start in the files pane **or in any queue**, and land on a player **or between
+two rows of any queue**. Four gestures, one mechanism, and the mechanism is the one §10 already
 had — generalised in two places rather than duplicated.
 
 **What is carried** is `Drag { item, from }`, and `from` is the whole difference between a
 copy and a move: `None` means the files pane, so the folder keeps its file; `Some((list,
-index))` means a row, which leaves that list when it lands. Dropping a queued row onto a
+index))` means a row, which leaves that queue when it lands. Dropping a queued row onto a
 player therefore takes it out of the queue — it is jumping the queue, which is the same thing
 the queue would have done for it later.
 
-**Where it would land** is `DropTarget`: a player, or a list *and a row index*. The index names
+**Where it would land** is `DropTarget`: a player, or a queue *and a row index*. The index names
 the caret **above** that row, `len` meaning past the last one — a caret sits between rows, not
 on them, which is what makes "drop at the end" expressible at all.
 
 Three things had to be got right, and each is a rule rather than a detail:
 
-- **Entering and leaving are different shapes.** A list has as many targets as it has rows,
-  but leaving it is one event, so `DragOut` carries a `Zone` — a player or a whole list — and
+- **Entering and leaving are different shapes.** A queue has as many targets as it has rows,
+  but leaving it is one event, so `DragOut` carries a `Zone` — a player or a whole queue — and
   clears the hover *only if the hover is still in that zone*. Nothing orders an enter against
   the leave it replaces, and a leave that cleared unconditionally would wipe a target the
   pointer is genuinely over. The old code already had this guard for two players; it now has
-  to hold across three lists and dozens of rows, which is why the leave got its own type.
+  to hold across three queues and dozens of rows, which is why the leave got its own type.
 - **The caret is reserved, not inserted.** Two pixels between every pair of rows, always
   present and merely *coloured* when it is the target. A caret that appeared would move the
   row under the pointer — changing the target as a side effect of showing it, which is a
   feedback loop and not a hint.
-- **The end of a list is a real widget.** Empty space below the rows inside a `scrollable` is
+- **The end of a queue is a real widget.** Empty space below the rows inside a `scrollable` is
   not a widget and cannot be entered, so appending had nowhere to aim. There is a twelve-pixel
   tail strip after the last caret whose whole job is to mean "append" — and it is also the
-  only target an *empty* list has.
+  only target an *empty* queue has.
 
-Exactly one indicator is ever lit: a drag headed for a list lights no player ring, because two
+Exactly one indicator is ever lit: a drag headed for a queue lights no player ring, because two
 indicators at once would each be half a lie.
 
-The one piece of arithmetic is `relocate(from, to)`, for a row dragged **within its own list**.
+The one piece of arithmetic is `relocate(from, to)`, for a row dragged **within its own queue**.
 Once the row is lifted out, everything below it has shifted up, so a caret that was below the
 row lands one place earlier than its index said. It is a function rather than two lines at the
 call site precisely so that off-by-one has somewhere to be tested — including exhaustively,
@@ -745,7 +748,7 @@ because a reorder that loses or duplicates a row is the one failure a queue cann
 ### Scrolling while dragging
 
 A drag can only land on a row that is on screen, and a hand holding a mouse button cannot
-reach for a wheel. So resting the pointer on a list's **header scrolls it up** and on its
+reach for a wheel. So resting the pointer on a queue's **header scrolls it up** and on its
 **footer scrolls it down**, eight pixels every thirty milliseconds, for as long as the pointer
 stays there.
 
@@ -754,7 +757,7 @@ cost no layout at all. The obvious design is two strips that appear when a drag 
 is wrong twice over: a strip that appears would push every row down the moment the drag
 started, which is the same feedback loop the reserved caret exists to avoid and worse, because
 it moves the rows before the user has aimed at anything; and a strip reserved for ever would
-spend twenty pixels of every list on something useful for a second at a time. The header and
+spend twenty pixels of every queue on something useful for a second at a time. The header and
 the footer are already exactly the top and bottom of the rows, and during a drag they have
 nothing else to do — the buttons on them cannot be pressed by a button that is already held.
 They are wrapped in their container *whether or not* a drag is in flight, so arming an edge
@@ -764,7 +767,7 @@ Arming follows the same rule as the drop target and for the same reason: enterin
 leaving another arrive in an order nothing guarantees, so a leave clears only the edge it is
 actually about. And the release clears it **unconditionally**, because the edges are only
 `mouse_area`s while a drag is in flight: letting go *on* one destroys the widget that would
-have reported the pointer leaving it, and a list that kept scrolling after the drag ended would
+have reported the pointer leaving it, and a queue that kept scrolling after the drag ended would
 be a bug with no way out but another drag.
 
 The scroll itself is `operation::scroll_by` rather than an offset the app works out. iced
@@ -776,9 +779,9 @@ is what keeps the virtualized rows following a scroll the pointer never asked fo
 
 ### Layout, and what a divider drag now grows
 
-The three lists are a second row *inside* the fixed-height players panel (§6), each under its
+The three queues are a second row *inside* the fixed-height players panel (§6), each under its
 own column. The controls above them — title, time, waveform, transport, mixer — are all
-fixed-size rows, so the panel's player half **shrinks to its content** and the list takes
+fixed-size rows, so the panel's player half **shrinks to its content** and the queue takes
 everything left over. That is what makes dragging the one divider grow the *queues*, which is
 the thing whose useful size varies, rather than padding the players with empty space.
 
@@ -788,23 +791,23 @@ which is the right trade against overriding a value the user chose.
 
 ### Persistence
 
-All three lists are in `settings.json` (§11), and they are the **only unbounded thing in that
-file** — worth saying out loud, because everything else there is one number. A cue list built
-over an evening and lost to a quit is worse than no cue list.
+All three queues are in `settings.json` (§11), and they are the **only unbounded thing in that
+file** — worth saying out loud, because everything else there is one number. A cue built
+over an evening and lost to a quit is worse than no cue.
 
 Stored as plain paths, and sanitized on the way in like every other field: a queued track that
 has been deleted, renamed or unmounted is **dropped**, and so is one whose extension is not
 media. A queue is a promise about what plays next, and the worst possible moment to discover a
-broken row is when a track ends and the next one is due. One bad path does not empty the list.
+broken row is when a track ends and the next one is due. One bad path does not empty the queue.
 
 The two switches go in beside them, as `auto_load` and `auto_play`: three of each, in **draw
 order** — Cue 1, Next up, Cue 2 — which is deliberately not the order `cues` is in, since that
-pair is per player and has no slot for the shared list. Nothing sanitizes them, because a
+pair is per player and has no slot for the shared queue. Nothing sanitizes them, because a
 `bool` has no wrong value that serde would let through, and a file written before they existed
 reads as "hand over, do not start" — which is what the app did then, and is what §11's
 `#[serde(default)]` rule is for.
 
-### How long the list runs for
+### How long the queue runs for
 
 Each footer shows `4 · 18:22`, and the number is what a queue is *for*: a list of names says
 what is coming, a running time says whether it fits.
@@ -839,7 +842,7 @@ like, which is that the running time keeps its `+`.
 `Item::duration` is an `Option<Option<Duration>>`, and both layers earn their place. The outer
 one is *has anyone asked*, the inner one is *did the file answer*. Collapsing them would make
 the app re-open an unreadable file every time anything else was added, for ever. Measurements
-are applied **by path across all three lists**, not by index into one, because the lists can be
+are applied **by path across all three queues**, not by index into one, because the queues can be
 edited while the lookup runs — and a queue may hold the same track twice, so one answer settles
 both rows.
 
@@ -850,7 +853,7 @@ that exists to be planned against must not do that.
 
 ---
 
-## 7b. The transition (`playlist.rs`, `app.rs`)
+## 7b. The handover point (`playlist.rs`, `app.rs`)
 
 A track ends twice. The file runs out, which is what §7a's handover waits for — and before
 that, somewhere earlier, the *music* stops. In between sits whatever the encoder padded, the
@@ -858,15 +861,15 @@ engineer faded into, or nobody trimmed off the master: two seconds of room tone,
 of run-out groove, the silence an MP3 encoder adds because its frames do not divide evenly.
 Played back to back, that gap is the difference between a set and a sequence of files.
 
-So each list gets a third setting beside **Auto-load** and **Auto-play**:
+So each queue gets a third setting beside **Auto-load** and **Auto-play**:
 
 | | **Whole track** | **Skip blanks** |
 |---|---|---|
 | when the next track takes over | when the file runs out | when the music stops |
 | where the next track starts | 0:00 | where *its* music starts |
 
-**Per list, and read from the list that supplies the next track**, which is Q26's rule
-unchanged: the list waiting behind a player is what says how it wants to take over, so Cue 1
+**Per queue, and read from the queue that supplies the next track**, which is Q26's rule
+unchanged: the queue waiting behind a player is what says how it wants to take over, so Cue 1
 can run an evening back to back while **Next up** stays a shelf that plays what it is handed,
 whole. A `pick_list` rather than a third checkbox, for the same reason the crossfader's curve
 is one — the two positions are not on and off but two behaviours, and both want naming.
@@ -894,7 +897,7 @@ nothing at all would leave the tail audible under the next track if the load fai
 
 Three conditions, and each of them is a reason not to cut:
 
-1. **The list waiting behind asked for it.** Off by default, per list.
+1. **The queue waiting behind asked for it.** Off by default, per queue.
 2. **This track's edges are known** (§14c). A file nobody has scanned plays whole, silently —
    a notice every four minutes about a setting the user turned on themselves is noise.
 3. **There is something to hand over to.** `next_source` is asked first, so the last track of
@@ -911,9 +914,9 @@ offer, which is the same wall §7 hits at the other end of the track.
 
 ### The other half of the same setting
 
-A list that skips the blanks at the end of one track also skips them at the start of the next:
+A queue that skips the blanks at the end of one track also skips them at the start of the next:
 `advance` seeks the freshly loaded track to where *its* music starts before pressing Play. Same
-setting, same list, both ends — a handover that trimmed one end and not the other would leave
+setting, same queue, both ends — a handover that trimmed one end and not the other would leave
 the gap it just removed.
 
 That seek is the only thing that has to know the *incoming* track's edges, and it needs them
@@ -1128,7 +1131,7 @@ reserves `width + 2 × margin + spacing` instead, and only while the bar is actu
 a list too short to scroll keeps every pixel. Left alone, the right-hand end of every row sits
 under the bar — invisible until a column is flush with that edge, which is why it showed up in
 a queue first: the running time is right-aligned against it and was being cut in half. All
-three lists take the same two-pixel gap from one constant (`ui::SCROLLBAR_GAP`), because the
+three queues take the same two-pixel gap from one constant (`ui::SCROLLBAR_GAP`), because the
 defect is the layout's and not the queue's, and the two that do not show it today show it the
 moment a name or a date grows long enough to reach the edge.
 
@@ -1242,7 +1245,7 @@ writing the day that feels wrong rather than now.
 | double-click a row | loads it into the idle player | the same, for the whole selection |
 | drag onto a player | loads it | the same |
 | **⤒ ⤓** | adds it | adds all of them, in pane order |
-| drag into a list | inserts it at the caret | inserts all of them at the caret, in order |
+| drag into a queue | inserts it at the caret | inserts all of them at the caret, in order |
 | `✕ ▲ ▼ ← →` | acts on the row | acts on every selected row |
 
 The first line is the only one that needed inventing, because a player holds one track and five
@@ -1278,7 +1281,7 @@ by rfd's own documentation, work on Windows only with it — and a dialog whose 
 unlabelled on the one target nobody has run is not worth three words.
 
 Which is why the answer is an `Admission` and not a filtered list: the `←` / `→` buttons have
-to filter the **rows** and the **tracks** by the same test, so what leaves one list is exactly
+to filter the **rows** and the **tracks** by the same test, so what leaves one queue is exactly
 what arrives in the other. `Admission::keeps(position)` is that test, and `playlist::duplicates`
 is the pure half that finds them.
 
@@ -1456,19 +1459,19 @@ Everything else about the drop is shared, and is decided:
 
 ### What the queues did to this section
 
-§7a added three lists, and with them three more places a drag can start and a great many more
+§7a added three queues, and with them three more places a drag can start and a great many more
 places it can land. The mechanism above did not change shape: `drag` still arms on a press and
 disarms on the release `gestures` already takes, and the release still asks one question about
 where the pointer is. Two things grew:
 
 - **`drag` carries a `Drag`, not a `PathBuf`** — the item plus where it came from, which is
-  what tells a drop whether to copy (from the files pane) or move (from a list).
+  what tells a drop whether to copy (from the files pane) or move (from a queue).
 - **`hover` is a `DropTarget`, not a `DeckId`**, and the leave message carries a `Zone`
   instead. The old "only clear if it is still mine" guard was already the right idea for two
-  player panels; it is *load-bearing* now that the panels number three lists of rows.
+  player panels; it is *load-bearing* now that the panels number three queues of rows.
 
 An **OS** drop is unchanged and still lands on the idle player. It carries no position, so it
-cannot aim at a list any more than it could aim at a player — the same upstream limitation,
+cannot aim at a queue any more than it could aim at a player — the same upstream limitation,
 now with more targets it cannot reach.
 
 ---
@@ -1896,7 +1899,7 @@ one goes out.
 ### What did not get marks
 
 The three queues. It was considered and declined: a queue row is a name and a length in a narrow
-list, the readiness of a queued track is already visible on the player it is waiting behind, and
+queue, the readiness of a queued track is already visible on the player it is waiting behind, and
 it would be a fourth place the set has to be kept right. The files pane is where files are
 chosen, so the files pane is where they are marked.
 
@@ -1921,7 +1924,7 @@ otherwise pure; anything needing a device or a real folder is manual.
   out-of-range value falls back **alone**, with the good values around it kept. The
   missing-field test names the newest fields specifically: a file written before the queue
   switches existed must read as "hand over, do not start", and one written before the
-  transition existed as "play the file whole" — in both cases what the app did at the time
+  handover point existed as "play the file whole" — in both cases what the app did at the time
   (§7b), and one written before tempos could be corrected has corrected none (§14d). The
   corrections get a test of their own, because that map is the part of this file somebody really
   might edit by hand: a correction on a file that has been deleted or is not media at all is
@@ -2012,22 +2015,22 @@ otherwise pure; anything needing a device or a real folder is manual.
   the decoder would not answer for, and a stream of `NaN`s, all of which have to be *no tempo*
   rather than a number somebody would act on.
 - **`playlist.rs`** — the queues (§7a), and almost every test is about the *selection* rather
-  than the list: an insert above it carries it down, a remove above it pulls it up, removing
+  than the queue: an insert above it carries it down, a remove above it pulls it up, removing
   the selected row lands on whatever slid into its place, removing the last row falls back to
   the new last, and a shift takes the highlight with the track it moved. Plus the two rules
   around them — the arrows reach a neighbour and only a neighbour, and `next_source` prefers a
-  player's own cue over the shared list. A second `next_source` test pins the word *skipped* in
-  the switches' rule: a list with **Auto-load** off is passed over rather than treated as an
-  empty list that ends the handover, so a cue switched off still lets the shared list feed that
+  player's own cue over the shared queue. A second `next_source` test pins the word *skipped* in
+  the switches' rule: a queue with **Auto-load** off is passed over rather than treated as an
+  empty queue that ends the handover, so a cue switched off still lets the shared queue feed that
   player. The remove test paid for itself on the first run: a
   `?` in a `match` arm was returning from `remove` itself, so the row was deleted, the
   function said nothing had been, and the selection pointed at a track that was gone.
 
-  `relocate` — rows dragged within their own list — gets four cases and then an exhaustive
+  `relocate` — rows dragged within their own queue — gets four cases and then an exhaustive
   one. The four are the off-by-one in both directions, the drop past the last row, and the two
   carets that touch the dragged row itself (its own top and bottom edge, both meaning "leave
   it alone", and both easy to reach with a twitchy hand). The exhaustive one runs every
-  `from` × `to` on a four-row list and asserts the *contents* are unchanged as a set: a
+  `from` × `to` on a four-row queue and asserts the *contents* are unchanged as a set: a
   reorder that loses or duplicates a track is the one failure a queue cannot survive, and
   twenty-five cases is cheaper to run than to reason about.
 
@@ -2051,7 +2054,7 @@ otherwise pure; anything needing a device or a real folder is manual.
   `duplicates` gets the batch half of the search: the positions of the tracks already queued,
   in a batch where two of four are, so a caller can filter rows and tracks by the same test.
 
-  The running time gets two more (§7a). One walks a list from nothing measured to fully
+  The running time gets two more (§7a). One walks a queue from nothing measured to fully
   measured and checks the *flag* at every step, including the state that is easy to get wrong:
   a row that has been measured and has no length keeps the `+` on for ever, because "asked and
   answered nothing" is not "counted". The other queues the same track twice and confirms one
@@ -2068,38 +2071,38 @@ otherwise pure; anything needing a device or a real folder is manual.
   could produce.
 
   `hands_over_early` gets one, and it is three conditions rather than a number (§7b): the music
-  has stopped *and* this list asked to skip the blanks *and* somebody has scanned the track.
-  It pins the two silent cases especially — a list set to **Whole track** never cuts however
+  has stopped *and* this queue asked to skip the blanks *and* somebody has scanned the track.
+  It pins the two silent cases especially — a queue set to **Whole track** never cuts however
   far past the music the playhead is, and a track nothing has scanned plays whole for ever
   rather than being cut at zero, which is what a missing trim read as "the music ends at the
   start" would do.
-- **`queues.rs`** — everything that is true of the three lists together rather than of any one
+- **`queues.rs`** — everything that is true of the three queues together rather than of any one
   of them (Q47), which is where most of §7a's rules turned out to live.
 
   The arrows reach a neighbour and only a neighbour, so a track cannot jump from one player's
   cue to the other's in one press. `next_source` prefers a player's own cue over the shared
-  list, falls through to the shared list when the cue is empty, stops the player when both are,
+  queue, falls through to the shared queue when the cue is empty, stops the player when both are,
   and never offers the *other* player's cue. A second test pins the word *skipped* in the
-  switches' rule: a list with **Auto-load** off is passed over rather than treated as an empty
-  list that ends the handover, so a cue switched off still lets the shared list feed that
-  player, while both switched off is a player stopping with full lists in front of it.
+  switches' rule: a queue with **Auto-load** off is passed over rather than treated as an empty
+  queue that ends the handover, so a cue switched off still lets the shared queue feed that
+  player, while both switched off is a player stopping with full queues in front of it.
 
   `already_queued` gets two, and the second is the one that matters. The first is the ordinary
-  search: a track is found in whichever of the three lists actually holds it, not merely in the
+  search: a track is found in whichever of the three queues actually holds it, not merely in the
   one being added to, and a track nothing holds is found nowhere. The second is the exception —
-  a row on its way out of a list must not warn about colliding with *itself*, or every
-  cross-list move would ask a question with one honest answer — and it pins that the exception
+  a row on its way out of a queue must not warn about colliding with *itself*, or every
+  cross-queue move would ask a question with one honest answer — and it pins that the exception
   is the **row** and not the track, by leaving a second copy elsewhere and checking it is still
   found. `duplicates` gets the batch form: positions into the batch, so a caller can filter rows
   and tracks by the same answer.
 
   `take_unmeasured` gets the two halves of "ask about each file once", and the rename is part of
-  the test: a track sitting in two lists produces one entry rather than two, and **asking twice
+  the test: a track sitting in two queues produces one entry rather than two, and **asking twice
   in a row gives the batch and then nothing**, because recording what went out is part of asking
   rather than a second line beside it. A third checks that a row measured and answered *nothing*
   is never asked about again either, which is the other thing the two-layer
   `Option<Option<Duration>>` is for. And one answer settles every row holding that track,
-  including the same track queued twice in one list — the reason `measured` works by path where
+  including the same track queued twice in one queue — the reason `measured` works by path where
   everything above it works by index. The scroll offsets get one: three panels, three offsets,
   or scrolling one would scroll all of them.
 - **`fsio.rs`** — one test, for the one rule in the module (§11b): the recursive walk finds
@@ -2163,13 +2166,13 @@ otherwise pure; anything needing a device or a real folder is manual.
   gives the seconds between its edges and the beats it runs at, one scanned and found silent gives
   a mark with neither, and the one still missing a table gives nothing at all.
 - **`ui/playlist.rs`** — `running_time`: how many tracks, how long they run, and the `+` that
-  says the total is a floor rather than a figure. An empty list says *nothing at all* rather
+  says the total is a floor rather than a figure. An empty queue says *nothing at all* rather
   than `0 · 0:00`, because three empty panels each announcing their emptiness is furniture.
   `arrows(first, last, count)` is the second (§9a), and it is two off-by-ones against opposite
-  ends of the same list — `> 0` at the top and `+ 1 < count` at the bottom. One test covers the
-  ends, the middle, the blocks that touch each end, the whole list selected, and the single row
-  of a single-row list, which is where an off-by-one shows first. An arrow live one row too far
-  is a block moved off the end of the list it is in.
+  ends of the same queue — `> 0` at the top and `+ 1 < count` at the bottom. One test covers the
+  ends, the middle, the blocks that touch each end, the whole queue selected, and the single row
+  of a single-row queue, which is where an off-by-one shows first. An arrow live one row too far
+  is a block moved off the end of the queue it is in.
 - **`ui/browser.rs`, `ui/deck.rs`, `ui/tempo.rs`** — the decisions that were sitting inside a
   `view`, lifted out and given the tests §12 has asked for all along (Q42). Four rules, and each
   one had a way of being wrong that no glance at the screen would catch.
@@ -2352,6 +2355,10 @@ path, so `/ponytail-debt` can harvest them later.
   time-stretch stage rodio does not have (`rubato` or a phase vocoder). **BPM detection came off
   this list** — §14d, because the decode that finds it was already running for the waveform;
   *playing* a track at a different one is still the hard half.
+- **Typing a tempo in.** Ruled out rather than deferred, strictly (§14d): an octave error is
+  the only mistake the detector makes that a person can spot at a glance, and `/2` / `×2`
+  reverse it exactly. Reopens the day a real track comes back wrong by something that is not
+  a power of two — a 3/4 heard as 4/4 is ×1.333, which two buttons cannot reach.
 - **Headphone cue / pre-listen.** Needs a *second* output device and a second mixer —
   the point at which the "one shared stream" decision in §4 has to be revisited.
 - **Watching the tree.** The files pane watches the folder it shows (§9); the tree does not
@@ -2798,7 +2805,7 @@ is nothing in it. That is the same shape of answer a file with no length gives, 
 same way — the store has stopped asking.
 
 The running time in a queue's footer still adds up the **file** lengths, deliberately. It is the
-one number that has to match the clock on the wall whatever the transition setting says, and a
+one number that has to match the clock on the wall whatever the handover point says, and a
 total that changed meaning when a switch was flipped would be a worse number than one that is
 occasionally longer than the set.
 
@@ -2874,7 +2881,7 @@ overrules it. **Edit BPM** is the other half of that decision, and the rest of t
 ### The editor: two buttons, because that is what a wrong tempo is wrong by
 
 Right-click a row — in the files pane or in a queue, since a wrong number is usually noticed in
-the list it is about to be played from — and a menu opens with one entry. The entry is dead on a
+the queue it is about to be played from — and a menu opens with one entry. The entry is dead on a
 row nothing has scanned: `/2` and `×2` need a number to start from, and there is nothing here to
 type one with.
 
@@ -2997,13 +3004,13 @@ change rather than an argument with §11a's first sentence.
 
 | Q18 | Whether a deferred ceiling is really where the note says it is | **Measure before believing your own `ponytail:` note.** Two of them claimed a local disk and a music-sized folder made the cost irrelevant. Measured: a 5 000-file folder cost **70 % of a core** at the playing tick and **25 ms** of frozen executor to read. Both notes were written by the same hand that wrote the code they excused, which is why neither had a number in it | §4, §9 |
 | Q19 | `widget::lazy` or hand-rolled virtualization | **Hand-rolled, skipping the upgrade order §9 had written down.** `lazy` caches building, and building was only a third of the cost — iced lays out the whole tree every frame whether the elements were cached or not. It also wanted a dependency and a version counter that is silently wrong the day someone forgets to bump it. Hand-rolled wanted one `f32`, and it needed the row height to be *pinned* rather than measured, which is the same answer Q16 reached from the other end | §9 |
-| Q20 | Where a queue's scroll edges live, for a drag that has to reach an off-screen row | **The header and the footer *are* the edges.** Two strips that appeared with the drag would push every row down as it began — the caret's feedback loop, arriving before the user has aimed at anything — and two reserved for ever would spend twenty pixels of every list on something useful for a second at a time. The header and footer are already the top and bottom of the rows, and a button that is already held cannot press the buttons on them | §7a |
+| Q20 | Where a queue's scroll edges live, for a drag that has to reach an off-screen row | **The header and the footer *are* the edges.** Two strips that appeared with the drag would push every row down as it began — the caret's feedback loop, arriving before the user has aimed at anything — and two reserved for ever would spend twenty pixels of every queue on something useful for a second at a time. The header and footer are already the top and bottom of the rows, and a button that is already held cannot press the buttons on them | §7a |
 | Q21 | Whether the app can work out where a queue is scrolled to | **No, and it does not have to.** The pane's height is whatever the players left over, and any number derived from `self.window` is a frame stale (Q16). So the scroll is `scroll_by`, which iced clamps against the real bounds, and the app learns the result rather than deciding it: a `scrollable` republishes its viewport on the next redraw whenever it has moved. That is also what keeps the virtualized rows following a scroll no pointer asked for | §7a, §9 |
-| Q22 | What to do about a track being queued twice | **Ask, across all three lists, with a native modal.** Refusing would be the app deciding something it cannot know — playing a track twice in a set is deliberate as often as it is a slip. The scope is the *set* rather than the destination list, because Cue 1 and Cue 2 each holding a track plays it twice just as surely as one list holding it twice. The modal is `rfd`, which the app already carries for **Load…**, against an in-app confirmation bar with its own state and two messages: the same trade §10 made, and reversible the day the question needs more than two answers | §7a |
+| Q22 | What to do about a track being queued twice | **Ask, across all three queues, with a native modal.** Refusing would be the app deciding something it cannot know — playing a track twice in a set is deliberate as often as it is a slip. The scope is the *set* rather than the destination queue, because Cue 1 and Cue 2 each holding a track plays it twice just as surely as one queue holding it twice. The modal is `rfd`, which the app already carries for **Load…**, against an in-app confirmation bar with its own state and two messages: the same trade §10 made, and reversible the day the question needs more than two answers | §7a |
 | Q23 | SQLite for the file cache | **No — `redb`, and the reason is a ban we wrote ourselves.** `rusqlite` pulls `libsqlite3-sys`, which compiles C on both shipped targets, and `deny.toml` bans `cc` because the no-C-toolchain property is what makes "copy it anywhere and run it" true (§11). §12 called that ban a tripwire for exactly this moment; this is the moment, and it worked. redb is the same shape without the compiler — pure Rust, ACID, one file, MIT OR Apache-2.0 already on the allow-list. What is given up is SQL, and the day something wants a `WHERE` clause is the day to revisit it | §11a, §12 |
 | Q24 | What makes a cached entry stale | **Size plus modified time — one `stat`, not a hash.** Hashing every byte costs about what the scan it avoids costs; hashing a sample buys the rename case for a read and a collision nobody can rule out. The two cases the stamp gets wrong cost exactly one re-scan each: an in-place edit inside FAT32's two-second granularity, and a rename. A cache that is occasionally cold is a cache; one that is occasionally *wrong* is a bug that looks like a corrupt file | §11a |
 | Q25 | Whether a gesture may act on the same place twice | **No — a fraction already published is not published again, and the memory dies with the gesture.** winit's macOS backend emits a `CursorMoved` before *every* `MouseInput`, so one click reaches a widget as four events and the phantom move before the release re-seeked to where the press had already gone: a tenth of a second of the track audibly replayed. The alternative — a movement threshold in pixels — is a number to tune that still fires on a stationary click; comparing the fraction is the quantity that actually matters, and it covers a hand held still mid-scrub for free. Clearing it on release keeps a second click on the same spot a second seek, which is deliberate | §14b |
-| Q26 | Where the handover's two switches belong | **On each list, as two checkboxes, and read from the list that gave the track.** Two rather than one three-way setting, because the middle position — load without playing — is the app's own default and a single toggle offers only the ends. Per list rather than per player, because that is what lets Cue 1 run the evening by itself while **Next up** stays a shelf; a per-player setting could not say that, and a global one would be a mode. A list switched off is *skipped* rather than blocking, so a cue that is off still lets the shared list feed that player. **Auto-play** is drawn dead while **Auto-load** is off, and `advance` presses Play only if the file it just took actually arrived — a load that failed leaves the *previous* track in the player, and starting that is the one way an automatic start could play the wrong thing | §7a |
+| Q26 | Where the handover's two switches belong | **On each queue, as two checkboxes, and read from the queue that gave the track.** Two rather than one three-way setting, because the middle position — load without playing — is the app's own default and a single toggle offers only the ends. Per queue rather than per player, because that is what lets Cue 1 run the evening by itself while **Next up** stays a shelf; a per-player setting could not say that, and a global one would be a mode. A queue switched off is *skipped* rather than blocking, so a cue that is off still lets the shared queue feed that player. **Auto-play** is drawn dead while **Auto-load** is off, and `advance` presses Play only if the file it just took actually arrived — a load that failed leaves the *previous* track in the player, and starting that is the one way an automatic start could play the wrong thing | §7a |
 
 | Q27 | What counts as the start and the end of the music | **A fixed −50 dBFS threshold, measured per sample in the pass that was already decoding the file.** Not read off the peak array, which holds 2048 columns however long the track: one column of a five-minute file is a sixth of a second, so a column-accurate trim clips the first transient or leaves a sixth of a second of leader — audible in exactly the moment the feature exists to smooth. The threshold is the knob the physical world needs: below it sit dither and tape hiss, which without it would make every rip's music start at sample zero. No hold time, so a click in the leader wins — the ceiling is named, and the upgrade is a percentile of the file's own amplitudes | §14c, §7b |
 | Q28 | Whether a seek may touch the transport after all | **Yes, in one direction: `Stopped` becomes `Paused`.** Q14 is still right for `Playing` and `Paused`, and was wrong about `Stopped` — which in this app means *at the top of the track*, so a player labelled "stopped" at 1:30 is the label promising something Play will not do. Already reachable by clicking the strip; the two jump buttons only made it obvious. The rule lives in `seek_to`, where every seek passes, rather than on the controls that prompted it — and still outside `deck::transition`, which is the boundary Q14 actually drew | §14c, §7 |
@@ -3019,7 +3026,7 @@ change rather than an argument with §11a's first sentence.
 | Q36 | Whether a mark may be added without asking the store | **Yes, optimistically, because the listing's answer replaces it.** A scan that succeeded is taken to be a scan that was stored, which is one case out — a file that cannot be stat'd is deliberately never cached — against a second lookup per file to learn what the decode already established. It is safe only because the set is *replaced* by the next listing rather than added to, so a wrong mark lives until the next refresh and no longer; a dead job answers "nothing prepared", which is the right way round to be wrong; and **Clear cache** empties the column, since it is a report of what is on disk. A `ponytail:` names it | §11c |
 | Q37 | Which files spin, and what drives them | **Any file with a thread on it, off the counter that was already turning.** One rule for the whole window: a folder scan and a player's own waveform scan are the same work, so a row spins for either and gets the same `✓` after. The phase is §14a's sweep counter — one for everything that turns, or two scans at once drift apart into what looks like a rendering fault — and its subscription grew one clause and no timer. *Which* files are turning has to be kept rather than derived: answers come back out of order, so the four in the air are never `files[done..next]` | §11c, §11b, §14a |
 | Q38 | What to do about `CFUserNotificationDisplayAlert` in the macOS log | **Nothing, and write down why.** It is `rfd`'s parentless path: no parent window means another process draws the alert while this one waits, which is the modal shortcut §7a already took, said out loud by the OS. iced lends a window handle inside `window::run` alone, so **Clear cache** could be parented but `admits` — asked in the middle of three queue edits, answering the code that asked — could not without three continuations and a queue that may change while the question is open. Parenting one of the two would trade a log line for two dialogs that do not look alike | §7a, §11a |
-| Q39 | Where the music's *length* comes from, and what it displaces | **Derived from the edges already stored, and it displaces nothing.** `Trim::music()` is `end - start`: a fourth table would be a number that can disagree with the two it was computed from, and the wrong one would be the one on screen. It reaches the files pane on the query §11c already makes once per listing — the edges were being read for the mark, so the number is free — and a queue row on the trim `cached_facts` was already reading for the handover. In the pane it is a column of its own before the size, because a listing says what a file *is* and this is the first thing that says what it is *for*; in a queue it goes in front of the file's length rather than instead of it, since the music is what the evening is planned against and the file's length is what every other program on the machine agrees with. The footer's running time deliberately stays a sum of *file* lengths: a total that changed meaning when a transition switch was flipped would be worse than one that is occasionally long | §14c, §11c, §9, §7a |
+| Q39 | Where the music's *length* comes from, and what it displaces | **Derived from the edges already stored, and it displaces nothing.** `Trim::music()` is `end - start`: a fourth table would be a number that can disagree with the two it was computed from, and the wrong one would be the one on screen. It reaches the files pane on the query §11c already makes once per listing — the edges were being read for the mark, so the number is free — and a queue row on the trim `cached_facts` was already reading for the handover. In the pane it is a column of its own before the size, because a listing says what a file *is* and this is the first thing that says what it is *for*; in a queue it goes in front of the file's length rather than instead of it, since the music is what the evening is planned against and the file's length is what every other program on the machine agrees with. The footer's running time deliberately stays a sum of *file* lengths: a total that changed meaning when a handover-point switch was flipped would be worse than one that is occasionally long | §14c, §11c, §9, §7a |
 | Q40 | How a tempo is found, and how far it is trusted | **A third accumulator on the decode that was already happening, reported raw between 65 and 200 BPM.** An onset track from a 512-sample loudness envelope, a whole-bin autocorrelation for the beat, then one bin of a Fourier transform to refine it — the phasor because a correlation read between two bins snaps back to whole bins, which at 128 BPM is three BPM wide, and the column claims two decimals. Written rather than pulled in, because the obvious crate is C and `deny.toml` bans a C toolchain (§11). **Not** folded into a narrower window: half-time and double-time are both genuinely true about a lot of music, so the app reports what it measured and a person overrules it (Q41). The `✓` now means three tables rather than two, which cost every prepared folder one more **Prepare folder** run — the honest price of a mark that means one thing | §14d, §11c, §9, §7a |
 | Q41 | Where a *hand-edited* tempo lives, and how it reaches the screen | **In `settings.json`, cleared on its own, and applied as the row is drawn.** A detected tempo is a cache fact — deleting it costs time. A corrected one is a person's answer about a track and nothing can work it out again, so it cannot live in a file whose first sentence is that losing it costs nothing (§11a): **Clear cache** takes the detected numbers, **Clear BPM edits** takes the corrections, and each asks first. It is applied by one function at draw time rather than written into the pane's map and every queue holding the file, which is four places to keep in step and no way at all to put the detected numbers back when the corrections are dropped. The editor is `/2` and `×2` and nothing else: an octave is the only error visible at a glance, and the two are exactly reversible, so no undo button is needed. It is the app's first panel drawn *over* the window, since `rfd` cannot hold a value that changes while it is open — centred rather than at the pointer, because the only route to a cursor position is a subscription that fires on every mouse move | §14d, §11, §11a |
 | Q42 | Where a decision inside a `view` belongs | **Beside the view, as a named function with a test — not moved to another module, and not left in the closure.** §12's rule was already "pure logic is tested, including the arithmetic inside a module that is not otherwise pure", and five places under `ui/` were quietly exempt from it because a decision written inside a `.map()` has no name to call and no interface to cross. Lifted rather than *relocated*: `mark_of` belongs with the column it marks and `music_span` with the strip it measures, so a rule and the widget it is about stay in one file — `ui/mod.rs` is for what two panes share, which none of these are. Writing the tests changed two of the four: `detected_line` was comparing floats where the question is about two rendered decimals, and `music_span`'s `<= 0.0` guard let a `NaN` through into a `clamp` that passes them on. Both were reachable only from inputs nothing produces today, which is the argument for the rule rather than against it | §12, §11c, §14c, §14d, §9a |
@@ -3027,8 +3034,9 @@ change rather than an argument with §11a's first sentence.
 | Q44 | Whether the store answers per table or per question | **Per question. `scan`, `store_scan`, `ready` — and the four tables go private.** Eight of `Cache`'s twelve methods were a getter and a setter each, every one a one-line forward to the same two private functions, and the real rule — that a hit means every table a decode fills — lived *outside* them: once in the app's `cached_scan` and once in `prepared`, with a comment admitting the two were kept in step by hand. Adding the tempo proved the comment right by breaking both at once. The rule is now one array and one function; the caller asks whether a file has been scanned and is told. Three consequences fell out rather than being aimed at: **one write transaction**, so a half-stored scan is no longer possible (three writes could leave a waveform with no tempo, which reads as a miss for ever and re-stores identically every launch); **one read transaction**, which was the `ponytail:` note on `prepared`; and the queues and the files pane finally agreeing about one file, since `cached_facts` was reading tables one at a time and would show a queue row's playing time for a track the pane refused to tick. `durations` keeps its own pair on purpose — a length is a header parse, and folding it in would make asking for a running time decode the whole file | §11a, §11c, §7a, §14c, §14d |
 | Q45 | Whether a row keeps a scan's answers as one thing or as loose fields | **As one thing, and the same one everywhere.** Three facts about a file were being carried by five types with overlapping fields — `Scan`, `Facts`, `Ready`, `Trim`, `Item` — and the seams between them were where the app disagreed with itself. `Item` held `music` and `tempo` as two independent `Option`s that were set by two copies of the same rule, so "a playing time with no tempo beside it" was representable and meaningless; `Facts` held the same pair a second time; and the queue row then wrote `item.tempo.map(Some)` to re-inflate a two-layer answer it had flattened on the way in. All three now hold one `Ready`, so a queue row and a files-pane row are drawn by the *same expression* — which is the real test of whether two panes agree, rather than two comments saying they should. `duration` stays a separate field with its own two layers, for the reason in Q44: a length is a header parse, a scan is a decode, and they arrive at different moments under different rules | §7a, §14c, §14d, §11a |
 | Q46 | Whether the three accumulators are three things or one | **One `Scanner`, with the three behind it.** `Fold`, `Edges` and `Tempo` are identical in shape — `Default`, `push`, `finish` — and were never independent: they are three answers to one expensive question, and the expense is the decode they share. Driving them separately meant every caller knowing there were three, that two of the three need the sample rate and the channel count and one does not, and that all three must be fed *every* sample or their answers stop being about the same audio. That loop was written four times: once in `audio::scan` and once in each of the three test modules. It is now written once, and the three stay separate types *behind* the interface, still tested one at a time — an internal seam is still a seam, it is just not part of what the module promises. A fourth fact is now a struct, a field, a `push` and a `finish`, all in one file. The same tidying moved `sweep_band` and `seek_fraction` out to `ui/waveform.rs`: they take a width in pixels and never ask `waveform` anything, so they were in the pure module because it was the pure module and not because they belonged there (Q42's rule, applied the other way round) | §14a, §14b, §12, §5 |
-| Q47 | Where the rules about the *set* of three lists live | **In `queues.rs`, with the lists.** Thirteen messages, twelve `update` arms and three `Clecta` fields described one thing that had no module: an array of three lists, an array of three scroll offsets and a set of paths in flight, all indexed by `ListId::index()` on every queue arm — 42 of those lookups in `app.rs` alone, five of them inside `QueueShift`. The tell was already in `playlist.rs`, which had grown three free functions taking `&[Playlist; 3]`: a type with no name doing a job with no home. So `Playlist` is now one list and `Queues` is the set, and the split is not arbitrary — a duplicate is a duplicate if *any* of the three holds it, a file is measured once however many rows hold it, and the next track comes from a player's own cue *or* the shared pool. None of those is a question a list can answer. `ListId` moved with them, and `index()` stayed public for one caller: the view, whose three `scrollable` ids are a `[&'static str; 3]` because iced wants a `&'static str`. `update` no longer uses it at all. Two smaller things fell out: asking what needs measuring and recording it as in flight became **one** call (`take_unmeasured`) rather than two lines beside each other, which is the pair that goes wrong the day they stop being beside each other; and the queue scroll offsets left `Clecta` for the module that owns the lists, which is where the files pane has always kept its own | §7a, §9, §5 |
+| Q47 | Where the rules about the *set* of three queues live | **In `queues.rs`, with the queues.** Thirteen messages, twelve `update` arms and three `Clecta` fields described one thing that had no module: an array of three queues, an array of three scroll offsets and a set of paths in flight, all indexed by `ListId::index()` on every queue arm — 42 of those lookups in `app.rs` alone, five of them inside `QueueShift`. The tell was already in `playlist.rs`, which had grown three free functions taking `&[Playlist; 3]`: a type with no name doing a job with no home. So `Playlist` is now one queue and `Queues` is the set, and the split is not arbitrary — a duplicate is a duplicate if *any* of the three holds it, a file is measured once however many rows hold it, and the next track comes from a player's own cue *or* the shared pool. None of those is a question a single queue can answer. `ListId` moved with them, and `index()` stayed public for one caller: the view, whose three `scrollable` ids are a `[&'static str; 3]` because iced wants a `&'static str`. `update` no longer uses it at all. Two smaller things fell out: asking what needs measuring and recording it as in flight became **one** call (`take_unmeasured`) rather than two lines beside each other, which is the pair that goes wrong the day they stop being beside each other; and the queue scroll offsets left `Clecta` for the module that owns the queues, which is where the files pane has always kept its own | §7a, §9, §5 |
 | Q48 | Where the pure transport decision meets the audio | **In `Deck`, once — `moved`, `seek`, `ended` — with the engine passed in as the `Option` it already was.** `transition` was pure and well tested and `Engine` was untestable, and the app was re-pairing the two by hand in four places: `transport`, both legs of `poll_players`, and `seek_to`. Four pairings drifted, as four of anything does. The playhead was zeroed in three of them and not the fourth; the notice line was formatted in five places with one near-miss; and `seek_to` wrote `Stopped → Paused` straight into the field, inventing a transport edge the state machine had never heard of and nothing could test. All of it is now one method each, and `update` calls one line per gesture. The engine is `&Option<Engine>` rather than a trait, because the `Option` is not a testing device — the app really does run with no output device (§11) — and passing `None` leaves exactly the state machine, which is the second adapter the seam needed without inventing one. `deck.rs` names `audio::Engine` and still names no rodio type, so the seam §4 cares about is where it was | §7, §7b, §14b, §11, §12 |
+| Q49 | Where the product's words are defined | **A root `CONTEXT.md`, one entry per word, opinionated.** Four words — playlist, list, queue, cue — were naming three objects, and "transition" was naming a transport change, the handover and the handover point all at once; a glossary that picks one word per thing is what turns the next rename from a taste argument into a bug report. The split of authority is in `docs/agents/domain.md`: this plan wins on decisions, the glossary wins on vocabulary, and a term defined in both places is a bug here. The plan's prose was swept to obey it, and the code follows in the renames the glossary demanded — `Playlist` → `Queue`, `Transition` → `Handover`, `edited` → `corrected` — each with its `settings.json` key pinned by serde so no saved setting resets | CONTEXT.md, §7a, §7b, §14d |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

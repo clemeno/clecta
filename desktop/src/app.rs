@@ -177,10 +177,6 @@ pub enum Zone {
 	List(ListId),
 }
 
-/// What an in-app drag is carrying, and where it came from.
-///
-/// `from` is the whole difference between a copy and a move: a drag out of the files pane
-/// leaves the file where it is, and a drag out of a list takes the row with it.
 impl DropTarget {
 	/// The panel this target sits in, which is what a pointer leaves.
 	fn zone(self) -> Zone {
@@ -194,8 +190,10 @@ impl DropTarget {
 /// What an in-app drag is carrying, and where it came from.
 ///
 /// A whole selection rather than one row (PLAN §9a), in the order the rows are on screen — so a
-/// drop puts them down in the order they were looked at. `from` is one list and the rows inside
-/// it, because a drag starts with a press and a press is in one panel.
+/// drop puts them down in the order they were looked at. `from` is one queue and the rows inside
+/// it, because a drag starts with a press and a press is in one panel — and it is the whole
+/// difference between a copy and a move: a drag out of the files pane leaves the file where it
+/// is, and a drag out of a queue takes the rows with it.
 #[derive(Debug, Clone)]
 pub struct Drag {
 	items: Vec<playlist::Item>,
