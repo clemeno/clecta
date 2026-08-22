@@ -905,8 +905,8 @@ Three conditions, and each of them is a reason not to cut:
    the silence it saves.
 
 The third is why `cuts_early` lives in `app.rs` and `hands_over_early` — the pure part, and the
-tested one — lives in `queue.rs`. The rule is arithmetic; knowing whether a queue has
-anything left is the app's business.
+tested one — lives on `Handover` itself, beside `starts_at`, the same setting's other half
+(Q57). The rule is arithmetic; knowing whether a queue has anything left is the app's business.
 
 The 50 ms tick puts the cut up to a tick late, which is a twentieth of a second of run-out that
 still plays. Nobody has ever heard that. Making it exact would mean a callback rodio does not
@@ -2094,7 +2094,9 @@ otherwise pure; anything needing a device or a real folder is manual.
   It pins the two silent cases especially — a queue set to **Whole track** never cuts however
   far past the music the playhead is, and a track nothing has scanned plays whole for ever
   rather than being cut at zero, which is what a missing trim read as "the music ends at the
-  start" would do.
+  start" would do. `starts_at` — the same setting answering *where* the handed-over track
+  starts (Q57) — gets the mirror: the music's first edge for a queue that skips the blanks,
+  the top of the file for one that plays whole, and the top for a track never scanned.
 - **`queues.rs`** — everything that is true of the three queues together rather than of any one
   of them (Q47), which is where most of §7a's rules turned out to live.
 
@@ -3069,6 +3071,7 @@ decided.
 | Q54 | Where the duplicate warning's answer is applied | **On `Admission`, once.** The three-way answer (§7a) was applied by an enumerate–filter–map written out at all three doors — the add buttons, the `←` / `→` send, and a drop — with the send zipping rows and tracks first so the pairs filter together. The shape moved onto the answer as `admitted`, generic so the zipped pair still works, and the three doors are one line each. The rule now has a test, which three inline copies never did — the same reason `defers` got a name (Q50) | §7a, §9a |
 | Q55 | Where the settings file's two queue orderings are zipped | **Beside the fields that define them, in both directions.** The file stores the queues' paths per player (`cues` has no slot for the shared queue) and their three switches per drawn queue, and `boot` and `settings()` each converted between the orderings by hand, index by index — a swapped index was silent, and the settings tests never reached the zip. `Settings::queues()` and `record_queues` are now inverses of each other in the file's own module, next to the serde pins, and a round-trip test drives three deliberately different queues through both — the first thing that would catch Cue 2's paths landing under Cue 1's switches | §7a, §11, Q54 |
 | Q56 | Whether the Notice needs a module | **A door, not a module.** The one-line notice (CONTEXT.md) is a field, and a field is a fine home — what was smeared was its *delivery*: four arms each re-wrote "a device's refusal replaces the line, silence means fine", and `accept_drop` was a forwarder with one caller that failed the deletion test. The rule is now one method (`noted`) and the forwarder is inlined into the OS-drop arm. `Deck` keeps returning `Option<String>` on purpose: that return is Q48's pairing speaking, and it is what lets every transport edge be checked with no device in the room | §7, §10, Q48 |
+| Q57 | Where the handover's two decisions live | **Both on `Handover`.** §7b derives the *when* and the *where* from the one whole-vs-trimmed choice (Q51), but the code had them in different homes: `hands_over_early` was a free function taking the setting as its first argument, and the where — seek to the music's first edge, or leave the load at the top — was an inline condition in `advance` that no test reached. Both are methods on the setting now, `hands_over_early` and `starts_at`, each tested; `advance` keeps only what must stay in `app.rs` — the take, the load, the verify — because those are IO, and the seam between decision and execution is the same one `Deck::moved` draws (Q48) | §7b, Q51, Q48 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

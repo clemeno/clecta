@@ -1720,11 +1720,10 @@ impl Clecta {
 			return false;
 		};
 
-		queue::hands_over_early(
-			self.queues.get(source).handover,
-			position,
-			self.trims.get(&track.path).copied(),
-		)
+		self.queues
+			.get(source)
+			.handover
+			.hands_over_early(position, self.trims.get(&track.path).copied())
 	}
 
 	/// Give a player that has just finished the next track from a queue (PLAN §7a).
@@ -1771,13 +1770,10 @@ impl Clecta {
 			return loading;
 		}
 
-		// The other half of the handover setting (PLAN §7b): a queue that skips the blanks at
-		// the end of one track also skips them at the start of the next. Silently 0:00 for a
-		// track nobody has scanned — the folder scan is what makes this exact, and until then
-		// the app plays the file it was given from the top.
-		if handover == Handover::Trimmed
-			&& let Some(start) = self.trims.get(&path).map(|trim| trim.start)
-		{
+		// The other half of the handover setting (PLAN §7b), answered by the setting itself:
+		// silently 0:00 for a track nobody has scanned — the folder scan is what makes this
+		// exact, and until then the app plays the file it was given from the top.
+		if let Some(start) = handover.starts_at(self.trims.get(&path).copied()) {
 			self.seek_to(id, start);
 		}
 

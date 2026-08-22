@@ -40,6 +40,35 @@ pub enum Handover {
 
 impl Handover {
 	pub const ALL: [Handover; 2] = [Handover::Whole, Handover::Trimmed];
+
+	/// Whether the track playing now should give way already (PLAN §7b).
+	///
+	/// Three things have to be true at once, and each of them is a reason not to cut: the queue
+	/// that would supply the next track has to be set to skip the blanks, this track's edges have
+	/// to have been scanned, and the playhead has to have reached the second one. A track nobody
+	/// has scanned plays whole — silently, because the alternative is a notice line every four
+	/// minutes about a setting the user already knows they turned on.
+	///
+	/// The caller has already asked `next_source` whether there *is* a next track. That is the
+	/// fourth condition and it is deliberately not here: cutting the run-out off the last track of
+	/// the evening would leave a player stopped early for no benefit at all.
+	pub fn hands_over_early(self, position: Duration, trim: Option<Trim>) -> bool {
+		self == Handover::Trimmed && trim.is_some_and(|trim| position >= trim.end)
+	}
+
+	/// Where the track this queue hands over starts (PLAN §7b) — the same setting answering its
+	/// other half: a queue that skips the blanks at the end of one track skips them at the start
+	/// of the next.
+	///
+	/// `None` means "leave the playhead where the load put it", which is the top of the file —
+	/// the answer for a queue that plays files whole, and also for a track nobody has scanned,
+	/// which plays from the top whatever the setting says (PLAN §14c).
+	pub fn starts_at(self, trim: Option<Trim>) -> Option<Duration> {
+		match self {
+			Handover::Whole => None,
+			Handover::Trimmed => trim.map(|trim| trim.start),
+		}
+	}
 }
 
 impl std::fmt::Display for Handover {
@@ -482,21 +511,6 @@ impl Queue {
 		self.anchor = Some(target);
 		true
 	}
-}
-
-/// Whether the track playing now should give way already (PLAN §7b).
-///
-/// Three things have to be true at once, and each of them is a reason not to cut: the queue
-/// that would supply the next track has to be set to skip the blanks, this track's edges have
-/// to have been scanned, and the playhead has to have reached the second one. A track nobody
-/// has scanned plays whole — silently, because the alternative is a notice line every four
-/// minutes about a setting the user already knows they turned on.
-///
-/// The caller has already asked `next_source` whether there *is* a next track. That is the
-/// fourth condition and it is deliberately not here: cutting the run-out off the last track of
-/// the evening would leave a player stopped early for no benefit at all.
-pub fn hands_over_early(handover: Handover, position: Duration, trim: Option<Trim>) -> bool {
-	handover == Handover::Trimmed && trim.is_some_and(|trim| position >= trim.end)
 }
 
 #[cfg(test)]
@@ -1037,8 +1051,9 @@ mod tests {
 			start: Duration::from_secs(2),
 			end: Duration::from_secs(228),
 		});
-		let early =
-			|handover, seconds| hands_over_early(handover, Duration::from_secs(seconds), trim);
+		let early = |handover: Handover, seconds| {
+			handover.hands_over_early(Duration::from_secs(seconds), trim)
+		};
 
 		// Act / Assert: the run-out is what gets skipped, and only for a queue that asked.
 		assert!(!early(Handover::Trimmed, 227), "still playing music");
@@ -1049,11 +1064,31 @@ mod tests {
 		// A track nobody has scanned plays whole, whatever the setting says: there is no
 		// second edge to reach, so there is nothing to cut to (PLAN §14c).
 		assert!(
-			!hands_over_early(Handover::Trimmed, Duration::from_secs(600), None),
+			!Handover::Trimmed.hands_over_early(Duration::from_secs(600), None),
 			"never scanned"
 		);
 
 		// And a fresh queue plays whole, which is what the app did before the setting existed.
 		assert_eq!(Queue::default().handover, Handover::Whole);
+	}
+
+	#[test]
+	fn where_the_next_track_starts_is_the_same_setting_answering_again() {
+		// Arrange: a track whose music starts two seconds in.
+		let trim = Some(Trim {
+			start: Duration::from_secs(2),
+			end: Duration::from_secs(200),
+		});
+
+		// Act / Assert: a queue that skips the blanks starts the next track where its music
+		// starts; one that plays files whole leaves the playhead at the top — and so does a
+		// track nobody has scanned, whatever the setting says, because there is no edge to
+		// start at (PLAN §14c).
+		assert_eq!(
+			Handover::Trimmed.starts_at(trim),
+			Some(Duration::from_secs(2))
+		);
+		assert_eq!(Handover::Whole.starts_at(trim), None, "files play whole");
+		assert_eq!(Handover::Trimmed.starts_at(None), None, "never scanned");
 	}
 }
