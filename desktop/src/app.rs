@@ -29,13 +29,14 @@ use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
+use crate::known::{Facts, Known};
 use crate::mixer::{self, Curve};
 use crate::queue::{self, Handover};
 use crate::queues::{QueueId, Queues};
 use crate::select::{Click, Collapse};
 use crate::settings::Settings;
 use crate::tree::Tree;
-use crate::waveform::{Scan, Trim};
+use crate::waveform::Scan;
 use crate::{fsio, paths, ui};
 
 /// The playhead poll (PLAN §4). 20 Hz: fast enough that a time readout never looks stuck,
@@ -207,32 +208,6 @@ impl DropTarget {
 pub struct Drag {
 	items: Vec<queue::Item>,
 	from: Option<(QueueId, Vec<usize>)>,
-}
-
-/// What a background job worked out about one file (PLAN §7a, §11a, §14c).
-///
-/// One type for two jobs that answer the same question at different depths: measuring a queue
-/// *reads* what is known, and a folder scan *works it out*. The arm that receives them does
-/// the same thing either way, which is the point — the app does not care which job found out
-/// how long a track is or where its music starts.
-#[derive(Debug, Clone)]
-pub struct Facts {
-	pub path: PathBuf,
-	pub duration: Option<Duration>,
-	/// What a full scan of the file says — the music's edges and its tempo — or `None` when this
-	/// job could not say (Q45). Not "there is none": a queue measurement only *reads* the store,
-	/// so a track nothing has scanned comes back with nothing here and keeps whatever it had.
-	///
-	/// One field rather than the two it used to be, because the two can only ever be found
-	/// together: they come out of one decode, they are stored under one rule, and a row showing
-	/// a playing time with no tempo beside it was never a state anything could produce.
-	pub ready: Option<Ready>,
-	/// Whether this job left the store holding everything a load would need (PLAN §11c).
-	///
-	/// The same shape as `ready` and for the same reason: `false` means *this job did not work
-	/// it out*, never "and it is not prepared". A queue measurement only reads, so it says
-	/// `false` and takes no mark away — the listing's own question is what removes one.
-	pub prepared: bool,
 }
 
 /// What the duplicate warning answered (PLAN §9a).
@@ -540,17 +515,10 @@ pub struct Clecta {
 	/// that the cache is touched *there* rather than on the GUI thread, where a commit is an
 	/// `fsync`.
 	cache: Arc<Cache>,
-	/// Where the music sits inside the files this run has been told about (PLAN §14c).
-	///
-	/// Filled by every job that finds out — a track's own scan, a queue measurement reading
-	/// the cache, a folder scan working it out — and read by the three places that need it:
-	/// the handover's early cut, the track it starts next, and the button above the strip.
-	///
-	/// A map rather than a field on `Deck` and another on `queue::Item`, because the same
-	/// answer serves a loaded track and a queued one and a track that is neither yet. A miss
-	/// is the ordinary state and means *play this whole*: nothing here is required for the app
-	/// to work, which is what makes the folder scan an optimization rather than a step.
-	trims: HashMap<PathBuf, Trim>,
+	/// What this run has learned about files, and the one door those answers arrive through
+	/// (PLAN §14c, Q59). The fan-out — the players' trims, the pane's marks, the queues' rows
+	/// — is the type's business, not the arms'.
+	known: Known,
 	/// The folder scan, while one is running (PLAN §11b). `None` at rest, which is also what
 	/// the Cancel button leaves behind.
 	scanning: Option<Scanning>,
@@ -679,7 +647,7 @@ impl Clecta {
 			// before the window exists: it is one small file, once, and everything after it
 			// wants to know whether there is a cache to ask (PLAN §11a).
 			cache: Arc::new(Cache::open(&paths::data_dir().join(CACHE_FILE))),
-			trims: HashMap::new(),
+			known: Known::default(),
 			scanning: None,
 			modifiers: Modifiers::empty(),
 			sweep: 0,
@@ -1162,7 +1130,8 @@ impl Clecta {
 
 			Message::Measured(measured) => {
 				for facts in measured {
-					self.learned(&facts);
+					self.known
+						.learned(&facts, &mut self.browser, &mut self.queues);
 				}
 			}
 
@@ -1494,7 +1463,7 @@ impl Clecta {
 				// the *file*, whatever is loaded in the player by now (PLAN §14c).
 				let trim = result.as_ref().ok().and_then(|scan| scan.trim);
 				let tempo = result.as_ref().ok().and_then(|scan| scan.tempo);
-				self.remember(&path, trim);
+				self.known.remember(&path, trim);
 				if result.is_ok() {
 					// Loading a track prepares it, so its row gets the same mark the folder scan
 					// would have given it (PLAN §11c) — one rule, whoever asked for the decode.
@@ -1579,7 +1548,8 @@ impl Clecta {
 				// Kept whatever the scan is doing by now: the work is done and the answer is
 				// true, so a cancel that arrived while this file was on a thread does not throw
 				// its answer away.
-				self.learned(&facts);
+				self.known
+					.learned(&facts, &mut self.browser, &mut self.queues);
 				if let Some(scanning) = self.scanning.as_mut() {
 					scanning.done += 1;
 					scanning.running -= 1;
@@ -1717,7 +1687,7 @@ impl Clecta {
 		self.queues
 			.get(source)
 			.handover
-			.hands_over_early(position, self.trims.get(&track.path).copied())
+			.hands_over_early(position, self.known.trim(&track.path))
 	}
 
 	/// Give a player that has just finished the next track from a queue (PLAN §7a).
@@ -1767,7 +1737,7 @@ impl Clecta {
 		// The other half of the handover setting (PLAN §7b), answered by the setting itself:
 		// silently 0:00 for a track nobody has scanned — the folder scan is what makes this
 		// exact, and until then the app plays the file it was given from the top.
-		if let Some(start) = handover.starts_at(self.trims.get(&path).copied()) {
+		if let Some(start) = handover.starts_at(self.known.trim(&path)) {
 			self.seek_to(id, start);
 		}
 
@@ -1807,36 +1777,6 @@ impl Clecta {
 		}
 
 		self.load(id, first)
-	}
-
-	/// Remember what a job worked out about one file, and settle every queued row holding it.
-	///
-	/// Applied to all three queues, because a track can be moved between them while the answer
-	/// is being looked up — and by path, so one answer settles every row holding that file. A
-	/// row that has been removed in the meantime simply matches nothing.
-	fn learned(&mut self, facts: &Facts) {
-		self.remember(&facts.path, facts.ready.and_then(|ready| ready.trim));
-		if facts.prepared
-			&& let Some(ready) = facts.ready
-		{
-			self.browser.mark_prepared(&facts.path, ready);
-		}
-		// Which also lets go of the file: this answer is done with it whatever the queues have
-		// done with the rows, and a path left in flight would never be looked up again.
-		self.queues
-			.measured(&facts.path, facts.duration, facts.ready);
-	}
-
-	/// Where a file's music sits, if the job that looked found any (PLAN §14c).
-	///
-	/// A `None` is *not* stored as "there is no trim", and the distinction matters: it means
-	/// this job could not say, and another one still might — a queue measurement only reads the
-	/// cache, where a folder scan decodes. Overwriting a known answer with silence would make
-	/// queueing a track un-learn what scanning it taught.
-	fn remember(&mut self, path: &Path, trim: Option<Trim>) {
-		if let Some(trim) = trim {
-			self.trims.insert(path.to_path_buf(), trim);
-		}
 	}
 
 	/// Hand files to threads until the fan-out is full, and notice when the last one lands
@@ -2500,8 +2440,7 @@ impl Clecta {
 		let trim = self.decks[id.index()]
 			.track
 			.as_ref()
-			.and_then(|track| self.trims.get(&track.path))
-			.copied();
+			.and_then(|track| self.known.trim(&track.path));
 		let panel = ui::deck::view(id, &self.decks[id.index()], trim, ring == Some(id), sweep);
 
 		if self.drag.is_none() {

@@ -12,6 +12,7 @@ mod browser;
 mod cache;
 mod deck;
 mod fsio;
+mod known; // what this run has learned about files, and the door answers arrive through
 mod mixer;
 mod paths;
 mod queue; // one queue: its rows, its selection, its handover rules

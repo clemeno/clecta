@@ -215,6 +215,9 @@ clecta/
         ├── browser.rs   the files pane's model: one directory, its entries, media categories (§9)
         ├── tree.rs      the folder tree's model: nodes, expansion, path arithmetic (§9)
         ├── fsio.rs      std::fs reads run off the GUI thread: list a dir, list its subfolders, the roots (§9)
+        ├── known.rs     PURE: what this run has learned about files, and the one door those
+        │                answers arrive through — the never-unlearn rule and the fan-out to
+        │                the panes live here (§14c, Q59)
         ├── paths.rs     clecta-data/ beside the app if writable, else the per-user dir; the .app walk-up (§11)
         ├── queue.rs  PURE arithmetic for **one** queue: its rows, its selection, and what
         │                every edit does to that selection (§7a)
@@ -2121,6 +2124,11 @@ otherwise pure; anything needing a device or a real folder is manual.
   is the **row** and not the track, by leaving a second copy elsewhere and checking it is still
   found. `duplicates` gets the batch form: positions into the batch, so a caller can filter rows
   and tracks by the same answer.
+- **`known.rs`** — the door a job's answer arrives through (Q59). One test walks a whole
+  answer to its three homes — the trim the players read, the mark on the pane's row, the
+  queued rows holding the file — and the other pins the rule that holds the door together:
+  a job that could not say takes nothing away, so a queue measurement that found nothing
+  neither un-learns a trim nor takes a mark off a row the store is happy about (Q45).
 
   `take_unmeasured` gets the two halves of "ask about each file once", and the rename is part of
   the test: a track sitting in two queues produces one entry rather than two, and **asking twice
@@ -2768,10 +2776,10 @@ stored — which is the whole cost of adding this to an existing cache.
 
 ### In the app: one map, three readers
 
-`Clecta::trims` is a `HashMap<PathBuf, Trim>` of what this run has been told, filled by every
-job that finds out — a track's own scan, a queue measurement reading the cache, a folder scan
-working it out — and read by the three places that need it: the early cut, the track it starts
-next, and the button above the strip.
+`known::Known` holds a `HashMap<PathBuf, Trim>` of what this run has been told (Q59), filled by
+every job that finds out — a track's own scan, a queue measurement reading the cache, a folder
+scan working it out — and read by the three places that need it: the early cut, the track it
+starts next, and the button above the strip.
 
 A map rather than a field on `Deck` and another on `queue::Item`, because the same answer
 serves a loaded track, a queued one, and one that is neither yet. **A miss is the ordinary
@@ -3078,6 +3086,7 @@ decided.
 | Q56 | Whether the Notice needs a module | **A door, not a module.** The one-line notice (CONTEXT.md) is a field, and a field is a fine home — what was smeared was its *delivery*: four arms each re-wrote "a device's refusal replaces the line, silence means fine", and `accept_drop` was a forwarder with one caller that failed the deletion test. The rule is now one method (`noted`) and the forwarder is inlined into the OS-drop arm. `Deck` keeps returning `Option<String>` on purpose: that return is Q48's pairing speaking, and it is what lets every transport edge be checked with no device in the room | §7, §10, Q48 |
 | Q57 | Where the handover's two decisions live | **Both on `Handover`.** §7b derives the *when* and the *where* from the one whole-vs-trimmed choice (Q51), but the code had them in different homes: `hands_over_early` was a free function taking the setting as its first argument, and the where — seek to the music's first edge, or leave the load at the top — was an inline condition in `advance` that no test reached. Both are methods on the setting now, `hands_over_early` and `starts_at`, each tested; `advance` keeps only what must stay in `app.rs` — the take, the load, the verify — because those are IO, and the seam between decision and execution is the same one `Deck::moved` draws (Q48) | §7b, Q51, Q48 |
 | Q58 | Where the two-stage collapse lives | **On a type in `select.rs`, generic over what was pressed.** Q50 built the machine as two `Option` fields on the app, and both of its shipped bugs (Q50's stale index, Q53's missing cancel) were a clear-site an arm forgot or ordered wrongly — nine arms each remembered which of the two fields to clear and in what order, and none of it was testable, because the interface was two raw fields. `select::Collapse<T>` makes the ordering rules methods: `arm` and `disarm` abandon an older pending click synchronously (the row arms' own clear, Q53), `pressed_anywhere` touches pending only (the raw listener's side of the same rule), `release` promotes, `cancel` claims both stages, `due` spends. Generic because the panes remember a pressed row differently (§9a); `Pressed` itself stays in `app.rs`. Q53's ordering hazard is now an assertion — the armed stage survives an anywhere-press, the pending stage does not | §9a, Q50, Q53 |
+| Q59 | Who owns what a run has learned about files | **One module, `known.rs`, and one door in.** The answers from three jobs — a track's own scan, a folder scan, a queue measurement — landed in three places (the trims the players and the handover read, the pane's marks, the queues' rows), and the fan-out was a method on the app that only two of the three producers went through; the rule that holds it together, "a job that could not say says nothing" (Q45), was enforced by prose at every producer. `Known` owns the trims and the fan-out — `learned` takes the browser and the queues as arguments, so the app stays the owner of its panes and the module stays pure and testable — and `Facts` moves in with it, because it is the vocabulary of the door. The pane's own map stays on `Browser` deliberately: it is a copy of the store's answer about *one listing*, with a listing's lifetime, not the run's | §14c, §11c, Q45 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
