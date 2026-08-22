@@ -39,13 +39,12 @@ The third queue, taken from by whichever deck runs out first. Labelled *Next up*
 _Avoid_: common, common list
 
 **Handover**:
-A queue giving its top track to a deck that has run out.
-_Avoid_: transition
-
-**Handover point**:
-When a handover happens — at the end of the file (*Whole track*) or at the end of the
-music (*Skip blanks*). Set per queue.
-_Avoid_: transition, transition setting
+A queue giving its top track to a deck that has run out. Per queue, a handover is
+**whole** or **trimmed** — that choice is the setting (*Whole track* / *Skip blanks* on
+screen), and it decides both when the handover fires and where the next track starts.
+The type is `Handover`.
+_Avoid_: transition, transition setting, handover point — the "point" is not a separate
+concept, it falls out of whole-vs-trimmed
 
 **Item**:
 One row of a queue: a file, plus whatever has been measured about it.
