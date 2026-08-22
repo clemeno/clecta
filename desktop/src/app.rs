@@ -263,6 +263,20 @@ impl Admission {
 			Admission::Nothing => false,
 		}
 	}
+
+	/// The batch that survives the answer, in its own order.
+	///
+	/// One place for the enumerate–filter–map all three doors were writing out by hand — and
+	/// generic for the sake of the `←` / `→` buttons, which zip rows and tracks and filter the
+	/// pairs, so what leaves one queue is exactly what arrives in the other.
+	fn admitted<T>(self, batch: Vec<T>, duplicates: &[(usize, QueueId)]) -> Vec<T> {
+		batch
+			.into_iter()
+			.enumerate()
+			.filter(|(position, _)| self.keeps(*position, duplicates))
+			.map(|(_, kept)| kept)
+			.collect()
+	}
 }
 
 /// A folder scan in flight (PLAN §11b).
@@ -1192,12 +1206,7 @@ impl Clecta {
 
 				let duplicates = self.queues.duplicates(&items, &[]);
 				let admission = self.admits(&items, &duplicates);
-				let items: Vec<queue::Item> = items
-					.into_iter()
-					.enumerate()
-					.filter(|(index, _)| admission.keeps(*index, &duplicates))
-					.map(|(_, item)| item)
-					.collect();
+				let items = admission.admitted(items, &duplicates);
 				if items.is_empty() {
 					return Task::none();
 				}
@@ -1241,12 +1250,9 @@ impl Clecta {
 				// filtered together — what leaves the queue is exactly what arrives in the other.
 				let duplicates = self.queues.duplicates(&items, &moving);
 				let admission = self.admits(&items, &duplicates);
-				let (rows, items): (Vec<usize>, Vec<queue::Item>) = rows
+				let (rows, items): (Vec<usize>, Vec<queue::Item>) = admission
+					.admitted(rows.into_iter().zip(items).collect(), &duplicates)
 					.into_iter()
-					.zip(items)
-					.enumerate()
-					.filter(|(index, _)| admission.keeps(*index, &duplicates))
-					.map(|(_, pair)| pair)
 					.unzip();
 				if items.is_empty() {
 					return Task::none();
@@ -2112,13 +2118,7 @@ impl Clecta {
 
 		let duplicates = self.queues.duplicates(&drag.items, &moving);
 		let admission = self.admits(&drag.items, &duplicates);
-		let items: Vec<queue::Item> = drag
-			.items
-			.into_iter()
-			.enumerate()
-			.filter(|(position, _)| admission.keeps(*position, &duplicates))
-			.map(|(_, item)| item)
-			.collect();
+		let items = admission.admitted(drag.items, &duplicates);
 		if items.is_empty() {
 			return;
 		}
@@ -2129,13 +2129,7 @@ impl Clecta {
 		// keeps its files.
 		if let Some((source, rows)) = &drag.from {
 			// Only what the warning left standing, by position, so what leaves is what lands.
-			let rows: Vec<usize> = rows
-				.iter()
-				.copied()
-				.enumerate()
-				.filter(|(position, _)| admission.keeps(*position, &duplicates))
-				.map(|(_, row)| row)
-				.collect();
+			let rows = admission.admitted(rows.clone(), &duplicates);
 			self.queues.get_mut(*source).take_rows(&rows);
 		}
 
@@ -3080,6 +3074,29 @@ mod tests {
 		assert!(scanning.is_over(), "the last one landed");
 		assert_eq!(scanning.done, scanning.files.len(), "counted once each");
 		assert!(scanning.busy.is_empty(), "nothing still spinning");
+	}
+
+	#[test]
+	fn the_warnings_answer_filters_a_batch_by_position() {
+		// Arrange: a batch of four, of which the second and the fourth are already queued.
+		let duplicates = vec![(1, QueueId::Shared), (3, QueueId::Shared)];
+		let batch = || vec!["a", "b", "c", "d"];
+
+		// Act / Assert: Yes queues repeats too, No takes only the fresh ones, Cancel nothing.
+		assert_eq!(
+			Admission::All.admitted(batch(), &duplicates),
+			["a", "b", "c", "d"]
+		);
+		assert_eq!(Admission::Fresh.admitted(batch(), &duplicates), ["a", "c"]);
+		assert!(Admission::Nothing.admitted(batch(), &duplicates).is_empty());
+
+		// The `←` / `→` buttons zip rows and tracks and filter the pairs, so what leaves one
+		// queue is exactly what arrives in the other.
+		let paired = vec![(4, "a"), (7, "b")];
+		assert_eq!(
+			Admission::Fresh.admitted(paired, &[(1, QueueId::Shared)]),
+			[(4, "a")]
+		);
 	}
 
 	#[test]
