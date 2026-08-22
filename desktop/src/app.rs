@@ -460,6 +460,8 @@ pub enum Message {
 	DragReleased,
 	/// The double-click window closed on a released click that still owes a collapse (Q50).
 	CollapseDue,
+	/// Any button went down, wherever it is. Only job: abandon a pending collapse (Q53).
+	PressedAnywhere,
 }
 
 pub struct Clecta {
@@ -1476,6 +1478,13 @@ impl Clecta {
 					_ => {}
 				}
 			}
+
+			// The net under every widget: a press anywhere abandons a pending collapse
+			// (Q53). `pending` only — the collapse a row press arms belongs to this very
+			// press, and this message may be processed on either side of the row's own. The
+			// row press arms keep their own clear too: a subscription message can trail the
+			// widget's by a frame, and the 350 ms timer does not wait.
+			Message::PressedAnywhere => self.pending = None,
 
 			Message::CloseRequested => {
 				self.settings().save();
@@ -2668,6 +2677,11 @@ fn gestures() -> Subscription<Message> {
 		iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
 			Some(Message::DragReleased)
 		}
+		// Any press, any button. §9a promised "a new press cancels the pending collapse",
+		// and only the row presses kept it — a press held on a deck button across the
+		// 350 ms tick let the collapse fire under it, and the button then acted on one row
+		// instead of the selection (Q53). Same ponytail trade as the release above.
+		iced::Event::Mouse(mouse::Event::ButtonPressed(_)) => Some(Message::PressedAnywhere),
 		_ => None,
 	})
 }

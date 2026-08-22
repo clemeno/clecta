@@ -437,7 +437,8 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
 - **Narrowing a selection.** *Not checked yet.* The rule (`Click::defers`) is tested and the
   timing is not: that clicking one row of five narrows to it a beat later, that dragging the
   five to a queue does **not** narrow them, that double-clicking one still loads all five, and
-  that ⌘A or Escape inside the beat wins over the pending collapse (PLAN §9a, Q50).
+  that ⌘A or Escape inside the beat wins over the pending collapse — as does any press, even
+  one held on a deck button across the beat and released late (PLAN §9a, Q50, Q53).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.
