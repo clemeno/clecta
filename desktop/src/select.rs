@@ -45,9 +45,8 @@ impl Click {
 	/// A plain press on a row that is already selected must not collapse the selection — it
 	/// is arming a drag that may want to carry all of it (PLAN §9a). If nothing else claims
 	/// the click, the release finishes the job the press deferred, which is
-	/// collapse-on-release (Q50). Both panes ask this same question, at the press and again
-	/// at the release, which is why it has a name instead of being the same two conditions
-	/// written four times.
+	/// collapse-on-release (Q50). Both panes ask this same question at their press, which is
+	/// why it has a name instead of being the same two conditions written twice.
 	pub fn defers(self, already_selected: bool) -> bool {
 		already_selected && self == Click::Replace
 	}

@@ -297,7 +297,7 @@ mod tests {
 		);
 		assert!(
 			text.contains("\"transition\"") && !text.contains("\"handover\""),
-			"the handover points keep their old key too"
+			"the handover setting keeps its old key too"
 		);
 	}
 

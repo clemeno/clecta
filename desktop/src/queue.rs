@@ -170,6 +170,14 @@ impl Queue {
 		&self.items
 	}
 
+	/// Whether this index still names this exact track — the question a delayed click has to
+	/// ask, because a handover can take the top row while a timer runs, and an index alone
+	/// cannot see that: after the shift it stays in range and names the row *below* the one
+	/// it meant (Q50).
+	pub fn holds(&self, index: usize, path: &Path) -> bool {
+		self.items.get(index).is_some_and(|item| item.path == path)
+	}
+
 	pub fn is_empty(&self) -> bool {
 		self.items.is_empty()
 	}
@@ -502,6 +510,23 @@ mod tests {
 				.map(|name| PathBuf::from("/m").join(name))
 				.collect(),
 		)
+	}
+
+	#[test]
+	fn an_index_only_holds_the_track_that_is_still_under_it() {
+		// Arrange / Act / Assert: the answer is about the exact track, so a queue that
+		// shifted under a stale index reads as "gone" rather than as the row that slid up
+		// into its place — which is what keeps a delayed click off the wrong row (Q50).
+		let queue = filled(&["a", "b", "c"]);
+		assert!(queue.holds(1, &PathBuf::from("/m").join("b")));
+		assert!(
+			!queue.holds(1, &PathBuf::from("/m").join("a")),
+			"the row above, as if the top had been handed over"
+		);
+		assert!(
+			!queue.holds(9, &PathBuf::from("/m").join("a")),
+			"out of range"
+		);
 	}
 
 	fn names(queue: &Queue) -> Vec<&str> {

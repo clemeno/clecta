@@ -1465,18 +1465,11 @@ impl Clecta {
 				// selection in the meantime has already cancelled it.
 				match self.pending.take() {
 					Some(Pressed::Row(path)) => self.browser.click(&path, Click::Replace),
-					// A queue can move under the timer — a handover takes the top row on its
-					// own clock — and an index alone cannot see that: after a shift it stays
-					// in range and names the row *below* the one pressed. So the click fires
-					// only if the index still holds the very track that was under the press,
-					// and is dropped otherwise (Q50).
+					// A queue can move under the timer — a handover takes the top row on
+					// its own clock — so the click fires only if the index still holds the
+					// very track that was under the press, and is dropped otherwise (Q50).
 					Some(Pressed::Queue(id, index, path))
-						if self
-							.queues
-							.get(id)
-							.items()
-							.get(index)
-							.is_some_and(|item| item.path == path) =>
+						if self.queues.get(id).holds(index, &path) =>
 					{
 						self.queues.get_mut(id).click(index, Click::Replace);
 					}
