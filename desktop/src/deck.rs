@@ -150,6 +150,9 @@ pub struct Deck {
 	/// The tempo slider (PLAN §7c), 0..=2 with 1.0 as the track's own speed. A physical
 	/// fader like `fader` above: it survives loads and unloads, and it is not track state.
 	pub rate: f32,
+	/// Master tempo / key lock (PLAN §7c): the slider changes the tempo alone, and the key
+	/// stays put. A switch with the same lifetime as the slider it changes the meaning of.
+	pub key_lock: bool,
 }
 
 impl Default for Deck {
@@ -164,6 +167,8 @@ impl Default for Deck {
 			scanning: false,
 			// The track's own speed, for the same reason the fader starts open.
 			rate: 1.0,
+			// Off, which is honest varispeed: the lock is the feature you switch on.
+			key_lock: false,
 		}
 	}
 }
@@ -293,6 +298,16 @@ impl Deck {
 			if self.is_playing() {
 				engine.play(id);
 			}
+		}
+	}
+
+	/// The key lock flipped (PLAN §7c): remember it, and hand the tempo job to whichever
+	/// side now owns it — the wrapper's stretch under the lock, the speed stage without.
+	/// The same pairing as `rated`, for the same reason.
+	pub fn locked(&mut self, id: DeckId, on: bool, engine: &Option<Engine>) {
+		self.key_lock = on;
+		if let Some(engine) = engine {
+			engine.set_lock(id, on);
 		}
 	}
 

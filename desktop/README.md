@@ -209,6 +209,12 @@ cargo build --release --target x86_64-apple-darwin
   loads, unloads and track ends. The playhead stays truthful at any rate because the app counts
   the file's own samples in a wrapper around every source, instead of trusting a position rodio
   keeps in the output's timeline (PLAN §7c).
+- **MT/KL — master tempo / key lock.** The checkbox beside the slider changes what it means:
+  off, varispeed — the pitch moves with the speed, like a record; on, the tempo moves alone and
+  the key stays put. A hand-written WSOLA time-stretch in the same wrapper, ~150 lines and no
+  new dependency, with the whole claim pinned by one test: a locked 150% turns three seconds of
+  a 440 Hz tone into two seconds that still cross zero 880 times a second, where varispeed
+  would read 660 (PLAN §7c).
 - **Correcting a tempo by hand.** Right-click a row — in the files pane or in a queue — for a menu
   with **Correct tempo…**, and a panel with `/2`, the number, and `×2`. That is the whole editor,
   because an octave is the only error a detector makes that you can see at a glance, and the two
@@ -278,7 +284,7 @@ cargo build --release
 | `ui/queue.rs` | the footer's count and running time, and an empty queue saying nothing at all rather than `0 · 0:00`; and which way the two arrows may move a selection — the top row, the last row, the middle, a block touching either end, the whole queue at once, and the single row of a single-row queue |
 | `ui/browser.rs` | which mark a row wears — nothing, the spinner, the `✓` — and that a file being *re-*scanned spins rather than keeping the `✓` it already earned; plus a load button counting its rows only once there is more than one |
 | `ui/deck.rs` | the strip's two divides: the music's edges as fractions of the file, a stale trim past the end clamped to the strip rather than drawn off it, a stream with no length and a zero-length track both drawing no marks at all, and a playhead a tick past its own total — which the app produces twenty times a second at the end of every track — reading as exactly the end; plus the rate readout multiplying only a tempo it actually has |
-| `stretch.rs` | the wrapper changing nothing and counting everything — pass-through sample for sample, with the count landing in the file's own seconds — a seek moving the count to where the decoder landed rather than what was consumed, and the rate surviving a load the way a fader does while the playhead resets |
+| `stretch.rs` | the wrapper changing nothing and counting everything — pass-through sample for sample, with the count landing in the file's own seconds — a seek moving the count to where the decoder landed rather than what was consumed, and the rate surviving a load the way a fader does while the playhead resets; then the key lock's whole claim in one test: three seconds of a 440 Hz sine at a locked 150% coming out as two seconds of output that still crosses zero 880 times a second — tempo moved, pitch not, where varispeed would read 660 — with the playhead running the input's three seconds rather than the output's two |
 | `ui/tempo.rs` | the quiet line under the editor: what the detector said, shown only while it differs from what the panel shows — compared as the two decimals on screen, so halving and doubling back says nothing rather than "detected 128.00" under a 128.00 |
 | `audio.rs` | the two things here that need no audio device — one scan of a real file (a generated WAV, silent for a second then loud for a second, whose music is asserted to start at exactly one second and run to two), and one measurement of another, plus a missing file answering "no length" rather than failing |
 | `settings.rs` | a round trip, every broken file reading as defaults, a missing field keeping its default (including the newest: a file written before tempos could be corrected has corrected none), an out-of-range value falling back alone, a folder or a queued track that no longer exists being forgotten, and a corrected tempo surviving only if it could be drawn — a deleted file, a non-media file, a `0`, a negative and a `NaN` all dropped, the good one beside them kept; and the three queues zipping out of the file's two orderings — paths per player, switches per drawn queue — and back in, each keeping its own paths and its own switches |

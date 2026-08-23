@@ -300,6 +300,9 @@ pub enum Message {
 	Transport(DeckId, deck::Event),
 	/// The per-player rate slider (PLAN §7c): 1.0 is the track's own speed, 0 is a pause.
 	RateChanged(DeckId, f32),
+	/// The **MT/KL** switch beside it (PLAN §7c): on, the slider changes the tempo alone
+	/// and the key stays put.
+	KeyLockToggled(DeckId, bool),
 	/// The per-player **Load…** button — the third door that always works (PLAN §10).
 	LoadPressed(DeckId),
 	/// The per-player **Unload** button: take the track out and leave the player empty.
@@ -826,6 +829,10 @@ impl Clecta {
 
 			Message::RateChanged(id, rate) => {
 				self.decks[id.index()].rated(id, rate, &self.engine);
+			}
+
+			Message::KeyLockToggled(id, on) => {
+				self.decks[id.index()].locked(id, on, &self.engine);
 			}
 
 			Message::LoadPressed(id) => {

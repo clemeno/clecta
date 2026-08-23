@@ -104,12 +104,19 @@ impl Engine {
 	}
 
 	/// Set one player's rate (PLAN §7c): 1.0 is the track's own speed. Varispeed, like a
-	/// record — the pitch moves with it — and the fader survives loads, stops and track ends,
-	/// because rodio keeps the speed on the *player* while this keeps it beside the playhead
-	/// arithmetic that needs it.
+	/// record — the pitch moves with it — unless the key lock holds the pitch, in which case
+	/// the wrapper stretches and the player's own speed stage stays at 1.0. `Shared::speed`
+	/// is that routing, in one place for this and `set_lock` both.
 	pub fn set_rate(&self, id: DeckId, rate: f32) {
 		self.shared[id.index()].set_rate(rate);
-		self.player(id).set_speed(rate);
+		self.player(id).set_speed(self.shared[id.index()].speed());
+	}
+
+	/// Flip one player's key lock (PLAN §7c): on, the rate changes the tempo alone — the
+	/// wrapper takes the job over from the speed stage, which is why both are set here.
+	pub fn set_lock(&self, id: DeckId, on: bool) {
+		self.shared[id.index()].set_lock(on);
+		self.player(id).set_speed(self.shared[id.index()].speed());
 	}
 
 	/// Drop whatever one player holds, leaving it silent and empty. The one transport
@@ -153,8 +160,10 @@ impl Engine {
 		// `to` is a place in the *file*, but the player's speed stage scales every seek it is
 		// handed by its factor on the way to the decoder. Dividing here is what makes the two
 		// cancel — the wrapper then hears the file-timeline position and records it (PLAN §7c).
-		let rate = self.shared[id.index()].rate();
-		let to = if rate > 0.0 { to.div_f32(rate) } else { to };
+		// By the stage's *actual* factor: under the key lock it runs at 1.0 however far the
+		// rate slider sits, because the wrapper is doing the tempo instead.
+		let speed = self.shared[id.index()].speed();
+		let to = if speed > 0.0 { to.div_f32(speed) } else { to };
 		self.player(id)
 			.try_seek(to)
 			.context("cannot seek this stream")?;

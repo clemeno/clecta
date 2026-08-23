@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use iced::widget::{button, column, container, row, slider, text};
+use iced::widget::{button, checkbox, column, container, row, slider, text};
 use iced::{Center, Element, Fill, Right, Theme};
 
 use crate::app::Message;
@@ -76,8 +76,14 @@ pub fn view(
 			),
 			// The rate slider (PLAN §7c): 0% is a pause, 100% the track's own speed, 200%
 			// double. Live even with nothing loaded, like the mixer's faders — it is a
-			// setting, and the next track picks it up.
+			// setting, and the next track picks it up. **MT/KL** is what the slider means:
+			// off it is varispeed and the pitch moves, on it is tempo alone.
 			row![
+				checkbox(deck.key_lock)
+					.label("MT/KL")
+					.text_size(11)
+					.size(14)
+					.on_toggle(move |on| Message::KeyLockToggled(id, on)),
 				slider(0.0..=2.0, deck.rate, move |rate| Message::RateChanged(
 					id, rate
 				))

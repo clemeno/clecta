@@ -226,8 +226,9 @@ clecta/
         │                three questions only the set can answer — is this a duplicate, what
         │                needs measuring, where does the next track come from (§7a, Q47)
         ├── settings.rs  load/save clecta-data/settings.json; a corrupt file reads as defaults (§11)
-        ├── stretch.rs   a player's rate fader and the file-timeline playhead the player
-        │                cannot keep itself: every source is wrapped on its way in (§7c)
+        ├── stretch.rs   a player's rate fader, the file-timeline playhead the player cannot
+        │                keep itself, and the key lock's WSOLA time-stretch: every source is
+        │                wrapped on its way in (§7c)
         ├── waveform.rs  PURE, and about what is in a *file*: `Scanner` folds its samples to a
         │                bounded array, finds the music's edges and works out its tempo, all in
         │                one pass; `Scan` is the three answers, declared here so `cache` can name
@@ -958,9 +959,24 @@ the current rate so the speed stage multiplies it back, which is also what lands
 own `try_seek` in file time. One writer on the audio thread, no locks, and the readout and the
 strip stay truthful at any rate.
 
-The module is named for what it grows into: the master-tempo stretch (MT/KL) belongs behind the
-same wrapper, so the seam between "the file's samples" and "what the player was fed" exists in
-exactly one place.
+**MT/KL — master tempo / key lock.** The checkbox beside the slider changes what the slider
+*means*: off, varispeed, the pitch moves with the speed; on, the tempo moves alone and the key
+stays put. Behind it is a WSOLA time-stretch (waveform-similarity overlap-add — the standard
+algorithm, hand-written because no pure-Rust dependency earns its place for ~150 lines) living
+inside the same wrapper: output is synthesized a half-window (~23 ms) at a time, each block
+takes its input from wherever the rate says the playhead should be, searches ~6 ms of
+neighbourhood for the offset that lines its waveform up with the previous block's end, and
+crossfades. The routing rule is one method, `Shared::speed`: under the lock the player's speed
+stage runs at exactly 1.0 — the wrapper owns the tempo — and without it the stage gets the rate
+and the wrapper passes through. Seeks divide by that same `speed`, so both modes land in file
+time. The playhead under the lock advances per block, written as the block's input anchor —
+still the file's own clock, which the pitch test pins alongside the tempo: three seconds of a
+440 Hz sine at a locked 150% come out as two seconds still crossing zero 880 times a second,
+where varispeed would read 660.
+
+A mode switch mid-play joins bluntly (up to ~50 ms dropped or replayed, a `ponytail:` in the
+code): the alternative is splicing two timelines for a click that happens once per flip of a
+switch.
 
 ---
 
@@ -3154,6 +3170,7 @@ decided.
 | Q60 | What Unload does, and what it asks first | **Empty the player, and ask only while the sound is on.** The button sits beside **Load…** and puts the player back to `Empty` — track, playhead, waveform and the scanning flag all go; the fader stays, because it is a mixer setting rather than track state. The pairing is Q48's: `Deck::unloaded` moves the model and the audio together, with no `Option<String>` return because dropping a source is the one thing a device cannot refuse. The scanning flag must go *here*: the `Scanned` guard drops a result for a track no longer loaded, so nothing else would ever stop the animation. The confirmation is the same rfd modal the destructive buttons use, and only for a playing player — unloading a stopped track costs one Load to undo, while cutting audible playback is the mistake a modal exists for. Auto-load cannot refill the emptied player: `advance` runs only when a track *ends* (§7a), and an unloaded player has no track to end | §7, Q48, §7a |
 | Q61 | Which key detector, and where it lives | **Krumhansl–Schmuckler over a Goertzel chroma, as the fourth accumulator in `waveform.rs`.** The scan already decodes every sample (§14a), so the key rides the same pass — §14a's "a struct, a field, a `push` and a `finish`" promise, kept. The profiles are Krumhansl & Kessler's listener measurements, the standard baseline detector; Goertzel over an FFT because thirty-six named notes cost no dependency (§12); a boxcar decimation whose aliasing is accepted and marked, because the correlation is robust to it. A fifth cache table on the all-or-nothing rule (§11a), so an old store re-scans once instead of migrating. The column goes just before the tempo in both panes — a set is matched by key before it is matched by speed — and prints sharps only, `m` for minor, no Camelot numbers | §14e, §11a, §12 |
 | Q62 | Who keeps the playhead once a player has a rate | **The app, in a wrapper around every source — never `Player::get_pos`.** rodio's count is in the output's timeline (slow by the factor at 150%), its seeks are scaled by the speed stage, and the anchor a seek leaves behind goes wrong if the rate changes afterwards — a drift with no bound but the seek target. `stretch::Stretched` counts the interleaved source samples it hands the player, batched into one atomic; `Engine::seek` divides by the rate so the speed stage multiplies it back. The slider itself is a fader, not track state — it survives loads and unloads like the volume fader — and its 0% end is a pause gate on the `Deck` (`RATE_FLOOR`), because a transport rule belongs with the transport (Q48) and rodio must not be handed a speed of zero | §7c, Q48, §14b |
+| Q63 | How the key lock changes tempo without pitch | **A hand-written WSOLA inside the same wrapper, and one routing rule.** rodio has varispeed only, and the pure-Rust stretch crates do not earn a dependency for ~150 lines of the textbook algorithm: synthesize a half-window at a time, search ~6 ms for the waveform-aligned start, crossfade. The rule that keeps the two tempo mechanisms from fighting is `Shared::speed` — under the lock the player's speed stage is pinned to 1.0 and the wrapper stretches; without it the stage gets the rate and the wrapper passes through — and seeks divide by that same answer, so both modes land in file time. Pinned by a test that checks tempo and pitch *together*: a locked 150% turns three seconds of 440 Hz into two seconds still crossing zero 880 times a second, where varispeed would read 660. Mode switches join bluntly (≤ ~50 ms, `ponytail:`) rather than splicing timelines for a once-per-flip click | §7c, Q62, §12 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
