@@ -943,9 +943,10 @@ Each player gets a rate fader under its strip: 0..=200%, with 100% the track's o
 varispeed, like a record — the pitch moves with the speed — and it is a **fader, not track
 state**: it survives loads, unloads, stops and track ends, exactly like the volume fader above
 it, so the next track plays at whatever the fader already says. The readout beside it shows the
-percentage, and the tempo it produces once the track's own is known: `150% · 192.0`, the
-corrected tempo (§14d) times the rate, to one decimal — scaled precision is not detector
-precision.
+percentage, the tempo it produces once the track's own is known, and the key coming out:
+`150% · 192.0 · G`. The tempo is the corrected one (§14d) times the rate, to one decimal —
+scaled precision is not detector precision — and the key is the detected one transposed by the
+rate whenever the lock is not holding it (§14e).
 
 **The 0% end means pause.** Below `RATE_FLOOR` the device is paused rather than run at a speed
 rodio's position arithmetic cannot hold, while the transport keeps saying Playing: the slider is
@@ -3141,7 +3142,7 @@ change rather than an argument with §11a's first sentence.
 
 ---
 
-## 14e. The key (`waveform.rs`, `cache.rs`, `ui/browser.rs`, `ui/queue.rs`)
+## 14e. The key (`waveform.rs`, `cache.rs`, `ui/browser.rs`, `ui/queue.rs`, `ui/deck.rs`)
 
 The fourth answer from the one decode, and §14a's promise kept literally: a struct, a field, a
 `push` and a `finish`, all in `waveform.rs`. `Chroma` keeps a decimated copy of the waveform — a
@@ -3168,6 +3169,16 @@ The column sits just before the tempo in the files pane and the queues, because 
 by key before it is matched by speed. Sharps only, an `m` for the minors: one spelling per pitch
 class. Not the Camelot wheel's numbers — that is a convention on top of this notation, addable
 where the label is printed if it is ever missed.
+
+**In the player it goes on the end of the rate readout** — `150% · 192.0 · G` — beside the tempo
+the same slider is scaling, because both are answers to "can this go next?". And it is the key
+*coming out*, not the key in the file: with MT/KL off the rate transposes the track, so the
+readout transposes with it, `12 × log2(rate)` rounded to the nearest semitone. That makes the
+checkbox's whole claim visible in one line — flip the lock at 150% and the `G` becomes a `C`
+again while the `192.0` stays — which is worth more than a label that would have been quietly
+wrong for the entire off-lock half of the slider's life. Rounded because a key name has no way
+to say 51 cents; a 3% beatmatch nudge therefore reads as a semitone, which is the nearest thing
+that is true.
 
 ---
 
@@ -3252,6 +3263,7 @@ decided.
 | Q65 | What the two keys act on, now that four lists can be selected in | **The list a row was last pressed in — one field, one ring, no new gesture.** §9a kept ⌘A and Escape on the files pane because the app had no focus model and would have had to guess; the answer is not a Tab order but the press the user is already making, which the app already receives as `RowSelected` / `QueueSelected`. `focus::Focus` is `Files` or `Queue(id)`, starts on the pane (where the app opens, and the list with thousands of rows), and takes the panes as arguments like `known.rs` does (Q59) so the rule is checkable with no window: ⌘A fills one list and leaves three alone, Escape empties one and leaves three selected — because a set built in one queue must survive going to look at another, and a key that emptied all four would be a key nothing could undo. The focused list wears a ring in `primary`, the colour §10 left spare for it, so the answer is looked at rather than tried; the tree never wears one, being navigation rather than a list. A queue's ⌘A takes every row, since a queue has no hidden filter to argue with, and leaves the anchor on the top row so a Shift-click straight afterwards shortens the set from the top | §9a, Q59, §10 |
 | Q66 | Whether the rate slider and its lock survive a quit | **Both, together, or neither.** Q62 made the slider a fader rather than track state — it survives loads, unloads and track ends — and the volume fader beside it already survived a relaunch, so a slider that did not was one setting behaving two ways. Together because the lock is what the rate *means*: restoring 150% without it plays yesterday's tempo with a pitch behaviour it was never set with. The argument against was real and is answered on screen rather than in code — a track playing fast for a reason set yesterday is a surprise, but the slider and its `· 192.0` readout are showing the reason. Sanitized like the faders (a trust boundary, §11): outside 0..=200%, or a `NaN` the audio thread would divide by, reads as the track's own speed; a file predating the field reads 1.0 through a named default, not serde's `0.0`, which would open both players silent. And the *device* is told by `apply_rates` at startup and after a reconnect, through `rated`/`locked` rather than round them, because a fresh `Engine` starts at 1.0 and a slider parked at its pause end must come back paused | §7c, §11, Q62, Q48 |
 | Q67 | Why the slider did nothing off the key lock | **rodio's speed stage cannot move a single-span source, so the wrapper does the rate itself and the stage is retired.** Q62 and Q63 gave the stage the rate whenever the lock was off; on a source reporting one span — which `Stretched` is, honestly: constant rate, constant channels, first sample to last — the factor is read exactly once, when the source is appended. rodio's speed is a lie about the sample rate, and `UniformSourceIterator` only re-reads a source's rate when its span runs out; its own decoders get away with it because they report a span per packet. Faking span boundaries was the one-line fix and was rejected: the resampler is rebuilt at each one, dropping the frames it had read ahead — a periodic click and a playhead drifting ~0.1% from what is heard, which is the exact class of thing Q62 built this wrapper to stop. Instead the varispeed joins the stretch *inside* the wrapper as a second `Mode`, sharing its buffer, anchor and output queue and differing only in reading the input by interpolation instead of by search-and-crossfade. What that deletes is worth as much as what it adds: `Shared::speed`, both `Player::set_speed` calls, and `Engine::seek`'s divide-so-the-stage-multiplies-back — two mechanisms and their cancelling correction become one. Pinned by the mirror of Q63's test: 150% *unlocked* is two seconds of output reading 660 Hz, which the old code failed by returning three seconds of 440 | §7c, Q62, Q63 |
+| Q68 | Which key the player's readout shows | **The one coming out, transposed by the rate unless the lock is holding it.** The key goes on the end of the rate readout rather than in a field of its own — `150% · 192.0 · G` — because it answers the same question as the tempo beside it and the slider scales them both. Showing the *detected* key there was the one-line version and was rejected as a readout that is wrong for half of the slider's travel: off the lock, varispeed really does transpose the track, so a static `C` beside a 150% that is playing a G is a lie the app is in a position to know about. `12 × log2(rate)`, rounded to the nearest semitone, because a key name cannot say 51 cents — a 3% beatmatch nudge reads as a semitone, the nearest true thing there is. The reward is that MT/KL's claim becomes visible rather than described: flipping the lock at 150% turns the `G` back into a `C` while the `192.0` stays put. The key reaches the panel the way the tempo did, on `deck::Track` from the scan, and it is *not* corrected on the way (§14d is about halved and doubled tempos; nothing types in a key) | §7c, §14e, Q61 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

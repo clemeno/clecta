@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::audio::Engine;
+use crate::waveform::Key;
 
 /// Which of the two players.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,6 +123,9 @@ pub struct Track {
 	/// The detected tempo, for the rate slider's readout (PLAN §7c). `None` until the
 	/// track's own scan lands — the same moment the strip fills in.
 	pub tempo: Option<f32>,
+	/// The detected key (PLAN §14e), for the same readout, and transposed by it when the lock
+	/// is off. `None` until the scan lands, or when the file has no key to find.
+	pub key: Option<Key>,
 }
 
 /// One player, as the app models it.
@@ -431,6 +435,7 @@ mod tests {
 				name: "track.mp3".to_string(),
 				duration: None,
 				tempo: None,
+				key: None,
 			}),
 			..Default::default()
 		}

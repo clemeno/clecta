@@ -9,7 +9,11 @@ use iced::{Center, Element, Fill, Right, Theme};
 use crate::app::Message;
 use crate::deck::{self, Deck, DeckId, Transport};
 use crate::ui;
-use crate::waveform::Trim;
+use crate::waveform::{Key, Trim};
+
+/// The rate readout's width, pinned so the slider beside it does not resize as the numbers
+/// change under it. Wide enough for the longest thing it can say — `200% · 199.9 · A#m`.
+const READOUT_WIDTH: f32 = 132.0;
 
 /// How much of a track name fits before it is elided. Fixed rather than measured: a
 /// responsive elide needs the widget's real width, which only `advanced` gives (PLAN §3).
@@ -24,12 +28,14 @@ const RING_WIDTH: f32 = 2.0;
 /// scanning animation's phase, which the strip uses only while this player is being
 /// scanned (PLAN §14a). `trim` is where the music inside the loaded track sits, if anything
 /// has worked it out — the two jump buttons and the strip's two marks (PLAN §14c). `tempo`
-/// is the loaded track's, corrections applied, for the rate slider's readout (PLAN §7c).
+/// is the loaded track's, corrections applied, and `key` the loaded track's, both for the rate
+/// slider's readout (PLAN §7c, §14e).
 pub fn view(
 	id: DeckId,
 	deck: &Deck,
 	trim: Option<Trim>,
 	tempo: Option<f32>,
+	key: Option<Key>,
 	ring: bool,
 	sweep: f32,
 ) -> Element<'_, Message> {
@@ -93,9 +99,9 @@ pub fn view(
 					.padding([2, 6])
 					.style(button::text)
 					.on_press(Message::RateChanged(id, 1.0)),
-				text(rate_label(deck.rate, tempo))
+				text(rate_label(deck.rate, tempo, key, deck.key_lock))
 					.size(11)
-					.width(92.0)
+					.width(READOUT_WIDTH)
 					.align_x(Right),
 			]
 			.spacing(6)
@@ -157,18 +163,43 @@ fn jump(label: &'static str, to: Option<Duration>, id: DeckId) -> Element<'stati
 		.into()
 }
 
-/// What the rate slider reads as: the percentage, and the tempo it produces (PLAN §7c).
+/// What the rate slider reads as: the percentage, the tempo it produces, and the key that is
+/// coming out (PLAN §7c, §14e).
 ///
 /// The effective tempo is the track's own times the rate — the one multiplication the whole
 /// slider is for — to one decimal, because two would claim a precision the detector does not
-/// have once it is scaled. The percentage alone when nothing knows the track's tempo yet:
-/// a readout that guessed would be a readout that lies until the scan lands.
-fn rate_label(rate: f32, tempo: Option<f32>) -> String {
-	let percent = format!("{:.0}%", rate * 100.0);
-	match tempo {
-		Some(tempo) => format!("{percent} · {:.1}", tempo * rate),
-		None => percent,
+/// have once it is scaled. Each part is dropped rather than guessed at when the scan has not
+/// landed: a readout that guessed would be a readout that lies for the first few seconds.
+fn rate_label(rate: f32, tempo: Option<f32>, key: Option<Key>, locked: bool) -> String {
+	let mut label = format!("{:.0}%", rate * 100.0);
+	if let Some(tempo) = tempo {
+		label.push_str(&format!(" · {:.1}", tempo * rate));
 	}
+	if let Some(key) = heard_key(key, rate, locked) {
+		label.push_str(&format!(" · {}", key.label()));
+	}
+	label
+}
+
+/// The key the player is actually putting out: the track's own under the lock, and the track's
+/// own *transposed* without it, because varispeed moves the pitch (PLAN §7c).
+///
+/// Twelve semitones to the doubling, so the shift is `12 × log2(rate)` — 150% is a fifth up,
+/// which is the whole reason MT/KL exists. Rounded to the nearest semitone, which is the only
+/// thing a key name can say: a 3% nudge really is 51 cents sharp, and this will call that a
+/// semitone rather than invent a notation for it. At 0% nothing is heard at all, so the
+/// track's own key is what the readout keeps showing.
+fn heard_key(key: Option<Key>, rate: f32, locked: bool) -> Option<Key> {
+	let key = key?;
+	if locked || rate <= 0.0 {
+		return Some(key);
+	}
+
+	let semitones = (rate.log2() * 12.0).round() as i32;
+	Some(Key {
+		root: (i32::from(key.root) + semitones).rem_euclid(12) as u8,
+		minor: key.minor,
+	})
 }
 
 /// The music's two edges as fractions of the track, for the marks on the strip.
@@ -227,16 +258,61 @@ mod tests {
 		Duration::from_secs_f32(seconds)
 	}
 
+	/// C major and A minor, the two roots every case below is written from.
+	const C: Option<Key> = Some(Key {
+		root: 0,
+		minor: false,
+	});
+	const A_MINOR: Option<Key> = Some(Key {
+		root: 9,
+		minor: true,
+	});
+
 	#[test]
 	fn the_rate_readout_multiplies_only_a_tempo_it_actually_has() {
 		// Arrange / Act / Assert: the percentage always; the effective tempo only once the
 		// scan has said what the track's own is (PLAN §7c). One decimal — scaled precision
 		// is not detector precision — and 128 × 1.5 landing on 192.0 exactly is the check
 		// that the multiplication is the advertised one.
-		assert_eq!(rate_label(1.0, None), "100%");
-		assert_eq!(rate_label(0.0, None), "0%", "the pause end");
-		assert_eq!(rate_label(1.5, Some(128.0)), "150% · 192.0");
-		assert_eq!(rate_label(0.5, Some(97.46)), "50% · 48.7");
+		assert_eq!(rate_label(1.0, None, None, false), "100%");
+		assert_eq!(rate_label(0.0, None, None, false), "0%", "the pause end");
+		assert_eq!(rate_label(1.5, Some(128.0), None, false), "150% · 192.0");
+		assert_eq!(rate_label(0.5, Some(97.46), None, false), "50% · 48.7");
+
+		// And the key on the end of the same readout, which the lock decides the value of.
+		assert_eq!(rate_label(1.0, Some(128.0), C, false), "100% · 128.0 · C");
+		assert_eq!(rate_label(1.5, Some(128.0), C, true), "150% · 192.0 · C");
+		assert_eq!(rate_label(1.5, Some(128.0), C, false), "150% · 192.0 · G");
+		assert_eq!(rate_label(1.5, None, C, false), "150% · G", "never scanned");
+	}
+
+	#[test]
+	fn the_key_moves_with_the_rate_unless_the_lock_is_holding_it() {
+		// Arrange / Act / Assert: 150% is 12 × log2(1.5) = 7.02 semitones, a fifth — C to G,
+		// and A minor to E minor, the minor-ness travelling with the root.
+		assert_eq!(heard_key(C, 1.5, false), Some(key(7, false)), "a fifth up");
+		assert_eq!(heard_key(A_MINOR, 1.5, false), Some(key(4, true)), "Em");
+
+		// The lock is exactly the absence of that shift, which is its whole claim.
+		assert_eq!(heard_key(C, 1.5, true), C);
+		assert_eq!(heard_key(A_MINOR, 0.75, true), A_MINOR);
+
+		// Down an octave is the same key again — the modulo, which a subtraction alone would
+		// have turned into a negative root and a panicking index into the note names.
+		assert_eq!(heard_key(C, 0.5, false), C, "an octave down");
+		assert_eq!(heard_key(C, 0.25, false), C, "two octaves down");
+
+		// Nothing is heard at 0%, so nothing is transposed: the readout keeps the track's own
+		// key rather than reporting the pitch of silence.
+		assert_eq!(heard_key(C, 0.0, false), C, "the pause end");
+
+		// And a file with no key to find has none at any rate.
+		assert_eq!(heard_key(None, 1.5, false), None);
+	}
+
+	/// A key, spelled the way the cases above read.
+	fn key(root: u8, minor: bool) -> Key {
+		Key { root, minor }
 	}
 
 	#[test]

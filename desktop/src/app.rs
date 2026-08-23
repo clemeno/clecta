@@ -1582,10 +1582,11 @@ impl Clecta {
 					Ok(scan) => {
 						let deck = &mut self.decks[id.index()];
 						deck.peaks = scan.peaks;
-						// For the rate slider's readout (PLAN §7c), which wants the loaded
-						// track's own tempo where the panes want a row's.
+						// For the rate slider's readout (PLAN §7c, §14e), which wants the loaded
+						// track's own tempo and key where the panes want a row's.
 						if let Some(track) = deck.track.as_mut() {
 							track.tempo = scan.tempo;
+							track.key = scan.key;
 						}
 					}
 					// Odd but reachable: playback opened the file and the scan did not,
@@ -2249,8 +2250,9 @@ impl Clecta {
 					name,
 					duration,
 					// The scan is only starting: the slider's readout shows the percentage
-					// alone until the tempo lands with the strip.
+					// alone until the tempo and the key land with the strip.
 					tempo: None,
+					key: None,
 				});
 
 				scan_track(id, path, self.cache.clone())
@@ -2588,11 +2590,18 @@ impl Clecta {
 		let tempo = self.decks[id.index()].track.as_ref().and_then(|track| {
 			ui::corrected_tempo(&self.tempos, &track.path, Some(track.tempo)).flatten()
 		});
+		// Not corrected, unlike the tempo beside it: a key cannot be typed in (PLAN §14d is
+		// about halved and doubled tempos), so the detector's answer is the only one there is.
+		let key = self.decks[id.index()]
+			.track
+			.as_ref()
+			.and_then(|track| track.key);
 		let panel = ui::deck::view(
 			id,
 			&self.decks[id.index()],
 			trim,
 			tempo,
+			key,
 			ring == Some(id),
 			sweep,
 		);
