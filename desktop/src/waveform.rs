@@ -448,7 +448,10 @@ impl Chroma {
 
 		let mut chroma = [0.0_f64; 12];
 		let mut scratch = vec![0.0_f32; CHROMA_FRAME];
-		for frame in self.samples.chunks_exact(CHROMA_FRAME) {
+		// The whole frames only, and `as_chunks` says so in the type: a partly-filled tail
+		// would be quieter through no fault of the music, the same reason `Tempo` drops its
+		// last bin.
+		for frame in self.samples.as_chunks::<CHROMA_FRAME>().0 {
 			// The frame's own mean off first, so a DC offset does not leak into every bin.
 			let mean = frame.iter().sum::<f32>() / CHROMA_FRAME as f32;
 			for (out, (sample, window)) in scratch.iter_mut().zip(frame.iter().zip(&hann)) {

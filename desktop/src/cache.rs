@@ -480,10 +480,15 @@ fn decode_peaks(payload: &[u8]) -> Option<Vec<f32>> {
 		return None;
 	}
 
+	// `as_chunks` rather than `chunks_exact`: the four-ness becomes part of the *type* —
+	// `&[u8; 4]` — so `from_le_bytes` takes it directly and the `try_into().expect()` this
+	// used to need is gone. The guard above is what makes discarding the remainder right.
 	Some(
 		payload
-			.chunks_exact(4)
-			.map(|bytes| f32::from_le_bytes(bytes.try_into().expect("chunks_exact gives four")))
+			.as_chunks::<4>()
+			.0
+			.iter()
+			.map(|bytes| f32::from_le_bytes(*bytes))
 			.collect(),
 	)
 }
