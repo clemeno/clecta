@@ -9,6 +9,7 @@
 pub mod browser;
 pub mod deck;
 pub mod mixer;
+pub mod pointer;
 pub mod queue;
 pub mod tempo;
 pub mod tree;

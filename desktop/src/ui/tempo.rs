@@ -8,7 +8,7 @@
 //! with `stack`.
 
 use iced::widget::{Space, button, column, container, mouse_area, row, stack, text};
-use iced::{Center, Color, Element, Fill, Theme};
+use iced::{Center, Color, Element, Fill, Point, Theme};
 
 use crate::app::Message;
 use crate::ui;
@@ -18,32 +18,96 @@ use crate::ui;
 /// move the buttons out from under it.
 const PANEL_WIDTH: f32 = 260.0;
 
-/// Lay a panel over the window, with the rest of it dimmed and clickable to dismiss.
+/// How tall each panel is, near enough to place it by — **pinned, not measured**, like the
+/// status bar's height and the row pitches (PLAN §6, §9): a widget cannot be asked how tall it
+/// is until it has been laid out, and the placement has to be decided before that. Only the
+/// flip decision below reads these, so a few pixels out moves a panel a few pixels, and the
+/// panel itself is still laid out at whatever size it really needs.
+const MENU_HEIGHT: f32 = 92.0;
+const EDITOR_HEIGHT: f32 = 148.0;
+
+/// One of the two panels, and how the window behind it is treated while it is up.
 ///
-/// The dimming is not decoration — it is the hit target. A panel that can only be closed by its
-/// own buttons is a panel that traps the app if one of them is ever missed, so everything outside
-/// it means "never mind", which is what Escape means too.
+/// A struct rather than two loose arguments so the caller cannot get the pairing wrong: the
+/// height belongs to the panel that was built, and `over` is the only thing that reads it.
+pub struct Panel<'a> {
+	body: Element<'a, Message>,
+	height: f32,
+	/// Whether the window behind is dimmed. The **editor** is a decision with an Apply button
+	/// and dims, the way a modal does; the **menu** is a context menu at the pointer, and a
+	/// veil over the whole window for a three-line menu would read as far more than it is.
+	dim: bool,
+}
+
+/// Lay a panel over the window **at the pointer**, with the rest of it clickable to dismiss.
 ///
-/// `ponytail:` centred, not at the pointer. iced's press messages carry no position and a pane
-/// cannot ask how big it is, so the alternative was a cursor subscription publishing a message on
-/// every mouse move in the app — which is the one thing §6 already refuses to leave switched on.
-/// The upgrade is that subscription, armed by the press and disarmed by the menu.
-pub fn over<'a>(body: Element<'a, Message>, panel: Element<'a, Message>) -> Element<'a, Message> {
-	let shade = mouse_area(container(Space::new()).width(Fill).height(Fill).style(
-		|_theme: &Theme| container::Style {
-			background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.45).into()),
+/// The full-window catcher behind the panel is not decoration — it is the hit target. A panel
+/// that can only be closed by its own buttons is a panel that traps the app if one of them is
+/// ever missed, so everything outside it means "never mind", which is what Escape means too.
+/// Whether that catcher is *visible* is the panel's own business (`Panel::dim`).
+///
+/// `at` is where the right press happened, from `ui::pointer` — `None` only if the cursor had
+/// no position at the press, which leaves the panel centred, the way both panels used to be.
+pub fn over<'a>(
+	body: Element<'a, Message>,
+	panel: Panel<'a>,
+	at: Option<Point>,
+	window: (f32, f32),
+) -> Element<'a, Message> {
+	let dim = panel.dim;
+	let catcher = mouse_area(container(Space::new()).width(Fill).height(Fill).style(
+		move |_theme: &Theme| container::Style {
+			background: dim.then(|| Color::from_rgba(0.0, 0.0, 0.0, 0.45).into()),
 			..container::Style::default()
 		},
 	))
 	.on_press(Message::MenuDismissed);
 
-	let centred = container(panel)
-		.width(Fill)
-		.height(Fill)
-		.align_x(Center)
-		.align_y(Center);
+	let placed: Element<'a, Message> = match at {
+		Some(at) => {
+			let (left, top) = placed_at(at, (PANEL_WIDTH, panel.height), window);
+			// Offsets as space rather than padding, because a `container` padding is inside
+			// its own width and this has to push the panel across the whole window.
+			column![
+				Space::new().height(top),
+				row![Space::new().width(left), panel.body],
+			]
+			.into()
+		}
+		None => container(panel.body)
+			.width(Fill)
+			.height(Fill)
+			.align_x(Center)
+			.align_y(Center)
+			.into(),
+	};
 
-	stack![body, shade, centred].into()
+	stack![body, catcher, placed].into()
+}
+
+/// Where the panel's top-left goes, given where the pointer was pressed.
+///
+/// Down and to the right of the pointer, like every menu on both platforms — **flipped** to the
+/// other side of the pointer when that would not fit, rather than slid along the edge: a menu
+/// pinned to the bottom of the window sits over the rows below the one that was clicked, and
+/// the row that was clicked is the one thing the menu must not hide.
+///
+/// Clamped to zero last, so a window too small for the panel puts it in the corner instead of
+/// off the top-left — which is the same thing every other measurement here does with a window
+/// nobody expected (PLAN §6).
+fn placed_at(at: Point, panel: (f32, f32), window: (f32, f32)) -> (f32, f32) {
+	let flipped = |position: f32, panel: f32, window: f32| {
+		if position + panel <= window {
+			position
+		} else {
+			(position - panel).max(0.0)
+		}
+	};
+
+	(
+		flipped(at.x, panel.0, window.0),
+		flipped(at.y, panel.1, window.1),
+	)
 }
 
 /// What can be done to one row. One entry today, and it is why this is a menu rather than a
@@ -53,7 +117,7 @@ pub fn over<'a>(body: Element<'a, Message>, panel: Element<'a, Message>) -> Elem
 /// The entry is dead when the row has no tempo to work from, because `/2` and `×2` need a number
 /// to start from and there is nothing here to type one with. A file nothing has scanned is a file
 /// to prepare first, and the menu says so rather than opening an editor with nothing in it.
-pub fn menu<'a>(name: &'a str, tempo: Option<f32>) -> Element<'a, Message> {
+pub fn menu<'a>(name: &'a str, tempo: Option<f32>) -> Panel<'a> {
 	let entry = |label: &'a str, message: Option<Message>| {
 		button(text(label).size(12))
 			.width(Fill)
@@ -62,18 +126,22 @@ pub fn menu<'a>(name: &'a str, tempo: Option<f32>) -> Element<'a, Message> {
 			.on_press_maybe(message)
 	};
 
-	panel(column![
-		text(name).size(12).width(Fill),
-		entry(
-			"Correct tempo…",
-			tempo.map(|_| Message::TempoCorrectionOpened)
-		),
-		text(match tempo {
-			Some(_) => "",
-			None => "nothing has scanned this file yet",
-		})
-		.size(10),
-	])
+	Panel {
+		body: panel(column![
+			text(name).size(12).width(Fill),
+			entry(
+				"Correct tempo…",
+				tempo.map(|_| Message::TempoCorrectionOpened)
+			),
+			text(match tempo {
+				Some(_) => "",
+				None => "nothing has scanned this file yet",
+			})
+			.size(10),
+		]),
+		height: MENU_HEIGHT,
+		dim: false,
+	}
 }
 
 /// The editor: what the tempo is now, the two buttons that are the whole of the editing, and a
@@ -83,14 +151,14 @@ pub fn menu<'a>(name: &'a str, tempo: Option<f32>) -> Element<'a, Message> {
 /// §14d). It is also exactly reversible — `×2` after `/2` gives back the number that was there,
 /// bit for bit, since both are powers of two — which is why there is no third button to undo
 /// with and no need to remember what the detector said.
-pub fn editor<'a>(name: &'a str, value: f32, detected: Option<f32>) -> Element<'a, Message> {
+pub fn editor<'a>(name: &'a str, value: f32, detected: Option<f32>) -> Panel<'a> {
 	let scale = |label: &'a str, factor: f32| {
 		button(text(label).size(14))
 			.padding([4, 12])
 			.on_press(Message::TempoScaled(factor))
 	};
 
-	panel(column![
+	let body = panel(column![
 		text(name).size(12).width(Fill),
 		row![
 			scale("/ 2", 0.5),
@@ -112,7 +180,13 @@ pub fn editor<'a>(name: &'a str, value: f32, detected: Option<f32>) -> Element<'
 				.on_press(Message::TempoApplied),
 		]
 		.spacing(6),
-	])
+	]);
+
+	Panel {
+		body,
+		height: EDITOR_HEIGHT,
+		dim: true,
+	}
 }
 
 /// The box both panels sit in: one width, one border, one padding, so they cannot drift apart.
@@ -143,10 +217,40 @@ fn detected_line(value: f32, detected: Option<f32>) -> String {
 	}
 }
 
-/// The one decision in this file. Everything else builds widgets (PLAN §12).
+/// The two decisions in this file. Everything else builds widgets (PLAN §12).
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn a_panel_opens_below_and_right_of_the_pointer_until_that_would_not_fit() {
+		// Arrange: a panel of 260 × 92 — the menu's own size — in an ordinary window.
+		const PANEL: (f32, f32) = (260.0, 92.0);
+		const WINDOW: (f32, f32) = (1000.0, 700.0);
+
+		// Act / Assert: the ordinary case is the pointer itself, so the panel hangs off the
+		// press the way a menu does on both platforms.
+		assert_eq!(
+			placed_at(Point::new(300.0, 200.0), PANEL, WINDOW),
+			(300.0, 200.0)
+		);
+
+		// Near the right edge it flips to the *other side* of the pointer rather than sliding
+		// along the edge, and near the bottom likewise — a menu slid up the edge would cover
+		// the row that was clicked, which is the one row it must not hide.
+		let corner = placed_at(Point::new(900.0, 650.0), PANEL, WINDOW);
+		assert_eq!(corner, (640.0, 558.0), "flipped both ways");
+
+		// Exactly fitting is fitting: 740 + 260 == 1000 stays put rather than flipping.
+		assert_eq!(placed_at(Point::new(740.0, 100.0), PANEL, WINDOW).0, 740.0);
+
+		// And a window too small for the panel at all puts it in the corner rather than off
+		// the top-left, where nothing could be clicked.
+		assert_eq!(
+			placed_at(Point::new(40.0, 30.0), PANEL, (200.0, 80.0)),
+			(0.0, 0.0)
+		);
+	}
 
 	#[test]
 	fn the_detected_tempo_is_said_only_while_it_differs_from_what_is_shown() {

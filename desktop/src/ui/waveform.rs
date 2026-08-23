@@ -1,4 +1,5 @@
-//! The waveform strip in a player's panel (PLAN §14a) — the app's one custom widget.
+//! The waveform strip in a player's panel (PLAN §14a) — the app's first custom widget, and the
+//! only one that draws (`ui/pointer.rs` is the other, and it only listens).
 //!
 //! Everything else under `ui/` composes widgets iced already has. This one cannot: a bar
 //! per pixel column is not a `row` of four hundred elements, and the shape has to be

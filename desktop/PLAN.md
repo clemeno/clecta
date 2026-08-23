@@ -237,6 +237,8 @@ clecta/
         └── ui/
             ├── mod.rs       what more than one pane shares: the formatting helpers, the row
             │                window, and the selected-row fill all three queues are drawn with
+            ├── pointer.rs   one custom widget round the whole window: where a right press
+            │                was, which no press message carries (§14d)
             ├── deck.rs      one player's panel: title, transport buttons, time, drop ring
             ├── mixer.rs     the two faders and the crossfader
             ├── queue.rs  one queue's panel: add, select, reorder, send to a neighbour, the two switches (§7a)
@@ -2988,11 +2990,42 @@ it is open. So it is `stack![window, shade, panel]` — the same widgets as ever
 over the top, with the dimmed rest of the window as the hit target that dismisses it. A panel that
 can only be closed by its own buttons traps the app the day one of them is missed.
 
-`ponytail:` it is **centred, not at the pointer**. iced's press messages carry no position and a
-pane cannot ask how big it is, so the only way to a cursor position is a subscription publishing a
-message on every mouse move in the app — which §6 already refuses to leave switched on, because
-each one rebuilds every row of the files pane. The upgrade is that subscription, armed by the
-right-press and disarmed by the menu.
+### At the pointer, without a cursor subscription
+
+It was centred for a while, and the reason was that iced's press messages carry no position:
+`mouse_area::on_right_press` takes a `Message`, not a function of one, so a right-clicked row can
+say *which* row and nothing about where on screen it was. The obvious route to a position — a
+cursor subscription — is the one §6 refuses to leave switched on, because it publishes on every
+mouse move in the app and each message rebuilds every row of the files pane.
+
+So the position comes from a **widget** instead (`ui/pointer.rs`, the app's second custom one).
+`watch` wraps the whole window in a widget whose only job is to notice a right press and publish
+the cursor's position with it; nothing is published while the pointer merely moves, so the idle
+app is exactly the app it was. One instance at the root rather than one per row — the root sees
+every press in the window anyway, and four hundred wrappers would be four hundred widgets to
+answer a question one can answer.
+
+The **ordering** is the part worth writing down, and it is the same hazard Q53 charged for: two
+messages belong to one gesture — the position, and the row's own `RowMenuOpened` from the
+`mouse_area` underneath. So `Watched::update` publishes *before* it hands the event to its child,
+which makes "the app knows where the press was by the time it hears which row was pressed" a
+property of the widget rather than a hope about dispatch order. It does not capture the event
+either: it answers a question, it does not claim the press.
+
+Placement is then arithmetic, and pure (`placed_at`): down and to the right of the pointer, like
+every menu on both platforms, **flipped** to the other side when that would not fit rather than
+slid along the window's edge — a menu pinned to the bottom edge covers the rows below the one
+clicked, and the clicked row is the one thing it must not hide. Clamped to zero last, for a window
+too small for the panel at all. The panel heights it flips against are *pinned, not measured*
+(`MENU_HEIGHT`, `EDITOR_HEIGHT`), for the reason the row pitches are: a widget cannot be asked how
+tall it is until it has been laid out, and this decides where to lay it out. A few pixels out
+moves a panel a few pixels — the panel itself is still laid out at whatever size it really needs.
+
+And the veil went with the centring, for the menu only: a **context menu** at the pointer over a
+dimmed window would read as far more than a three-line menu is, while the **editor** is a decision
+with an Apply button and still dims like a modal. Both keep the full-window hit target; whether it
+is visible is now the panel's own property (`Panel::dim`), which is also what stops the height and
+the veil drifting apart from the panel they belong to.
 
 ### A correction is not a cache fact, and that decides where it lives
 
@@ -3171,6 +3204,7 @@ decided.
 | Q61 | Which key detector, and where it lives | **Krumhansl–Schmuckler over a Goertzel chroma, as the fourth accumulator in `waveform.rs`.** The scan already decodes every sample (§14a), so the key rides the same pass — §14a's "a struct, a field, a `push` and a `finish`" promise, kept. The profiles are Krumhansl & Kessler's listener measurements, the standard baseline detector; Goertzel over an FFT because thirty-six named notes cost no dependency (§12); a boxcar decimation whose aliasing is accepted and marked, because the correlation is robust to it. A fifth cache table on the all-or-nothing rule (§11a), so an old store re-scans once instead of migrating. The column goes just before the tempo in both panes — a set is matched by key before it is matched by speed — and prints sharps only, `m` for minor, no Camelot numbers | §14e, §11a, §12 |
 | Q62 | Who keeps the playhead once a player has a rate | **The app, in a wrapper around every source — never `Player::get_pos`.** rodio's count is in the output's timeline (slow by the factor at 150%), its seeks are scaled by the speed stage, and the anchor a seek leaves behind goes wrong if the rate changes afterwards — a drift with no bound but the seek target. `stretch::Stretched` counts the interleaved source samples it hands the player, batched into one atomic; `Engine::seek` divides by the rate so the speed stage multiplies it back. The slider itself is a fader, not track state — it survives loads and unloads like the volume fader — and its 0% end is a pause gate on the `Deck` (`RATE_FLOOR`), because a transport rule belongs with the transport (Q48) and rodio must not be handed a speed of zero | §7c, Q48, §14b |
 | Q63 | How the key lock changes tempo without pitch | **A hand-written WSOLA inside the same wrapper, and one routing rule.** rodio has varispeed only, and the pure-Rust stretch crates do not earn a dependency for ~150 lines of the textbook algorithm: synthesize a half-window at a time, search ~6 ms for the waveform-aligned start, crossfade. The rule that keeps the two tempo mechanisms from fighting is `Shared::speed` — under the lock the player's speed stage is pinned to 1.0 and the wrapper stretches; without it the stage gets the rate and the wrapper passes through — and seeks divide by that same answer, so both modes land in file time. Pinned by a test that checks tempo and pitch *together*: a locked 150% turns three seconds of 440 Hz into two seconds still crossing zero 880 times a second, where varispeed would read 660. Mode switches join bluntly (≤ ~50 ms, `ponytail:`) rather than splicing timelines for a once-per-flip click | §7c, Q62, §12 |
+| Q64 | How the row menu learns where the pointer is | **One custom widget at the root, publishing on right presses only — not the cursor subscription Q41 deferred to.** The subscription was always the wrong shape: it fires on every mouse move in the app to answer a question asked a few times an hour, and §6 refuses it for exactly that. `ui::pointer::watch` wraps the window and publishes the cursor's position when a right button goes down, so the idle app is unchanged and the answer is exact rather than derived from layout the app does not have. At the root rather than per row, because the root sees every press anyway. Two messages now belong to one gesture, so the widget publishes **before** delegating to its child — Q53's hazard, settled in the widget instead of hoped for in `update`. Placement is a pure function: down-right of the pointer, flipped rather than slid when it would not fit (a menu slid to the window's edge covers the row that was clicked), clamped last; it flips against *pinned* panel heights, since nothing can be measured before it is laid out. The menu also stopped dimming the window — a context menu is not a modal — while the editor still does, and that is now a property of the `Panel` so it cannot drift from the panel it describes | §14d, §6, Q41, Q53 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

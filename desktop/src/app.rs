@@ -21,7 +21,8 @@ use iced::widget::{
 	Space, button, column, container, mouse_area, operation, pane_grid, row, scrollable, text,
 };
 use iced::{
-	Element, Fill, Size, Subscription, Task, Theme, event, keyboard, mouse, stream, time, window,
+	Element, Fill, Point, Size, Subscription, Task, Theme, event, keyboard, mouse, stream, time,
+	window,
 };
 use notify::{RecursiveMode, Watcher};
 
@@ -320,6 +321,9 @@ pub enum Message {
 	/// both open the same menu (PLAN §14d).
 	RowMenuOpened(PathBuf),
 	QueueMenuOpened(QueueId, usize),
+	/// Where a right press happened, from `ui::pointer` — published *before* whichever of the
+	/// two above it belongs to, so the menu knows where to open (PLAN §14d).
+	PointerPressed(Point),
 	/// The menu or the editor was dismissed — its own button, a click outside it, or Escape.
 	MenuDismissed,
 	/// **Correct tempo…** on the open menu.
@@ -547,6 +551,11 @@ pub struct Clecta {
 	/// the cache, because a person's answer about a track is not something a decode could work
 	/// out again — and read only by the two views, which apply it to a row as it is drawn.
 	tempos: BTreeMap<PathBuf, f32>,
+	/// Where the last right press landed, from the widget wrapped round the window
+	/// (`ui::pointer`) — the one thing iced's press messages do not carry, and the whole of
+	/// what a menu needs to open under the pointer (PLAN §14d). `None` until the first right
+	/// press of the run, which is a menu centred as it used to be.
+	pointer: Option<Point>,
 	/// The row menu, while it is open. `None` is the ordinary state and is also what every way
 	/// of dismissing it leaves behind.
 	menu: Option<RowMenu>,
@@ -587,6 +596,10 @@ struct RowMenu {
 	name: String,
 	/// What the row is showing, corrections included, and `None` when nothing has scanned it.
 	tempo: Option<f32>,
+	/// Where the press that opened it was, so the panel appears under the pointer rather than
+	/// in the middle of the window (PLAN §14d). Copied at open like the two fields above: a
+	/// menu that moved because a later press landed somewhere else would be a menu that walks.
+	at: Option<Point>,
 }
 
 /// A tempo being corrected: what it started as, and what the buttons have made of it so far.
@@ -601,6 +614,9 @@ struct TempoCorrection {
 	/// What the detector said, for the line under the number. Kept so the editor can say what it
 	/// is departing from without asking the store again.
 	detected: Option<f32>,
+	/// Where the menu it grew out of was, so the editor opens in its place rather than jumping
+	/// to the middle of the window as the entry is clicked.
+	at: Option<Point>,
 }
 
 impl Clecta {
@@ -659,6 +675,7 @@ impl Clecta {
 			modifiers: Modifiers::empty(),
 			sweep: 0,
 			tempos: settings.tempos,
+			pointer: None,
 			menu: None,
 			correcting: None,
 			collapse: Collapse::default(),
@@ -943,6 +960,10 @@ impl Clecta {
 				}
 			}
 
+			// The pointer's own message arrives first, from the widget wrapped round the whole
+			// window (`ui::pointer`), so `self.pointer` is this press and not the last one.
+			Message::PointerPressed(at) => self.pointer = Some(at),
+
 			Message::RowMenuOpened(path) => {
 				let name = fsio::name_of(&path);
 				let detected = self.browser.ready(&path).and_then(|ready| ready.tempo);
@@ -950,6 +971,7 @@ impl Clecta {
 					tempo: self.tempos.get(&path).copied().or(detected),
 					path,
 					name,
+					at: self.pointer,
 				});
 			}
 
@@ -965,6 +987,7 @@ impl Clecta {
 							.or_else(|| item.ready.and_then(|ready| ready.tempo)),
 						path: item.path.clone(),
 						name: item.name.clone(),
+						at: self.pointer,
 					});
 				}
 			}
@@ -985,6 +1008,7 @@ impl Clecta {
 						path: menu.path,
 						name: menu.name,
 						value,
+						at: menu.at,
 					});
 				}
 			}
@@ -2388,21 +2412,32 @@ impl Clecta {
 			panes,
 		];
 
-		let window = column![body, self.status_bar()]
-			.spacing(STATUS_GAP)
-			.padding(WINDOW_PADDING);
+		// Wrapped so a right press says *where* it was, which no press message carries and no
+		// pane can work out (PLAN §14d). It publishes on right presses only, so the app is as
+		// idle as it was — which is what lets §6 keep refusing a cursor subscription.
+		let window = ui::pointer::watch(
+			column![body, self.status_bar()]
+				.spacing(STATUS_GAP)
+				.padding(WINDOW_PADDING),
+			Message::PointerPressed,
+		);
 
 		// The one place anything is drawn over the window (PLAN §14d). Built last and only when
 		// there is something to draw, so the app that has no menu open is the app as it was.
 		match (&self.menu, &self.correcting) {
-			(Some(menu), _) => {
-				ui::tempo::over(window.into(), ui::tempo::menu(&menu.name, menu.tempo))
-			}
-			(_, Some(correction)) => ui::tempo::over(
-				window.into(),
-				ui::tempo::editor(&correction.name, correction.value, correction.detected),
+			(Some(menu), _) => ui::tempo::over(
+				window,
+				ui::tempo::menu(&menu.name, menu.tempo),
+				menu.at,
+				self.window,
 			),
-			_ => window.into(),
+			(_, Some(correction)) => ui::tempo::over(
+				window,
+				ui::tempo::editor(&correction.name, correction.value, correction.detected),
+				correction.at,
+				self.window,
+			),
+			_ => window,
 		}
 	}
 
