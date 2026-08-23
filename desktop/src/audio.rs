@@ -104,19 +104,19 @@ impl Engine {
 	}
 
 	/// Set one player's rate (PLAN §7c): 1.0 is the track's own speed. Varispeed, like a
-	/// record — the pitch moves with it — unless the key lock holds the pitch, in which case
-	/// the wrapper stretches and the player's own speed stage stays at 1.0. `Shared::speed`
-	/// is that routing, in one place for this and `set_lock` both.
+	/// record — the pitch moves with it — unless the key lock holds the pitch.
+	///
+	/// Notably *not* `Player::set_speed`: rodio's speed stage is left at 1.0 for the life of the
+	/// app, because on a single-span source it cannot work at all. The wrapper around the loaded
+	/// source reads this within one sample and does the rate itself (PLAN §7c, `stretch`).
 	pub fn set_rate(&self, id: DeckId, rate: f32) {
 		self.shared[id.index()].set_rate(rate);
-		self.player(id).set_speed(self.shared[id.index()].speed());
 	}
 
-	/// Flip one player's key lock (PLAN §7c): on, the rate changes the tempo alone — the
-	/// wrapper takes the job over from the speed stage, which is why both are set here.
+	/// Flip one player's key lock (PLAN §7c): on, the rate changes the tempo alone. Same seam as
+	/// the rate above — the wrapper reads both and picks which way to re-time.
 	pub fn set_lock(&self, id: DeckId, on: bool) {
 		self.shared[id.index()].set_lock(on);
-		self.player(id).set_speed(self.shared[id.index()].speed());
 	}
 
 	/// Drop whatever one player holds, leaving it silent and empty. The one transport
@@ -157,13 +157,10 @@ impl Engine {
 	/// cost is that the landing point can be a tick out, which is inaudible in a track and
 	/// invisible in a 400-pixel strip.
 	pub fn seek(&self, id: DeckId, to: Duration) -> Result<()> {
-		// `to` is a place in the *file*, but the player's speed stage scales every seek it is
-		// handed by its factor on the way to the decoder. Dividing here is what makes the two
-		// cancel — the wrapper then hears the file-timeline position and records it (PLAN §7c).
-		// By the stage's *actual* factor: under the key lock it runs at 1.0 however far the
-		// rate slider sits, because the wrapper is doing the tempo instead.
-		let speed = self.shared[id.index()].speed();
-		let to = if speed > 0.0 { to.div_f32(speed) } else { to };
+		// `to` is a place in the *file*, and it arrives at the decoder as one: rodio's speed
+		// stage would scale every seek by its factor on the way down, but that factor is 1.0
+		// for the life of the app — the rate is the wrapper's job, and so is recording where
+		// the seek landed (PLAN §7c).
 		self.player(id)
 			.try_seek(to)
 			.context("cannot seek this stream")?;

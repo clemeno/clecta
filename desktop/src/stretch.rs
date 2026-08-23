@@ -1,15 +1,23 @@
-//! The plumbing between the decoder and the player (PLAN §7c): what rate a player runs at,
-//! where in the *file* its playhead really is — and, when the key lock is on, the
-//! time-stretch that changes the tempo without moving the pitch.
+//! The plumbing between the decoder and the player (PLAN §7c): the rate a player runs at —
+//! with the pitch, or without it — and where in the *file* its playhead really is.
 //!
-//! The player's own position tracking stops being trustworthy the moment the speed is not
-//! 1.0: rodio reports the position of the *output*, its seek is scaled by the speed stage,
-//! and the anchor it keeps moves whenever the factor changes after a seek. So the app keeps
-//! its own: every source is wrapped in a `Stretched` on its way into the player, and the
-//! wrapper counts what it hands over — interleaved source samples, the file's own timeline,
-//! whatever the speed. One writer on the audio thread, readers on the GUI thread, no locks.
+//! Every source is wrapped in a `Stretched` on its way into the player, and the rate happens
+//! *here*, not in rodio's speed stage, which stays at 1.0 for the life of the app. rodio
+//! implements speed as a lie about the source's sample rate, and the resampler behind the mixer
+//! only re-reads a source's rate when its span runs out — so a source that reports one long
+//! span, which this one is (constant rate, constant channels, first sample to last), keeps
+//! whatever factor it was appended with for ever and the slider does nothing at all. Reporting
+//! fake span boundaries to make rodio look again would buy varispeed at the price of the
+//! resampler being thrown away and rebuilt at every boundary, losing the frames it had read
+//! ahead each time: a periodic click, and a playhead drifting from what is heard. Doing the
+//! rate here costs an interpolation instead, and leaves one place where the tempo happens.
 //!
-//! The stretch is WSOLA — waveform-similarity overlap-add, the standard way to move tempo
+//! The playhead is the other half of the same reason. rodio counts the *output*, which under
+//! any rate at all is a different number of samples from the input it was made of — so the
+//! wrapper counts the input side itself: interleaved source samples, the file's own timeline,
+//! whatever the rate. One writer on the audio thread, readers on the GUI thread, no locks.
+//!
+//! The lock's stretch is WSOLA — waveform-similarity overlap-add, the standard way to move tempo
 //! and leave pitch alone. Output is synthesized a half-window at a time: each block takes a
 //! window of input from wherever the rate says the playhead should be, *searches* a little
 //! neighbourhood for the offset that lines its waveform up with the end of the previous
@@ -46,9 +54,8 @@ const SEARCH: usize = 256;
 /// all-channel correlation is the upgrade if the lock ever sounds rough on hats.
 const CORRELATION_STEP: usize = 4;
 
-/// The stretch engages only when the lock is on **and** the rate is meaningfully not 1.0:
-/// windowing a track that is not being stretched would cost CPU to make it very slightly
-/// worse.
+/// How far from 1.0 the rate has to be before the wrapper re-times anything: re-reading a
+/// track at exactly its own speed would cost CPU to make it very slightly worse.
 const ENGAGE: f32 = 0.001;
 
 /// One player's rate plumbing, shared between the GUI thread and the audio thread.
@@ -99,16 +106,16 @@ impl Shared {
 		self.lock.store(on, Ordering::Relaxed);
 	}
 
-	/// The factor the player's own speed stage should run at: the rate while it is allowed
-	/// to move the pitch, and exactly 1.0 under the lock — the wrapper is doing the tempo
-	/// then, and the speed stage doing it too would double the change and undo the point.
-	pub fn speed(&self) -> f32 {
-		if self.locked() { 1.0 } else { self.rate() }
-	}
-
-	/// Whether the wrapper should be stretching right now.
-	fn stretching(&self) -> bool {
-		self.locked() && (self.rate() - 1.0).abs() > ENGAGE
+	/// What the wrapper should be doing to the stream right now: nothing, varispeed, or the
+	/// lock's stretch. Read per sample, so both switches take effect within one sample.
+	fn mode(&self) -> Mode {
+		if (self.rate() - 1.0).abs() <= ENGAGE {
+			Mode::Through
+		} else if self.locked() {
+			Mode::Wsola
+		} else {
+			Mode::Vari
+		}
 	}
 
 	/// The playhead, in the file's own seconds.
@@ -137,15 +144,28 @@ impl Shared {
 	}
 }
 
-/// The source a player is actually given: the decoder, counted — and stretched, when the
-/// key lock asks for it.
+/// Which of the three things the wrapper is doing to the stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+	/// The rate is 1.0: every sample is handed over exactly as it arrived. The overwhelmingly
+	/// common case, and it costs a load and a compare per sample.
+	Through,
+	/// Varispeed: the input is read at `rate` frames per output frame, so the pitch goes with
+	/// the tempo — a record pushed faster, which is what the lock being *off* means.
+	Vari,
+	/// The key lock: the same tempo change, with the pitch left where it was.
+	Wsola,
+}
+
+/// The source a player is actually given: the decoder, counted — and re-timed, at whatever
+/// rate the slider says, with or without the pitch coming along.
 ///
-/// Two modes, decided per sample from `Shared`. **Pass-through** hands every sample over
-/// exactly as it arrived and counts it. **Stretch** synthesizes WSOLA blocks instead: the
-/// playhead then advances by `rate × OVERLAP` input frames per block, written as the block's
-/// anchor, so the readout moves in ~23 ms steps under a 50 ms tick. The one subtlety is in
-/// `try_seek`: the position it receives is already in the file's own timeline, because the
-/// player's speed stage multiplies the app's request back up on its way in (`Engine::seek`).
+/// Three modes, decided per sample from `Shared` (see `Mode`). Both re-timing modes share all
+/// the bookkeeping below — the input buffer, the anchor, the output queue — and differ only in
+/// how they turn `OVERLAP` frames of output out of `OVERLAP × rate` frames of input: `Vari`
+/// interpolates, `Wsola` searches and crossfades. The playhead advances by the *input* frames
+/// consumed, written as each block's anchor, so the readout moves in ~23 ms steps under a
+/// 50 ms tick and always means a place in the file.
 ///
 /// `ponytail:` a mode switch mid-play joins bluntly — up to one synthesized block is
 /// dropped, and a stale half-window of buffered input can replay — a one-time click bounded
@@ -159,18 +179,18 @@ pub struct Stretched<S> {
 	/// Pass-through: samples counted since the last flush to `shared`.
 	pending: u32,
 	/// Which mode the last sample was produced in, so a switch is noticed once.
-	stretching: bool,
-	/// Stretch: synthesized output waiting to be handed over.
+	mode: Mode,
+	/// Re-timing: synthesized output waiting to be handed over.
 	out: VecDeque<f32>,
-	/// Stretch: buffered input, interleaved, starting at frame `buffer_start`.
+	/// Re-timing: buffered input, interleaved, starting at frame `buffer_start`.
 	buffer: VecDeque<f32>,
 	buffer_start: u64,
-	/// Stretch: the previous block's second half — what the next block aligns itself to.
+	/// The stretch alone: the previous block's second half — what the next block aligns to.
 	tail: Vec<f32>,
-	/// Stretch: where the next block's window ideally starts, in input frames. Advances by
-	/// `OVERLAP × rate` per block, which is the whole tempo change.
+	/// Re-timing: where the next block's window starts, in input frames. Advances by
+	/// `OVERLAP × rate` per block, which is the whole tempo change, in either mode.
 	next_input: f64,
-	/// Stretch: the first block passes through unfaded, because there is no tail yet.
+	/// The stretch alone: the first block passes through unfaded, there being no tail yet.
 	primed: bool,
 }
 
@@ -183,7 +203,7 @@ impl<S: Source> Stretched<S> {
 			shared,
 			channels,
 			pending: 0,
-			stretching: false,
+			mode: Mode::Through,
 			out: VecDeque::new(),
 			buffer: VecDeque::new(),
 			buffer_start: 0,
@@ -202,7 +222,7 @@ impl<S: Source> Stretched<S> {
 		}
 	}
 
-	/// Point the stretch at wherever the playhead is now: the anchor, and empty buffers.
+	/// Point the re-timing at wherever the playhead is now: the anchor, and empty buffers.
 	fn align(&mut self) {
 		self.out.clear();
 		self.buffer.clear();
@@ -214,16 +234,25 @@ impl<S: Source> Stretched<S> {
 	}
 
 	/// Notice a flipped lock or a rate crossing 1.0 — once, so buffers are reset once.
-	fn switch(&mut self, stretching: bool) {
-		self.stretching = stretching;
-		if stretching {
-			self.flush();
-			self.align();
-		} else {
-			// Leaving keeps `buffer` — real source samples, drained by the pass-through path
-			// and counted there — but drops `out`: synthesized audio stands for input the
-			// count has already claimed, and handing it over would play that input twice.
-			self.out.clear();
+	fn switch(&mut self, mode: Mode) {
+		let was = std::mem::replace(&mut self.mode, mode);
+		match (was, mode) {
+			// Into a re-timing mode: the count is settled, and the anchor starts wherever the
+			// pass-through left the playhead.
+			(Mode::Through, _) => {
+				self.flush();
+				self.align();
+			}
+			// Out of both: keeps `buffer` — real source samples, drained by the pass-through
+			// path and counted there — but drops `out`, which is synthesized audio standing for
+			// input the count has already claimed; handing it over would play that input twice.
+			(_, Mode::Through) => self.out.clear(),
+			// Between the two: the anchor and the buffer carry over untouched, because both
+			// modes mean the same thing by them. Only the crossfade's memory is stale.
+			_ => {
+				self.tail.clear();
+				self.primed = false;
+			}
 		}
 	}
 
@@ -273,11 +302,60 @@ impl<S: Source> Stretched<S> {
 		);
 	}
 
-	/// Synthesize one WSOLA block into `out`, or let the tail out when the file ends.
+	/// How many input frames one output frame is worth. The floor keeps a slider resting near
+	/// 0% from asking for a hundredfold stretch of a player the deck is about to pause anyway.
+	fn ratio(&self) -> f64 {
+		f64::from(self.shared.rate()).max(0.005)
+	}
+
+	/// Synthesize one block into `out` — however the current mode makes blocks — or nothing at
+	/// all when the input has run out, which is what ends the stream.
 	fn synthesize(&mut self) {
-		// The floor keeps a slider resting near 0% from asking for a hundredfold stretch of
-		// a player the deck is about to pause anyway.
-		let ratio = f64::from(self.shared.rate()).max(0.005);
+		if self.mode == Mode::Vari {
+			self.varispeed();
+			return;
+		}
+		self.wsola();
+	}
+
+	/// One hop of varispeed: `OVERLAP` output frames read from the input `ratio` frames apart
+	/// and linearly interpolated between the two frames each landing falls between. The same
+	/// arithmetic as a record played fast, and the pitch moves with the tempo because of it.
+	fn varispeed(&mut self) {
+		let ratio = self.ratio();
+		let base = self.next_input.floor() as u64;
+
+		// The hops, plus the frame the last interpolation reaches into, plus one for the
+		// fractional start. `false` means the file ended inside the window: the loop below then
+		// stops at the last real frame rather than interpolating into the silent padding.
+		let wanted = (OVERLAP as f64 * ratio).ceil() as usize + 2;
+		let complete = self.buffered(base, wanted);
+		let held = self.buffer_start + (self.buffer.len() / self.channels) as u64;
+
+		for hop in 0..OVERLAP {
+			let at = self.next_input + hop as f64 * ratio;
+			let frame = at.floor() as u64;
+			if !complete && frame + 1 >= held {
+				break;
+			}
+			let fade = (at - at.floor()) as f32;
+			for channel in 0..self.channels {
+				let here = self.frame_sample(frame, channel);
+				let next = self.frame_sample(frame + 1, channel);
+				self.out.push_back(here + (next - here) * fade);
+			}
+		}
+
+		// Unconditionally, even when the loop stopped early: the anchor has to keep moving past
+		// the end of the file, or the next call would ask for the same frames and never finish.
+		self.next_input += OVERLAP as f64 * ratio;
+		self.anchored();
+		self.trim(self.next_input.floor() as u64);
+	}
+
+	/// Synthesize one WSOLA block into `out`, or let the tail out when the file ends.
+	fn wsola(&mut self) {
+		let ratio = self.ratio();
 		let base = (self.next_input.floor() as u64).max(self.buffer_start);
 
 		if !self.primed {
@@ -355,12 +433,12 @@ impl<S: Source> Iterator for Stretched<S> {
 	type Item = Sample;
 
 	fn next(&mut self) -> Option<Sample> {
-		let stretching = self.shared.stretching();
-		if stretching != self.stretching {
-			self.switch(stretching);
+		let mode = self.shared.mode();
+		if mode != self.mode {
+			self.switch(mode);
 		}
 
-		if self.stretching {
+		if self.mode != Mode::Through {
 			if let Some(sample) = self.out.pop_front() {
 				return Some(sample);
 			}
@@ -368,7 +446,7 @@ impl<S: Source> Iterator for Stretched<S> {
 			return self.out.pop_front();
 		}
 
-		// Pass-through — draining first what a stretch may have left buffered, so those
+		// Pass-through — draining first what a re-timing mode may have left buffered, so those
 		// samples play rather than vanish.
 		let sample = self.buffer.pop_front().or_else(|| self.inner.next());
 		if sample.is_some() {
@@ -385,9 +463,11 @@ impl<S: Source> Iterator for Stretched<S> {
 }
 
 impl<S: Source> Source for Stretched<S> {
-	/// `None` deliberately, not the decoder's: under the lock the output is a different
-	/// length from the input, so any finite promise would be wrong. `None` reads as "one
-	/// span, unknown length", which is what every file the app opens is (see `audio::scan`).
+	/// `None` deliberately, not the decoder's: the rate makes the output a different length
+	/// from the input, so any finite promise would be wrong. `None` reads as "one span,
+	/// unknown length", which is what every file the app opens is (see `audio::scan`) — and it
+	/// is what lets the resampler behind the mixer be built once and then left alone, because
+	/// nothing downstream ever needs to read this source's rate twice (see the header).
 	fn current_span_len(&self) -> Option<usize> {
 		None
 	}
@@ -472,49 +552,88 @@ mod tests {
 		assert_eq!(shared.rate(), 1.5);
 	}
 
-	#[test]
-	fn the_lock_changes_the_tempo_and_leaves_the_pitch_where_it_was() {
-		// Arrange: three seconds of a 440 Hz sine at 44.1 kHz mono, locked at 150%.
-		const RATE: u32 = 44_100;
-		const SECONDS: f32 = 3.0;
-		const TONE: f32 = 440.0;
+	/// A 44.1 kHz mono sine, in seconds of it — a signal whose pitch a zero-crossing count can
+	/// read back out of whatever the wrapper did to it.
+	const RATE: u32 = 44_100;
+	const SECONDS: f32 = 3.0;
+	const TONE: f32 = 440.0;
+	fn tone() -> SamplesBuffer {
 		let samples: Vec<f32> = (0..(RATE as f32 * SECONDS) as usize)
 			.map(|n| (std::f32::consts::TAU * TONE * n as f32 / RATE as f32).sin())
 			.collect();
+		SamplesBuffer::new(
+			NonZero::new(1).expect("mono"),
+			NonZero::new(RATE).expect("the rate"),
+			samples,
+		)
+	}
 
+	/// What that tone sounds like coming out: how long it lasted, and at what pitch.
+	fn heard(out: &[f32]) -> (f32, f32) {
+		let seconds = out.len() as f32 / RATE as f32;
+		let crossings = out
+			.windows(2)
+			.filter(|pair| pair[0] * pair[1] < 0.0)
+			.count();
+		(seconds, crossings as f32 / 2.0 / seconds)
+	}
+
+	#[test]
+	fn the_rate_moves_the_tempo_and_the_pitch_with_it_when_the_lock_is_off() {
+		// Arrange: 150%, lock off. This is the plain varispeed case, and the one rodio's own
+		// speed stage silently refuses to do for a source that reports a single span — which is
+		// why the wrapper does it and the stage is left at 1.0 for ever.
 		let shared = Arc::new(Shared::default());
 		shared.set_rate(1.5);
-		shared.set_lock(true);
-		let wrapped = Stretched::new(
-			SamplesBuffer::new(
-				NonZero::new(1).expect("mono"),
-				NonZero::new(RATE).expect("the rate"),
-				samples,
-			),
-			Arc::clone(&shared),
-		);
+		let wrapped = Stretched::new(tone(), Arc::clone(&shared));
 
 		// Act
 		let out: Vec<f32> = wrapped.collect();
+		let (seconds, pitch) = heard(&out);
+
+		// Assert: three seconds of input came out as two, and the tone went up by the same
+		// factor — 440 Hz read faster is 660 Hz, exactly the record-pushed-along sound.
+		assert!(
+			(seconds - SECONDS / 1.5).abs() < 0.1,
+			"3 s at 150% is 2 s of output, got {seconds}"
+		);
+		assert!(
+			(pitch - TONE * 1.5).abs() < TONE * 0.02,
+			"a 440 Hz tone at 150% should read 660 Hz, read {pitch}"
+		);
+
+		// And the playhead ran the *input's* three seconds, not the output's two.
+		assert!(
+			shared.position() > Duration::from_secs_f32(2.8),
+			"the playhead is the file's own clock, got {:?}",
+			shared.position()
+		);
+	}
+
+	#[test]
+	fn the_lock_changes_the_tempo_and_leaves_the_pitch_where_it_was() {
+		// Arrange: the same 150%, locked this time.
+		let shared = Arc::new(Shared::default());
+		shared.set_rate(1.5);
+		shared.set_lock(true);
+		let wrapped = Stretched::new(tone(), Arc::clone(&shared));
+
+		// Act
+		let out: Vec<f32> = wrapped.collect();
+		let (seconds, pitch) = heard(&out);
 
 		// Assert: the tempo moved — three seconds of input came out as two of output, give
 		// or take the windows at the ends.
-		let seconds = out.len() as f32 / RATE as f32;
 		assert!(
 			(seconds - SECONDS / 1.5).abs() < 0.1,
 			"3 s at 150% is 2 s of output, got {seconds}"
 		);
 
-		// …and the pitch did not: the sine still crosses zero 880 times a second. This is
-		// the whole claim of the key lock, and the varispeed it replaces would read 660.
-		let crossings = out
-			.windows(2)
-			.filter(|pair| pair[0] * pair[1] < 0.0)
-			.count();
-		let heard = crossings as f32 / 2.0 / seconds;
+		// …and the pitch did not: the sine still crosses zero 880 times a second. This is the
+		// whole claim of the key lock, against the 660 Hz the test above reads off the lock.
 		assert!(
-			(heard - TONE).abs() < TONE * 0.02,
-			"a 440 Hz tone should stay 440 Hz under the lock, read {heard}"
+			(pitch - TONE).abs() < TONE * 0.02,
+			"a 440 Hz tone should stay 440 Hz under the lock, read {pitch}"
 		);
 
 		// And the playhead ran the *input's* three seconds, not the output's two.

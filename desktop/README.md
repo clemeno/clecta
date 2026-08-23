@@ -210,15 +210,16 @@ cargo build --release --target x86_64-apple-darwin
   track's corrected tempo by the slider (`150% · 192.0`), a `100%` button jumps back to the value
   a mouse cannot land on by luck, and the slider is a fader rather than track state: it survives
   loads, unloads, track ends and a quit — it comes back where you left it, with its lock, since
-  the lock is what the slider means. The playhead stays truthful at any rate because the app counts
-  the file's own samples in a wrapper around every source, instead of trusting a position rodio
-  keeps in the output's timeline (PLAN §7c).
+  the lock is what the slider means. The re-timing and the playhead both live in a wrapper around
+  every source: rodio's own speed stage cannot move a source that reports a single span, and the
+  position it keeps is in the output's timeline rather than the file's, so the app reads the input
+  itself and the strip stays truthful at any rate (PLAN §7c).
 - **MT/KL — master tempo / key lock.** The checkbox beside the slider changes what it means:
   off, varispeed — the pitch moves with the speed, like a record; on, the tempo moves alone and
   the key stays put. A hand-written WSOLA time-stretch in the same wrapper, ~150 lines and no
-  new dependency, with the whole claim pinned by one test: a locked 150% turns three seconds of
-  a 440 Hz tone into two seconds that still cross zero 880 times a second, where varispeed
-  would read 660 (PLAN §7c).
+  new dependency, sharing the varispeed's buffers and anchor so there is one mode switch and no
+  two mechanisms to keep apart. The claim is pinned by a pair of tests on one tone: 150% is two
+  seconds of output either way, reading 660 Hz off the lock and still 440 Hz under it (PLAN §7c).
 - **Correcting a tempo by hand.** Right-click a row — in the files pane or in a queue — for a menu
   **at the pointer**, with **Correct tempo…**, and a panel with `/2`, the number, and `×2`. The
   menu opens down and to the right of the click and flips to the other side near an edge, the way
@@ -293,7 +294,7 @@ cargo build --release
 | `ui/queue.rs` | the footer's count and running time, and an empty queue saying nothing at all rather than `0 · 0:00`; and which way the two arrows may move a selection — the top row, the last row, the middle, a block touching either end, the whole queue at once, and the single row of a single-row queue |
 | `ui/browser.rs` | which mark a row wears — nothing, the spinner, the `✓` — and that a file being *re-*scanned spins rather than keeping the `✓` it already earned; plus a load button counting its rows only once there is more than one |
 | `ui/deck.rs` | the strip's two divides: the music's edges as fractions of the file, a stale trim past the end clamped to the strip rather than drawn off it, a stream with no length and a zero-length track both drawing no marks at all, and a playhead a tick past its own total — which the app produces twenty times a second at the end of every track — reading as exactly the end; plus the rate readout multiplying only a tempo it actually has |
-| `stretch.rs` | the wrapper changing nothing and counting everything — pass-through sample for sample, with the count landing in the file's own seconds — a seek moving the count to where the decoder landed rather than what was consumed, and the rate surviving a load the way a fader does while the playhead resets; then the key lock's whole claim in one test: three seconds of a 440 Hz sine at a locked 150% coming out as two seconds of output that still crosses zero 880 times a second — tempo moved, pitch not, where varispeed would read 660 — with the playhead running the input's three seconds rather than the output's two |
+| `stretch.rs` | the wrapper changing nothing and counting everything — pass-through sample for sample, with the count landing in the file's own seconds — a seek moving the count to where the decoder landed rather than what was consumed, and the rate surviving a load the way a fader does while the playhead resets; then the rate slider itself, twice over on the same 440 Hz tone: three seconds at 150% come out as two seconds either way, reading 660 Hz off the lock — the pitch going up with the tempo, like a record — and still 440 Hz under it, which is the key lock's whole claim. Both with the playhead running the input's three seconds rather than the output's two |
 | `ui/tempo.rs` | where a panel opens: down and to the right of the pointer, flipped to the other side of it near either edge rather than slid along the window's own (a menu slid to the edge covers the row that was clicked), a pointer that exactly fits staying put, and a window too small for the panel putting it in the corner rather than off the top-left; plus the quiet line under the editor: what the detector said, shown only while it differs from what the panel shows — compared as the two decimals on screen, so halving and doubling back says nothing rather than "detected 128.00" under a 128.00 |
 | `audio.rs` | the two things here that need no audio device — one scan of a real file (a generated WAV, silent for a second then loud for a second, whose music is asserted to start at exactly one second and run to two), and one measurement of another, plus a missing file answering "no length" rather than failing |
 | `settings.rs` | a round trip, every broken file reading as defaults, a missing field keeping its default (including the newest: a file written before tempos could be corrected has corrected none, and one written before the rate slider plays at the track's own speed rather than the `0.0` a bare default would give, which would open both players silent), an out-of-range value falling back alone — including a rate outside the slider's own travel and a `NaN` one, while its two ends, 0% and 200%, are values the slider really has — a folder or a queued track that no longer exists being forgotten, and a corrected tempo surviving only if it could be drawn — a deleted file, a non-media file, a `0`, a negative and a `NaN` all dropped, the good one beside them kept; and the three queues zipping out of the file's two orderings — paths per player, switches per drawn queue — and back in, each keeping its own paths and its own switches |

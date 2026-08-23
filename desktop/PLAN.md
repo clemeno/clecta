@@ -953,15 +953,23 @@ the visible reason for the silence, and pulling it back up is the rest of the sa
 gate is a transport rule, so it lives on the `Deck` (`rated`, and one line in `moved`'s Play
 arm) with the same model-and-effect pairing as every other edge (Q48).
 
-**The playhead is the app's, not rodio's.** `Player::get_pos` counts in the *output's* timeline
-— at 150% it runs slow by exactly that factor — and the player's speed stage scales every seek
-by the factor on its way to the decoder, leaving an anchor that goes wrong if the rate changes
-after a seek. So `stretch.rs` wraps every source on its way into the player: the wrapper counts
-the interleaved source samples it hands over — the file's own timeline, whatever the speed —
-batched into an atomic the GUI thread reads on the tick. `Engine::seek` divides its target by
-the current rate so the speed stage multiplies it back, which is also what lands the wrapper's
-own `try_seek` in file time. One writer on the audio thread, no locks, and the readout and the
-strip stay truthful at any rate.
+**The rate is the app's, not rodio's — and so is the playhead.** rodio *has* a speed stage, and
+on this app's sources it cannot work at all: it implements speed as a lie about the source's
+sample rate, and the resampler behind the mixer only re-reads a source's rate when its current
+span runs out. A source that reports one long span keeps whatever factor it was appended with
+for ever, and moving the slider does nothing audible whatsoever. Reporting fake span boundaries
+to make rodio look again is possible and was rejected: the resampler is thrown away and rebuilt
+at every boundary, losing the frames it had read ahead each time — a periodic click, and a
+playhead drifting from what is heard, in exchange for the very thing this section is about. So
+`stretch.rs` re-times the stream itself, by linear interpolation between the two input frames
+each output frame falls between; the player's speed stage stays at 1.0 for the life of the app.
+
+The playhead is the other half of the same argument. `Player::get_pos` counts in the *output's*
+timeline — at 150% it runs slow by exactly that factor — so the wrapper counts the input side
+instead: the interleaved source samples it consumed, the file's own timeline, whatever the rate,
+batched into an atomic the GUI thread reads on the tick. Seeks pass straight down in file time,
+because the stage that would have scaled them is at 1.0. One writer on the audio thread, no
+locks, and the readout and the strip stay truthful at any rate.
 
 **MT/KL — master tempo / key lock.** The checkbox beside the slider changes what the slider
 *means*: off, varispeed, the pitch moves with the speed; on, the tempo moves alone and the key
@@ -970,13 +978,14 @@ algorithm, hand-written because no pure-Rust dependency earns its place for ~150
 inside the same wrapper: output is synthesized a half-window (~23 ms) at a time, each block
 takes its input from wherever the rate says the playhead should be, searches ~6 ms of
 neighbourhood for the offset that lines its waveform up with the previous block's end, and
-crossfades. The routing rule is one method, `Shared::speed`: under the lock the player's speed
-stage runs at exactly 1.0 — the wrapper owns the tempo — and without it the stage gets the rate
-and the wrapper passes through. Seeks divide by that same `speed`, so both modes land in file
-time. The playhead under the lock advances per block, written as the block's input anchor —
-still the file's own clock, which the pitch test pins alongside the tempo: three seconds of a
-440 Hz sine at a locked 150% come out as two seconds still crossing zero 880 times a second,
-where varispeed would read 660.
+crossfades. It is the *same* wrapper and the same bookkeeping as the varispeed above — the input
+buffer, the anchor, the output queue are shared, and the two modes differ only in how they turn
+a half-window of output out of `rate ×` a half-window of input: one interpolates, the other
+searches and crossfades. So there is one `Mode` read per sample (`Through`, `Vari`, `Wsola`) and
+no routing between mechanisms to get wrong. The playhead advances per block either way, written
+as the block's input anchor — still the file's own clock, which the pitch test pins alongside the
+tempo: three seconds of a 440 Hz sine at 150% come out as two seconds of it, crossing zero 880
+times a second under the lock and 1320 without it.
 
 A mode switch mid-play joins bluntly (up to ~50 ms dropped or replayed, a `ponytail:` in the
 code): the alternative is splicing two timelines for a click that happens once per flip of a
@@ -3242,6 +3251,7 @@ decided.
 | Q64 | How the row menu learns where the pointer is | **One custom widget at the root, publishing on right presses only — not the cursor subscription Q41 deferred to.** The subscription was always the wrong shape: it fires on every mouse move in the app to answer a question asked a few times an hour, and §6 refuses it for exactly that. `ui::pointer::watch` wraps the window and publishes the cursor's position when a right button goes down, so the idle app is unchanged and the answer is exact rather than derived from layout the app does not have. At the root rather than per row, because the root sees every press anyway. Two messages now belong to one gesture, so the widget publishes **before** delegating to its child — Q53's hazard, settled in the widget instead of hoped for in `update`. Placement is a pure function: down-right of the pointer, flipped rather than slid when it would not fit (a menu slid to the window's edge covers the row that was clicked), clamped last; it flips against *pinned* panel heights, since nothing can be measured before it is laid out. The menu also stopped dimming the window — a context menu is not a modal — while the editor still does, and that is now a property of the `Panel` so it cannot drift from the panel it describes | §14d, §6, Q41, Q53 |
 | Q65 | What the two keys act on, now that four lists can be selected in | **The list a row was last pressed in — one field, one ring, no new gesture.** §9a kept ⌘A and Escape on the files pane because the app had no focus model and would have had to guess; the answer is not a Tab order but the press the user is already making, which the app already receives as `RowSelected` / `QueueSelected`. `focus::Focus` is `Files` or `Queue(id)`, starts on the pane (where the app opens, and the list with thousands of rows), and takes the panes as arguments like `known.rs` does (Q59) so the rule is checkable with no window: ⌘A fills one list and leaves three alone, Escape empties one and leaves three selected — because a set built in one queue must survive going to look at another, and a key that emptied all four would be a key nothing could undo. The focused list wears a ring in `primary`, the colour §10 left spare for it, so the answer is looked at rather than tried; the tree never wears one, being navigation rather than a list. A queue's ⌘A takes every row, since a queue has no hidden filter to argue with, and leaves the anchor on the top row so a Shift-click straight afterwards shortens the set from the top | §9a, Q59, §10 |
 | Q66 | Whether the rate slider and its lock survive a quit | **Both, together, or neither.** Q62 made the slider a fader rather than track state — it survives loads, unloads and track ends — and the volume fader beside it already survived a relaunch, so a slider that did not was one setting behaving two ways. Together because the lock is what the rate *means*: restoring 150% without it plays yesterday's tempo with a pitch behaviour it was never set with. The argument against was real and is answered on screen rather than in code — a track playing fast for a reason set yesterday is a surprise, but the slider and its `· 192.0` readout are showing the reason. Sanitized like the faders (a trust boundary, §11): outside 0..=200%, or a `NaN` the audio thread would divide by, reads as the track's own speed; a file predating the field reads 1.0 through a named default, not serde's `0.0`, which would open both players silent. And the *device* is told by `apply_rates` at startup and after a reconnect, through `rated`/`locked` rather than round them, because a fresh `Engine` starts at 1.0 and a slider parked at its pause end must come back paused | §7c, §11, Q62, Q48 |
+| Q67 | Why the slider did nothing off the key lock | **rodio's speed stage cannot move a single-span source, so the wrapper does the rate itself and the stage is retired.** Q62 and Q63 gave the stage the rate whenever the lock was off; on a source reporting one span — which `Stretched` is, honestly: constant rate, constant channels, first sample to last — the factor is read exactly once, when the source is appended. rodio's speed is a lie about the sample rate, and `UniformSourceIterator` only re-reads a source's rate when its span runs out; its own decoders get away with it because they report a span per packet. Faking span boundaries was the one-line fix and was rejected: the resampler is rebuilt at each one, dropping the frames it had read ahead — a periodic click and a playhead drifting ~0.1% from what is heard, which is the exact class of thing Q62 built this wrapper to stop. Instead the varispeed joins the stretch *inside* the wrapper as a second `Mode`, sharing its buffer, anchor and output queue and differing only in reading the input by interpolation instead of by search-and-crossfade. What that deletes is worth as much as what it adds: `Shared::speed`, both `Player::set_speed` calls, and `Engine::seek`'s divide-so-the-stage-multiplies-back — two mechanisms and their cancelling correction become one. Pinned by the mirror of Q63's test: 150% *unlocked* is two seconds of output reading 660 Hz, which the old code failed by returning three seconds of 440 | §7c, Q62, Q63 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
