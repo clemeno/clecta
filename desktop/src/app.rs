@@ -645,8 +645,13 @@ impl Clecta {
 		};
 
 		let mut decks = [Deck::default(), Deck::default()];
-		for (deck, fader) in decks.iter_mut().zip(settings.faders) {
-			deck.fader = fader;
+		for (index, deck) in decks.iter_mut().enumerate() {
+			deck.fader = settings.faders[index];
+			// The rate slider and its lock, restored together because the lock is what the
+			// rate means (PLAN §7c). Only the model here — the audio is told by `apply_rates`
+			// below, which is also what a reconnect calls.
+			deck.rate = settings.rates[index];
+			deck.key_lock = settings.key_locks[index];
 		}
 
 		let mut app = Self {
@@ -687,6 +692,7 @@ impl Clecta {
 			collapse: Collapse::default(),
 		};
 		app.apply_gains();
+		app.apply_rates();
 
 		// Drop entries whose file is gone. The one job in the app that gets a bare thread
 		// rather than `off_thread`: nothing waits for the answer and nothing on screen
@@ -719,6 +725,8 @@ impl Clecta {
 			curve: self.curve,
 			faders: [self.decks[0].fader, self.decks[1].fader],
 			crossfader: self.crossfader,
+			rates: [self.decks[0].rate, self.decks[1].rate],
+			key_locks: [self.decks[0].key_lock, self.decks[1].key_lock],
 			folder: self.browser.folder.clone(),
 			window: self.window,
 			decks_height: self.decks_height,
@@ -852,10 +860,13 @@ impl Clecta {
 
 			Message::RateChanged(id, rate) => {
 				self.decks[id.index()].rated(id, rate, &self.engine);
+				// Remembered across a quit, like the fader it sits under (PLAN §7c).
+				self.dirty = true;
 			}
 
 			Message::KeyLockToggled(id, on) => {
 				self.decks[id.index()].locked(id, on, &self.engine);
+				self.dirty = true;
 			}
 
 			Message::LoadPressed(id) => {
@@ -2351,6 +2362,10 @@ impl Clecta {
 		}
 
 		self.apply_gains();
+		// A fresh `Engine` starts both players at the track's own speed with no lock, so a
+		// reconnect has to say what the sliders say — or the model would read 150% while the
+		// audio ran at 100% (PLAN §7c).
+		self.apply_rates();
 
 		// A new device means new players, so whatever was loaded is gone from the audio
 		// side even though the model still lists it.
@@ -2367,6 +2382,22 @@ impl Clecta {
 		}
 
 		Task::batch(tasks)
+	}
+
+	/// Push both rate sliders and both locks to a device that has not been told yet — a fresh
+	/// `Engine` at startup, or a re-opened one (PLAN §7c).
+	///
+	/// Not called when a slider *moves*: that is `Deck::rated`'s job, which pairs the model and
+	/// the audio the way every other control does (Q48). This is only the catching-up, and it
+	/// goes through the same two methods rather than round the side of them, so a rate at the
+	/// slider's pause end stays paused across a reconnect.
+	fn apply_rates(&mut self) {
+		for id in DeckId::ALL {
+			let deck = &mut self.decks[id.index()];
+			let (rate, locked) = (deck.rate, deck.key_lock);
+			deck.locked(id, locked, &self.engine);
+			self.decks[id.index()].rated(id, rate, &self.engine);
+		}
 	}
 
 	/// Push the collapsed gains to both players. Called after anything that can change

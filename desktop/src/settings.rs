@@ -48,6 +48,20 @@ pub struct Settings {
 	/// Both volume faders, in player order.
 	pub faders: [f32; 2],
 	pub crossfader: f32,
+	/// Both rate sliders, in player order — 1.0 is the track's own speed (PLAN §7c).
+	///
+	/// Kept for the same reason the volume faders are: it is a fader, not track state, and one
+	/// that already survives every load, unload and track end. Surviving a quit as well is the
+	/// rest of that sentence. A file that predates the field reads as `1.0`, which is what the
+	/// app did before there was a slider.
+	#[serde(default = "unity")]
+	pub rates: [f32; 2],
+	/// Whether each player's **MT/KL** is on (PLAN §7c). Stored with the rates rather than
+	/// separately from them, because the lock is what the rate *means*: restoring a speed
+	/// without it would play the track at yesterday's tempo with the pitch behaviour it was
+	/// never set with. Nothing sanitizes it — a `bool` has no wrong value.
+	#[serde(default)]
+	pub key_locks: [bool; 2],
 	/// The folder the files pane was showing. `None` on a first run.
 	pub folder: Option<PathBuf>,
 	/// Window size as `(width, height)`. Not the position: a window restored onto a
@@ -107,12 +121,21 @@ pub struct Settings {
 	pub tempos: BTreeMap<PathBuf, f32>,
 }
 
+/// Both rate sliders at the track's own speed — `serde`'s fallback for a file written before
+/// they were saved, and `Default`'s. A function because `#[serde(default = "…")]` takes a path
+/// to one, and one place for the value so the two cannot disagree.
+fn unity() -> [f32; 2] {
+	[1.0, 1.0]
+}
+
 impl Default for Settings {
 	fn default() -> Self {
 		Self {
 			curve: Curve::default(),
 			faders: [1.0, 1.0],
 			crossfader: 0.5,
+			rates: unity(),
+			key_locks: [false; 2],
 			folder: None,
 			window: (1180.0, 760.0),
 			// Enough for the two panels' four rows, the mixer's controls, and a queue under
@@ -228,6 +251,14 @@ impl Settings {
 		if !(0.0..=1.0).contains(&self.crossfader) {
 			self.crossfader = default.crossfader;
 		}
+		// The slider's own travel (PLAN §7c). A hand-edited 4.0 is not a fast player, it is a
+		// stretch ratio nothing was tested at; a `NaN` would be a speed the audio thread
+		// divides by. Both read as the track's own speed, which is where the slider starts.
+		for (rate, fallback) in self.rates.iter_mut().zip(default.rates) {
+			if !(0.0..=2.0).contains(rate) {
+				*rate = fallback;
+			}
+		}
 		if !(MIN_WINDOW..=MAX_WINDOW).contains(&self.window.0) {
 			self.window.0 = default.window.0;
 		}
@@ -292,6 +323,10 @@ mod tests {
 			curve: Curve::Linear,
 			faders: [0.25, 0.75],
 			crossfader: 0.3,
+			// Different from each other and from 1.0, and one lock on and one off, so a pair
+			// written into the wrong player's slot shows up as a mismatch.
+			rates: [0.75, 1.5],
+			key_locks: [true, false],
 			// An existing folder, because `sanitized` drops one that is not there.
 			folder: Some(std::env::temp_dir()),
 			window: (900.0, 600.0),
@@ -498,5 +533,43 @@ mod tests {
 
 		// Act / Assert
 		assert_eq!(settings.sanitized().faders, [1.0, 0.5]);
+	}
+
+	#[test]
+	fn a_rate_outside_the_sliders_travel_falls_back_alone() {
+		// Arrange: a hand-edited file with one impossible rate and one real one. 4.0 is not a
+		// fast player — it is a stretch ratio nothing was tested at — and a `NaN` would be a
+		// speed the audio thread divides by (PLAN §7c).
+		let settings = Settings {
+			rates: [4.0, 1.5],
+			..Settings::default()
+		};
+		assert_eq!(settings.sanitized().rates, [1.0, 1.5], "the good one stays");
+
+		let settings = Settings {
+			rates: [f32::NAN, 0.5],
+			..Settings::default()
+		};
+		assert_eq!(settings.sanitized().rates, [1.0, 0.5]);
+
+		// The slider's own ends are not out of range: 0% is its pause and 200% is double.
+		let settings = Settings {
+			rates: [0.0, 2.0],
+			..Settings::default()
+		};
+		assert_eq!(settings.sanitized().rates, [0.0, 2.0]);
+	}
+
+	#[test]
+	fn a_file_written_before_the_rate_slider_plays_at_the_tracks_own_speed() {
+		// Arrange / Act: every field this app has added since, missing — which is what every
+		// settings file on disk before this build looks like.
+		let restored = Settings::from_json("{}");
+
+		// Assert: 1.0 and no lock, which is what the app did before there was a slider — and
+		// not the 0.0 a bare `#[serde(default)]` on an `f32` array would have given, which
+		// would have opened both players silent.
+		assert_eq!(restored.rates, [1.0, 1.0]);
+		assert_eq!(restored.key_locks, [false, false]);
 	}
 }
