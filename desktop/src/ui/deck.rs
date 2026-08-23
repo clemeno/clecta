@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use iced::widget::{button, column, container, row, text};
-use iced::{Center, Element, Fill, Theme};
+use iced::widget::{button, column, container, row, slider, text};
+use iced::{Center, Element, Fill, Right, Theme};
 
 use crate::app::Message;
 use crate::deck::{self, Deck, DeckId, Transport};
@@ -23,11 +23,13 @@ const RING_WIDTH: f32 = 2.0;
 /// in-app drag, derived for an OS drop, and never on both (PLAN §10). `sweep` is the
 /// scanning animation's phase, which the strip uses only while this player is being
 /// scanned (PLAN §14a). `trim` is where the music inside the loaded track sits, if anything
-/// has worked it out — the two jump buttons and the strip's two marks (PLAN §14c).
+/// has worked it out — the two jump buttons and the strip's two marks (PLAN §14c). `tempo`
+/// is the loaded track's, corrections applied, for the rate slider's readout (PLAN §7c).
 pub fn view(
 	id: DeckId,
 	deck: &Deck,
 	trim: Option<Trim>,
+	tempo: Option<f32>,
 	ring: bool,
 	sweep: f32,
 ) -> Element<'_, Message> {
@@ -72,6 +74,26 @@ pub fn view(
 				deck.scanning.then_some(sweep),
 				move |fraction| Message::Seeked(id, fraction),
 			),
+			// The rate slider (PLAN §7c): 0% is a pause, 100% the track's own speed, 200%
+			// double. Live even with nothing loaded, like the mixer's faders — it is a
+			// setting, and the next track picks it up.
+			row![
+				slider(0.0..=2.0, deck.rate, move |rate| Message::RateChanged(
+					id, rate
+				))
+				.step(0.01_f32),
+				// The value a mouse cannot land on by luck, same as the crossfader's centre.
+				button(text("100%").size(11))
+					.padding([2, 6])
+					.style(button::text)
+					.on_press(Message::RateChanged(id, 1.0)),
+				text(rate_label(deck.rate, tempo))
+					.size(11)
+					.width(92.0)
+					.align_x(Right),
+			]
+			.spacing(6)
+			.align_y(Center),
 			row![
 				transport_button("▶", deck::Event::Play, loaded && !deck.is_playing()),
 				transport_button("⏸", deck::Event::Pause, deck.is_playing()),
@@ -129,6 +151,20 @@ fn jump(label: &'static str, to: Option<Duration>, id: DeckId) -> Element<'stati
 		.into()
 }
 
+/// What the rate slider reads as: the percentage, and the tempo it produces (PLAN §7c).
+///
+/// The effective tempo is the track's own times the rate — the one multiplication the whole
+/// slider is for — to one decimal, because two would claim a precision the detector does not
+/// have once it is scaled. The percentage alone when nothing knows the track's tempo yet:
+/// a readout that guessed would be a readout that lies until the scan lands.
+fn rate_label(rate: f32, tempo: Option<f32>) -> String {
+	let percent = format!("{:.0}%", rate * 100.0);
+	match tempo {
+		Some(tempo) => format!("{percent} · {:.1}", tempo * rate),
+		None => percent,
+	}
+}
+
 /// The music's two edges as fractions of the track, for the marks on the strip.
 ///
 /// `None` unless everything needed is there — a length to divide by and a trim — because a
@@ -183,6 +219,18 @@ mod tests {
 	/// Seconds as a `Duration`, since every case below is written in them.
 	fn secs(seconds: f32) -> Duration {
 		Duration::from_secs_f32(seconds)
+	}
+
+	#[test]
+	fn the_rate_readout_multiplies_only_a_tempo_it_actually_has() {
+		// Arrange / Act / Assert: the percentage always; the effective tempo only once the
+		// scan has said what the track's own is (PLAN §7c). One decimal — scaled precision
+		// is not detector precision — and 128 × 1.5 landing on 192.0 exactly is the check
+		// that the multiplication is the advertised one.
+		assert_eq!(rate_label(1.0, None), "100%");
+		assert_eq!(rate_label(0.0, None), "0%", "the pause end");
+		assert_eq!(rate_label(1.5, Some(128.0)), "150% · 192.0");
+		assert_eq!(rate_label(0.5, Some(97.46)), "50% · 48.7");
 	}
 
 	#[test]

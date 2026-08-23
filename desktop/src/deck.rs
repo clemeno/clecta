@@ -119,6 +119,9 @@ pub struct Track {
 	/// `None` when the decoder cannot work one out — a real case for a stream, and the
 	/// reason the time readout has to handle a missing total (PLAN §7).
 	pub duration: Option<Duration>,
+	/// The detected tempo, for the rate slider's readout (PLAN §7c). `None` until the
+	/// track's own scan lands — the same moment the strip fills in.
+	pub tempo: Option<f32>,
 }
 
 /// One player, as the app models it.
@@ -144,6 +147,9 @@ pub struct Deck {
 	/// Not derivable from `peaks` being empty: so is an empty player, and so is one whose
 	/// scan failed, and neither of those should be shown as working.
 	pub scanning: bool,
+	/// The tempo slider (PLAN §7c), 0..=2 with 1.0 as the track's own speed. A physical
+	/// fader like `fader` above: it survives loads and unloads, and it is not track state.
+	pub rate: f32,
 }
 
 impl Default for Deck {
@@ -156,9 +162,17 @@ impl Default for Deck {
 			fader: 1.0,
 			peaks: Vec::new(),
 			scanning: false,
+			// The track's own speed, for the same reason the fader starts open.
+			rate: 1.0,
 		}
 	}
 }
+
+/// Below this, the rate slider means **pause**: its 0% end is a stopped record, not a very
+/// slow one. The gate lives on the deck rather than in the engine because it is a transport
+/// rule — the same pairing as every other decision here (Q48) — and rodio is kept away from
+/// a speed of zero, which its position arithmetic divides by.
+pub const RATE_FLOOR: f32 = 0.005;
 
 impl Deck {
 	/// The track name, or the placeholder the empty player shows.
@@ -195,7 +209,12 @@ impl Deck {
 
 		let outcome = match (engine, event) {
 			(Some(engine), Event::Play) => {
-				engine.play(id);
+				// The rate slider's 0% end (PLAN §7c): the transport says Playing — the
+				// slider is why nothing sounds, and it says so — but the device stays
+				// paused, and `rated` starts it the moment the slider leaves the floor.
+				if self.rate >= RATE_FLOOR {
+					engine.play(id);
+				}
 				Ok(())
 			}
 			(Some(engine), Event::Pause) => {
@@ -253,6 +272,30 @@ impl Deck {
 		None
 	}
 
+	/// The rate slider moved (PLAN §7c): remember where it sits, and make the audio agree.
+	///
+	/// The same pairing as `moved` (Q48), with the same `Option` for the same reason. Two
+	/// rules live here and nowhere else. At the floor the slider means **pause** — the device
+	/// is paused rather than run at a speed rodio's arithmetic cannot hold, while the
+	/// transport keeps saying Playing, because the slider is the visible reason for the
+	/// silence and pulling it back up is the whole gesture. And above the floor, a playing
+	/// player is started again, which is what ends that gesture.
+	pub fn rated(&mut self, id: DeckId, rate: f32, engine: &Option<Engine>) {
+		self.rate = rate;
+		let Some(engine) = engine else {
+			return;
+		};
+
+		if rate < RATE_FLOOR {
+			engine.pause(id);
+		} else {
+			engine.set_rate(id, rate);
+			if self.is_playing() {
+				engine.play(id);
+			}
+		}
+	}
+
 	/// The file ran out (PLAN §7): put it back in the player, and stop at the top of it.
 	///
 	/// `empty()` going true means rodio has *consumed* the source and dropped it, so there is
@@ -279,8 +322,8 @@ impl Deck {
 	}
 
 	/// Take the track out of the player: back to `Empty`, as if nothing had ever been
-	/// loaded — except the fader, which is a mixer setting rather than track state, and
-	/// survives the way it survives a load.
+	/// loaded — except the fader and the rate slider, which are settings rather than track
+	/// state, and survive the way they survive a load.
 	///
 	/// `scanning` goes too, deliberately: the `Scanned` guard in `update` drops a result
 	/// for a track that is no longer loaded, so a scan still running for the unloaded
@@ -372,6 +415,7 @@ mod tests {
 				path: PathBuf::from("/music/track.mp3"),
 				name: "track.mp3".to_string(),
 				duration: None,
+				tempo: None,
 			}),
 			..Default::default()
 		}
@@ -390,11 +434,12 @@ mod tests {
 		player.peaks = vec![0.5];
 		player.scanning = true;
 		player.fader = 0.3;
+		player.rate = 1.5;
 
 		// Act
 		player.unloaded(DeckId::One, &SILENT);
 
-		// Assert: the empty state, except the fader — a mixer setting, not track state.
+		// Assert: the empty state, except the fader and the rate — settings, not track state.
 		// `scanning` must go with the track: the `Scanned` guard drops a result for a track
 		// no longer loaded, so nothing else would ever stop the animation.
 		assert_eq!(player.transport, Transport::Empty);
@@ -405,6 +450,27 @@ mod tests {
 		assert_eq!(
 			player.fader, 0.3,
 			"the fader is the mixer's, not the track's"
+		);
+		assert_eq!(player.rate, 1.5, "and the rate slider is a fader too");
+	}
+
+	#[test]
+	fn the_rate_slider_is_remembered_with_or_without_a_device() {
+		// Arrange: a playing player and nothing plugged in (Q48) — what is checkable is the
+		// model, and the model is the slider's position.
+		let mut player = deck(Transport::Playing);
+
+		// Act / Assert: the slider lands where it was put, and the floor is still a rate the
+		// model remembers — pulling it back up is the rest of the same gesture, so the
+		// position must not snap elsewhere while the device sits paused.
+		player.rated(DeckId::One, 1.5, &SILENT);
+		assert_eq!(player.rate, 1.5);
+		player.rated(DeckId::One, 0.0, &SILENT);
+		assert_eq!(player.rate, 0.0);
+		assert_eq!(
+			player.transport,
+			Transport::Playing,
+			"the slider's 0% is a pause in the device, not a transport event"
 		);
 	}
 

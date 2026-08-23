@@ -226,6 +226,8 @@ clecta/
         │                three questions only the set can answer — is this a duplicate, what
         │                needs measuring, where does the next track come from (§7a, Q47)
         ├── settings.rs  load/save clecta-data/settings.json; a corrupt file reads as defaults (§11)
+        ├── stretch.rs   a player's rate fader and the file-timeline playhead the player
+        │                cannot keep itself: every source is wrapped on its way in (§7c)
         ├── waveform.rs  PURE, and about what is in a *file*: `Scanner` folds its samples to a
         │                bounded array, finds the music's edges and works out its tempo, all in
         │                one pass; `Scan` is the three answers, declared here so `cache` can name
@@ -927,6 +929,38 @@ That seek is the only thing that has to know the *incoming* track's edges, and i
 that is already playing is exactly the artefact this feature exists to remove. So it uses what
 is already known and nothing else (§14c), and a track nobody has prepared starts at 0:00. That
 is the whole reason the folder scan of §11b has a button.
+
+---
+
+## 7c. The rate slider (`stretch.rs`, `deck.rs`, `audio.rs`, `ui/deck.rs`)
+
+Each player gets a rate fader under its strip: 0..=200%, with 100% the track's own speed. It is
+varispeed, like a record — the pitch moves with the speed — and it is a **fader, not track
+state**: it survives loads, unloads, stops and track ends, exactly like the volume fader above
+it, so the next track plays at whatever the fader already says. The readout beside it shows the
+percentage, and the tempo it produces once the track's own is known: `150% · 192.0`, the
+corrected tempo (§14d) times the rate, to one decimal — scaled precision is not detector
+precision.
+
+**The 0% end means pause.** Below `RATE_FLOOR` the device is paused rather than run at a speed
+rodio's position arithmetic cannot hold, while the transport keeps saying Playing: the slider is
+the visible reason for the silence, and pulling it back up is the rest of the same gesture. The
+gate is a transport rule, so it lives on the `Deck` (`rated`, and one line in `moved`'s Play
+arm) with the same model-and-effect pairing as every other edge (Q48).
+
+**The playhead is the app's, not rodio's.** `Player::get_pos` counts in the *output's* timeline
+— at 150% it runs slow by exactly that factor — and the player's speed stage scales every seek
+by the factor on its way to the decoder, leaving an anchor that goes wrong if the rate changes
+after a seek. So `stretch.rs` wraps every source on its way into the player: the wrapper counts
+the interleaved source samples it hands over — the file's own timeline, whatever the speed —
+batched into an atomic the GUI thread reads on the tick. `Engine::seek` divides its target by
+the current rate so the speed stage multiplies it back, which is also what lands the wrapper's
+own `try_seek` in file time. One writer on the audio thread, no locks, and the readout and the
+strip stay truthful at any rate.
+
+The module is named for what it grows into: the master-tempo stretch (MT/KL) belongs behind the
+same wrapper, so the seam between "the file's samples" and "what the player was fed" exists in
+exactly one place.
 
 ---
 
@@ -3119,6 +3153,7 @@ decided.
 | Q59 | Who owns what a run has learned about files | **One module, `known.rs`, and one door in.** The answers from three jobs — a track's own scan, a folder scan, a queue measurement — landed in three places (the trims the players and the handover read, the pane's marks, the queues' rows), and the fan-out was a method on the app that only two of the three producers went through; the rule that holds it together, "a job that could not say says nothing" (Q45), was enforced by prose at every producer. `Known` owns the trims and the fan-out — `learned` takes the browser and the queues as arguments, so the app stays the owner of its panes and the module stays pure and testable — and `Facts` moves in with it, because it is the vocabulary of the door. The pane's own map stays on `Browser` deliberately: it is a copy of the store's answer about *one listing*, with a listing's lifetime, not the run's | §14c, §11c, Q45 |
 | Q60 | What Unload does, and what it asks first | **Empty the player, and ask only while the sound is on.** The button sits beside **Load…** and puts the player back to `Empty` — track, playhead, waveform and the scanning flag all go; the fader stays, because it is a mixer setting rather than track state. The pairing is Q48's: `Deck::unloaded` moves the model and the audio together, with no `Option<String>` return because dropping a source is the one thing a device cannot refuse. The scanning flag must go *here*: the `Scanned` guard drops a result for a track no longer loaded, so nothing else would ever stop the animation. The confirmation is the same rfd modal the destructive buttons use, and only for a playing player — unloading a stopped track costs one Load to undo, while cutting audible playback is the mistake a modal exists for. Auto-load cannot refill the emptied player: `advance` runs only when a track *ends* (§7a), and an unloaded player has no track to end | §7, Q48, §7a |
 | Q61 | Which key detector, and where it lives | **Krumhansl–Schmuckler over a Goertzel chroma, as the fourth accumulator in `waveform.rs`.** The scan already decodes every sample (§14a), so the key rides the same pass — §14a's "a struct, a field, a `push` and a `finish`" promise, kept. The profiles are Krumhansl & Kessler's listener measurements, the standard baseline detector; Goertzel over an FFT because thirty-six named notes cost no dependency (§12); a boxcar decimation whose aliasing is accepted and marked, because the correlation is robust to it. A fifth cache table on the all-or-nothing rule (§11a), so an old store re-scans once instead of migrating. The column goes just before the tempo in both panes — a set is matched by key before it is matched by speed — and prints sharps only, `m` for minor, no Camelot numbers | §14e, §11a, §12 |
+| Q62 | Who keeps the playhead once a player has a rate | **The app, in a wrapper around every source — never `Player::get_pos`.** rodio's count is in the output's timeline (slow by the factor at 150%), its seeks are scaled by the speed stage, and the anchor a seek leaves behind goes wrong if the rate changes afterwards — a drift with no bound but the seek target. `stretch::Stretched` counts the interleaved source samples it hands the player, batched into one atomic; `Engine::seek` divides by the rate so the speed stage multiplies it back. The slider itself is a fader, not track state — it survives loads and unloads like the volume fader — and its 0% end is a pause gate on the `Deck` (`RATE_FLOOR`), because a transport rule belongs with the transport (Q48) and rodio must not be handed a speed of zero | §7c, Q48, §14b |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

@@ -14,9 +14,11 @@ use anyhow::{Context, Result};
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::deck::DeckId;
+use crate::stretch::{Shared, Stretched};
 use crate::waveform::{Scan, Scanner};
 
 /// The audio output, alive for as long as the app can make a sound.
@@ -24,6 +26,9 @@ pub struct Engine {
 	/// Held, never read: dropping the sink stops every player connected to it.
 	_sink: MixerDeviceSink,
 	players: [Player; 2],
+	/// One per player, surviving every load: the rate fader and the file-timeline playhead
+	/// (PLAN §7c). The wrapper around each loaded source holds a clone.
+	shared: [Arc<Shared>; 2],
 	description: String,
 }
 
@@ -59,6 +64,7 @@ impl Engine {
 		Ok(Self {
 			_sink: sink,
 			players,
+			shared: [Arc::new(Shared::default()), Arc::new(Shared::default())],
 			description,
 		})
 	}
@@ -82,6 +88,10 @@ impl Engine {
 		// before `clear()`, so a file that fails to decode leaves the loaded track alone.
 		let duration = source.total_duration();
 
+		// Wrapped on its way in (PLAN §7c): the wrapper keeps the file-timeline playhead
+		// this module's `position` answers with, and resets it to the top for the new track.
+		let source = Stretched::new(source, Arc::clone(&self.shared[id.index()]));
+
 		let player = self.player(id);
 		// `ponytail:` `clear()` blocks until the audio thread has dropped the old source,
 		// which is at most one 5 ms control tick. Short enough to call on the GUI thread;
@@ -91,6 +101,15 @@ impl Engine {
 		player.pause();
 
 		Ok(duration)
+	}
+
+	/// Set one player's rate (PLAN §7c): 1.0 is the track's own speed. Varispeed, like a
+	/// record — the pitch moves with it — and the fader survives loads, stops and track ends,
+	/// because rodio keeps the speed on the *player* while this keeps it beside the playhead
+	/// arithmetic that needs it.
+	pub fn set_rate(&self, id: DeckId, rate: f32) {
+		self.shared[id.index()].set_rate(rate);
+		self.player(id).set_speed(rate);
 	}
 
 	/// Drop whatever one player holds, leaving it silent and empty. The one transport
@@ -131,6 +150,11 @@ impl Engine {
 	/// cost is that the landing point can be a tick out, which is inaudible in a track and
 	/// invisible in a 400-pixel strip.
 	pub fn seek(&self, id: DeckId, to: Duration) -> Result<()> {
+		// `to` is a place in the *file*, but the player's speed stage scales every seek it is
+		// handed by its factor on the way to the decoder. Dividing here is what makes the two
+		// cancel — the wrapper then hears the file-timeline position and records it (PLAN §7c).
+		let rate = self.shared[id.index()].rate();
+		let to = if rate > 0.0 { to.div_f32(rate) } else { to };
 		self.player(id)
 			.try_seek(to)
 			.context("cannot seek this stream")?;
@@ -145,8 +169,13 @@ impl Engine {
 	}
 
 	/// The decoder's playhead, polled on the tick (PLAN §4).
+	///
+	/// From the wrapper, not from `Player::get_pos` (PLAN §7c): rodio's own count is in the
+	/// output's timeline — at 150% it runs slow by exactly that factor, and the anchor its
+	/// seeks leave behind moves whenever the rate changes afterwards. The wrapper counts the
+	/// file's own samples, which is the number the readout and the strip are drawing.
 	pub fn position(&self, id: DeckId) -> Duration {
-		self.player(id).get_pos()
+		self.shared[id.index()].position()
 	}
 
 	/// Whether the queue has run out — the only end-of-track signal there is. Meaningful

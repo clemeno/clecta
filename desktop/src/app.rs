@@ -298,6 +298,8 @@ pub enum Message {
 	Tick,
 	/// A transport button on one player.
 	Transport(DeckId, deck::Event),
+	/// The per-player rate slider (PLAN §7c): 1.0 is the track's own speed, 0 is a pause.
+	RateChanged(DeckId, f32),
 	/// The per-player **Load…** button — the third door that always works (PLAN §10).
 	LoadPressed(DeckId),
 	/// The per-player **Unload** button: take the track out and leave the player empty.
@@ -821,6 +823,10 @@ impl Clecta {
 			Message::Tick => return self.poll_players(),
 
 			Message::Transport(id, event) => self.transport(id, event),
+
+			Message::RateChanged(id, rate) => {
+				self.decks[id.index()].rated(id, rate, &self.engine);
+			}
 
 			Message::LoadPressed(id) => {
 				// `ponytail:` the native dialog is modal and blocks the GUI thread while
@@ -1518,7 +1524,15 @@ impl Clecta {
 				}
 				self.decks[id.index()].scanning = false;
 				match result {
-					Ok(scan) => self.decks[id.index()].peaks = scan.peaks,
+					Ok(scan) => {
+						let deck = &mut self.decks[id.index()];
+						deck.peaks = scan.peaks;
+						// For the rate slider's readout (PLAN §7c), which wants the loaded
+						// track's own tempo where the panes want a row's.
+						if let Some(track) = deck.track.as_mut() {
+							track.tempo = scan.tempo;
+						}
+					}
 					// Odd but reachable: playback opened the file and the scan did not,
 					// because it was replaced or unmounted between the two reads.
 					Err(error) => self.notice = format!("{}: {error}", id.label()),
@@ -2179,6 +2193,9 @@ impl Clecta {
 					path: path.clone(),
 					name,
 					duration,
+					// The scan is only starting: the slider's readout shows the percentage
+					// alone until the tempo lands with the strip.
+					tempo: None,
 				});
 
 				scan_track(id, path, self.cache.clone())
@@ -2475,7 +2492,19 @@ impl Clecta {
 			.track
 			.as_ref()
 			.and_then(|track| self.known.trim(&track.path));
-		let panel = ui::deck::view(id, &self.decks[id.index()], trim, ring == Some(id), sweep);
+		// The same correction rule as every row (PLAN §14d): the slider's readout multiplies
+		// the number the user believes, which is the corrected one where there is one.
+		let tempo = self.decks[id.index()].track.as_ref().and_then(|track| {
+			ui::corrected_tempo(&self.tempos, &track.path, Some(track.tempo)).flatten()
+		});
+		let panel = ui::deck::view(
+			id,
+			&self.decks[id.index()],
+			trim,
+			tempo,
+			ring == Some(id),
+			sweep,
+		);
 
 		if self.drag.is_none() {
 			return panel;
