@@ -302,6 +302,30 @@ pub fn row_style(theme: &iced::Theme, selected: bool) -> iced::widget::container
 	}
 }
 
+/// A selectable list's panel, with a ring round the one the keyboard is talking to (PLAN §9a).
+///
+/// The same box every panel already had, plus a border in `primary` when it is focused — the
+/// colour the app has been reserving for exactly this, where a drop target lights in `success`
+/// (`ui::deck`). It is what stops "which list does ⌘A mean?" being a question the user answers
+/// by trying it, and it is why the focus model needed no gesture of its own: the ring says
+/// where the last press landed.
+pub fn panel_style(theme: &iced::Theme, focused: bool) -> iced::widget::container::Style {
+	use iced::widget::container;
+
+	let base = container::bordered_box(theme);
+	if !focused {
+		return base;
+	}
+
+	container::Style {
+		border: base
+			.border
+			.color(theme.extended_palette().primary.strong.color)
+			.width(2.0),
+		..base
+	}
+}
+
 /// The `position / length` readout, with the length replaced when the decoder could not
 /// determine one (PLAN §7).
 pub fn format_transport(position: Duration, duration: Option<Duration>) -> String {

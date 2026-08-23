@@ -11,6 +11,7 @@ mod audio;
 mod browser;
 mod cache;
 mod deck;
+mod focus; // which list ⌘A and Escape are talking to
 mod fsio;
 mod known; // what this run has learned about files, and the door answers arrive through
 mod mixer;

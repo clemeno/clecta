@@ -214,6 +214,8 @@ clecta/
         ├── mixer.rs     PURE gain math: fader + crossfader + Curve → the two gains. No rodio, no iced (§8)
         ├── browser.rs   the files pane's model: one directory, its entries, media categories (§9)
         ├── tree.rs      the folder tree's model: nodes, expansion, path arithmetic (§9)
+        ├── focus.rs     PURE: which of the four lists ⌘A and Escape are talking to, and the
+        │                rule that they touch that one and no other (§9a)
         ├── fsio.rs      std::fs reads run off the GUI thread: list a dir, list its subfolders, the roots (§9)
         ├── known.rs     PURE: what this run has learned about files, and the one door those
         │                answers arrive through — the never-unlearn rule and the fan-out to
@@ -1356,13 +1358,30 @@ is the pure half that finds them.
 
 ### Two more keys, and what they are not
 
-**⌘A / Ctrl+A** selects every row the pane is *showing*, so the hidden filter decides what
-"all" means — the same rule the selection itself follows. **Escape** clears it.
+**⌘A / Ctrl+A** selects every row of the focused list. In the files pane that means every row it
+is *showing*, so the hidden filter decides what "all" means — the same rule the selection itself
+follows; in a queue there is no filter, so every row is every row. **Escape** clears the focused
+list, and only that one: a set built in one queue survives going to look at another, and no key
+quietly empties four lists at once.
 
-Both act on the files pane and not on the queues, and that is a line rather than an oversight:
-the app has no focus model, so "select all" in a window with four selectable panels would have
-to guess which one was meant. The pane is the one with thousands of rows, which is where
-selecting them all by hand is not an option.
+### The focus model, which is one field
+
+Both keys acted on the files pane alone for a while, and the reason was that "select all" in a
+window with four selectable lists would have to guess which was meant. The guess is what needed
+removing, not the keys, and the smallest thing that removes it is: **the list you last pressed a
+row in** (`focus.rs`). No Tab order, no focus discipline to learn, no new gesture at all — the
+press that moves the focus is a press the user was making anyway, and the app already had it as
+a message. The files pane is where it starts, because that is where the app opens and it is the
+list with thousands of rows in it, which is the argument that got ⌘A its first list.
+
+It is also *shown*, which is the half that stops it being folklore: the focused list wears a ring
+in `primary` — the colour reserved for this, where a drop target lights in `success` (§10) — so
+"which list does ⌘A mean?" is answered by looking rather than by trying. The tree pane never
+wears one: it is navigation, not a list the keyboard acts on.
+
+`focus.rs` takes the panes as arguments rather than owning them, the same shape as `known.rs`
+(Q59), so the app stays the owner of its panes and the rule stays checkable with no window: one
+list filled, three left alone, and the same for clearing.
 
 ### And one thing that did not change
 
@@ -3205,6 +3224,7 @@ decided.
 | Q62 | Who keeps the playhead once a player has a rate | **The app, in a wrapper around every source — never `Player::get_pos`.** rodio's count is in the output's timeline (slow by the factor at 150%), its seeks are scaled by the speed stage, and the anchor a seek leaves behind goes wrong if the rate changes afterwards — a drift with no bound but the seek target. `stretch::Stretched` counts the interleaved source samples it hands the player, batched into one atomic; `Engine::seek` divides by the rate so the speed stage multiplies it back. The slider itself is a fader, not track state — it survives loads and unloads like the volume fader — and its 0% end is a pause gate on the `Deck` (`RATE_FLOOR`), because a transport rule belongs with the transport (Q48) and rodio must not be handed a speed of zero | §7c, Q48, §14b |
 | Q63 | How the key lock changes tempo without pitch | **A hand-written WSOLA inside the same wrapper, and one routing rule.** rodio has varispeed only, and the pure-Rust stretch crates do not earn a dependency for ~150 lines of the textbook algorithm: synthesize a half-window at a time, search ~6 ms for the waveform-aligned start, crossfade. The rule that keeps the two tempo mechanisms from fighting is `Shared::speed` — under the lock the player's speed stage is pinned to 1.0 and the wrapper stretches; without it the stage gets the rate and the wrapper passes through — and seeks divide by that same answer, so both modes land in file time. Pinned by a test that checks tempo and pitch *together*: a locked 150% turns three seconds of 440 Hz into two seconds still crossing zero 880 times a second, where varispeed would read 660. Mode switches join bluntly (≤ ~50 ms, `ponytail:`) rather than splicing timelines for a once-per-flip click | §7c, Q62, §12 |
 | Q64 | How the row menu learns where the pointer is | **One custom widget at the root, publishing on right presses only — not the cursor subscription Q41 deferred to.** The subscription was always the wrong shape: it fires on every mouse move in the app to answer a question asked a few times an hour, and §6 refuses it for exactly that. `ui::pointer::watch` wraps the window and publishes the cursor's position when a right button goes down, so the idle app is unchanged and the answer is exact rather than derived from layout the app does not have. At the root rather than per row, because the root sees every press anyway. Two messages now belong to one gesture, so the widget publishes **before** delegating to its child — Q53's hazard, settled in the widget instead of hoped for in `update`. Placement is a pure function: down-right of the pointer, flipped rather than slid when it would not fit (a menu slid to the window's edge covers the row that was clicked), clamped last; it flips against *pinned* panel heights, since nothing can be measured before it is laid out. The menu also stopped dimming the window — a context menu is not a modal — while the editor still does, and that is now a property of the `Panel` so it cannot drift from the panel it describes | §14d, §6, Q41, Q53 |
+| Q65 | What the two keys act on, now that four lists can be selected in | **The list a row was last pressed in — one field, one ring, no new gesture.** §9a kept ⌘A and Escape on the files pane because the app had no focus model and would have had to guess; the answer is not a Tab order but the press the user is already making, which the app already receives as `RowSelected` / `QueueSelected`. `focus::Focus` is `Files` or `Queue(id)`, starts on the pane (where the app opens, and the list with thousands of rows), and takes the panes as arguments like `known.rs` does (Q59) so the rule is checkable with no window: ⌘A fills one list and leaves three alone, Escape empties one and leaves three selected — because a set built in one queue must survive going to look at another, and a key that emptied all four would be a key nothing could undo. The focused list wears a ring in `primary`, the colour §10 left spare for it, so the answer is looked at rather than tried; the tree never wears one, being navigation rather than a list. A queue's ⌘A takes every row, since a queue has no hidden filter to argue with, and leaves the anchor on the top row so a Shift-click straight afterwards shortens the set from the top | §9a, Q59, §10 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

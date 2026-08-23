@@ -72,11 +72,12 @@ pub fn scroll_id(queue: QueueId) -> iced::advanced::widget::Id {
 /// passed in rather than read here because all three panels ask the same question of the same
 /// pane, and the answer should be worked out once. `scroll` is how far down the panel is,
 /// which the view needs for the same reason the files pane does: to know which rows are worth
-/// building (PLAN §9).
+/// building (PLAN §9). `focused` is whether ⌘A and Escape mean *this* queue (PLAN §9a).
 pub fn view<'a>(
 	id: QueueId,
 	queue: &'a Queue,
 	addable: bool,
+	focused: bool,
 	scroll: f32,
 	tempos: &BTreeMap<PathBuf, f32>,
 	dragging: Option<Dragging>,
@@ -100,7 +101,7 @@ pub fn view<'a>(
 		]
 		.spacing(4),
 	)
-	.style(container::bordered_box)
+	.style(move |theme: &Theme| ui::panel_style(theme, focused))
 	.padding(6)
 	.height(Fill);
 

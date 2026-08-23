@@ -324,6 +324,22 @@ impl Queue {
 		}
 	}
 
+	/// Select every row (PLAN §9a). The pane's `select_all` with the filter taken out: a queue
+	/// shows everything it holds, so every row *is* every row.
+	///
+	/// The anchor lands on the top row, like the pane's does, so a Shift-click straight after
+	/// ⌘A shortens the selection from the top rather than measuring from wherever the last
+	/// click happened to be.
+	pub fn select_all(&mut self) {
+		self.selected = (0..self.items.len()).collect();
+		self.anchor = (!self.items.is_empty()).then_some(0);
+	}
+
+	pub fn clear_selection(&mut self) {
+		self.selected.clear();
+		self.anchor = None;
+	}
+
 	/// Re-number the selection after the queue has moved under it.
 	///
 	/// One place for the arithmetic every edit needs, because it is the same arithmetic every
@@ -524,6 +540,38 @@ mod tests {
 				.map(|name| PathBuf::from("/m").join(name))
 				.collect(),
 		)
+	}
+
+	#[test]
+	fn selecting_every_row_leaves_the_anchor_at_the_top_of_the_queue() {
+		// Arrange: ⌘A on a queue, now that the keys reach one (PLAN §9a).
+		let mut queue = filled(&["a", "b", "c", "d"]);
+		queue.select_all();
+		assert_eq!(queue.selection().collect::<Vec<_>>(), [0, 1, 2, 3]);
+
+		// Act: a Shift-click straight afterwards, which is how a set of four becomes a set of
+		// two — and it needs an anchor to measure from.
+		queue.click(1, Click::Range);
+
+		// Assert: measured from the top row rather than from wherever the last plain click
+		// happened to land, which is the same anchor the files pane's `select_all` leaves.
+		assert_eq!(queue.selection().collect::<Vec<_>>(), [0, 1]);
+
+		// And clearing takes the anchor with it, or a later range would measure from a row
+		// nothing is selecting any more.
+		queue.clear_selection();
+		assert!(!queue.has_selection());
+		queue.click(2, Click::Range);
+		assert_eq!(
+			queue.selection().collect::<Vec<_>>(),
+			[2],
+			"no anchor is a plain click"
+		);
+
+		// An empty queue selects nothing rather than an anchor pointing at no row.
+		let mut empty = filled(&[]);
+		empty.select_all();
+		assert!(!empty.has_selection());
 	}
 
 	#[test]

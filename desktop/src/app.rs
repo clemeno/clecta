@@ -30,6 +30,7 @@ use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
+use crate::focus::Focus;
 use crate::known::{Facts, Known};
 use crate::mixer::{self, Curve};
 use crate::queue::{self, Handover};
@@ -551,6 +552,10 @@ pub struct Clecta {
 	/// the cache, because a person's answer about a track is not something a decode could work
 	/// out again — and read only by the two views, which apply it to a row as it is drawn.
 	tempos: BTreeMap<PathBuf, f32>,
+	/// Which list ⌘A and Escape are talking to (PLAN §9a): the one a row was last pressed in,
+	/// and the files pane until one has been. A press the user was making anyway, rather than a
+	/// Tab order and a focus ring to learn.
+	focus: Focus,
 	/// Where the last right press landed, from the widget wrapped round the window
 	/// (`ui::pointer`) — the one thing iced's press messages do not carry, and the whole of
 	/// what a menu needs to open under the pointer (PLAN §14d). `None` until the first right
@@ -675,6 +680,7 @@ impl Clecta {
 			modifiers: Modifiers::empty(),
 			sweep: 0,
 			tempos: settings.tempos,
+			focus: Focus::default(),
 			pointer: None,
 			menu: None,
 			correcting: None,
@@ -921,6 +927,11 @@ impl Clecta {
 				// else claims the click (Q50).
 				// Arming and disarming both abandon what an older click still owed: a press
 				// is a new gesture (Q50), and the type clears it synchronously (Q53, Q58).
+				// The press is also what the keyboard follows (PLAN §9a): ⌘A and Escape act on
+				// the list a row was last pressed in, so no new gesture had to be invented for
+				// them and none has to be remembered.
+				self.focus = Focus::Files;
+
 				let kind = self.click_kind();
 				if kind.defers(self.browser.is_selected(&path)) {
 					self.collapse.arm(Pressed::Row(path.clone()));
@@ -945,7 +956,7 @@ impl Clecta {
 				// "All" must not narrow to one a third of a second later: the click is
 				// claimed, at both stages (Q50).
 				self.collapse.cancel();
-				self.browser.select_all();
+				self.focus.select_all(&mut self.browser, &mut self.queues);
 			}
 
 			// Escape closes whatever is over the window first, and only clears the selection when
@@ -956,7 +967,7 @@ impl Clecta {
 				// at either stage, or a release after the Escape would revive it (Q50).
 				self.collapse.cancel();
 				if self.menu.take().is_none() && self.correcting.take().is_none() {
-					self.browser.clear_selection();
+					self.focus.clear(&mut self.browser, &mut self.queues);
 				}
 			}
 
@@ -1090,6 +1101,8 @@ impl Clecta {
 				// both jobs, and a plain press on an already-selected row leaves the selection
 				// alone so that a multi-row drag has something to carry. The release finishes
 				// what the press deferred, once nothing else claims the click (Q50).
+				self.focus = Focus::Queue(id);
+
 				let kind = self.click_kind();
 				let queue = self.queues.get_mut(id);
 				if kind.defers(queue.is_selected(index)) {
@@ -2386,7 +2399,11 @@ impl Clecta {
 				),
 				Section::Tree => ui::tree::view(&self.tree, self.browser.folder.as_deref()),
 			};
-			pane_grid::Content::new(body).style(container::bordered_box)
+			// The files pane wears the same ring the queues do, and only it: the tree is
+			// navigation, not a list the keyboard acts on (PLAN §9a).
+			let focused = section == &Section::Files && self.focus == Focus::Files;
+			pane_grid::Content::new(body)
+				.style(move |theme: &Theme| ui::panel_style(theme, focused))
 		})
 		.spacing(PANE_SPACING)
 		.min_size(MIN_PANE)
@@ -2472,6 +2489,7 @@ impl Clecta {
 				id,
 				self.queues.get(id),
 				addable,
+				self.focus == Focus::Queue(id),
 				self.queues.scroll(id),
 				&self.tempos,
 				// One value rather than three arguments, and `None` at rest: everything a

@@ -74,6 +74,11 @@ What a plain press on an already-selected row still owes: narrowing the selectio
 row. Deferred to the release and past it, so a drag or a double click can claim the click
 first.
 
+**Focus**:
+The one list the keyboard is talking to — the files pane or one of the three queues,
+whichever had a row pressed in it last. It wears a ring, and ⌘A and Escape act on it and on
+no other list.
+
 ## What is known about a file
 
 **File**:
