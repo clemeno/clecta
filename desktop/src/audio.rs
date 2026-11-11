@@ -384,6 +384,43 @@ mod tests {
 		assert_eq!(landed, Some(4_000), "the seek landed somewhere else");
 	}
 
+	/// Not a check but a probe, for files the suite cannot ship: what the app learns about
+	/// each file named in `CLECTA_PROBE` (a path list, `;`-separated on Windows and
+	/// `:`-separated elsewhere) — the length from the header and from a full decode, where
+	/// two seeks land, and the scan's answers — so two files that should agree can be read
+	/// side by side. It found Q69: an MP4 whose header said 66 s and whose decode said 228.
+	///
+	/// `CLECTA_PROBE="a.mp3;a.mp4" cargo test probe_files -- --ignored --nocapture`
+	#[test]
+	#[ignore = "reads the files named in CLECTA_PROBE"]
+	fn probe_files() {
+		let paths = std::env::var_os("CLECTA_PROBE").expect("CLECTA_PROBE names no files");
+		for path in std::env::split_paths(&paths) {
+			let source = decoder(&path).expect("opening the file");
+			let (rate, channels) = (source.sample_rate().get(), source.channels().get());
+			let seconds = |samples: usize| samples as f64 / f64::from(rate * u32::from(channels));
+			let decoded = seconds(source.count());
+			eprintln!(
+				"{}: header {:?}, decoded {decoded:.3} s, {rate} Hz × {channels}",
+				path.display(),
+				duration(&path),
+			);
+
+			for target in [decoded / 4.0, decoded * 3.0 / 4.0] {
+				let mut sought = decoder(&path).expect("opening the file");
+				let result = sought.try_seek(Duration::from_secs_f64(target));
+				let landed = decoded - seconds(sought.count());
+				eprintln!("  seek to {target:.3} s: {result:?}, landed at {landed:.3} s");
+			}
+
+			let scanned = scan(&path).expect("scanning the file");
+			eprintln!(
+				"  trim {:?}, tempo {:?}, key {:?}",
+				scanned.trim, scanned.tempo, scanned.key
+			);
+		}
+	}
+
 	/// One second of MP4 with the video first: a 1 kHz track of 25 opaque frames, then 8 kHz
 	/// mono PCM whose sample `n` is `n`. Built by hand for the same reason `wav` is — it is
 	/// eleven kinds of box, each a header and a few numbers. `avc1` with no body is enough of

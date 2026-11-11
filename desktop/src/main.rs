@@ -16,6 +16,8 @@ mod fsio;
 mod known; // what this run has learned about files, and the door answers arrive through
 mod mixer;
 mod paths;
+#[cfg(test)]
+mod plan; // the facts PLAN.md states that the build can check
 mod queue; // one queue: its rows, its selection, its handover rules
 mod queues; // the set of three: what is only true of them together
 mod select;
