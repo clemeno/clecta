@@ -225,7 +225,9 @@ clecta/
         ├── known.rs     PURE: what this run has learned about files, and the one door those
         │                answers arrive through — the never-unlearn rule and the fan-out to
         │                the panes live here (§14c, Q59)
-        ├── paths.rs     clecta-data/ beside the app if writable, else the per-user dir; the .app walk-up (§11)
+        ├── paths.rs     clecta-data/ beside the app if writable, else the per-user dir; the .app walk-up (§11);
+        │                on Windows, a GUI launch's stderr into clecta-data/clecta.log
+        ├── plan.rs      tests only: PLAN §3's versions against Cargo.toml and Cargo.lock
         ├── queue.rs  PURE arithmetic for **one** queue: its rows, its selection, and what
         │                every edit does to that selection (§7a)
         ├── queues.rs    PURE, and about the **set** of three: `QueueId`, the queues themselves,

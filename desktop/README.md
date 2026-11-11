@@ -248,15 +248,29 @@ cargo build --release --target x86_64-apple-darwin
 
 ## Checks
 
-What CI runs (PLAN §12), all of which must be clean:
+What CI runs (PLAN §12), all of which must be clean — and `./check.sh` runs the same list,
+in the same order, on this machine (`git config core.hooksPath .githooks` makes every push
+run it first):
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings
 cargo deny check bans licenses sources
 cargo audit
 ```
+
+The script needs `rustup target add x86_64-apple-darwin` and
+`cargo install --locked cargo-deny cargo-audit` once per machine. CI adds one step of its
+own: the vendored rodio is compared with the crates.io tarball, and any difference outside
+its one patched file fails (PLAN Q69).
+
+Two more, run by hand. On Windows, `scripts/smoke-windows.ps1` launches an isolated copy of
+the debug build, presses **Clear cache** and asks Windows whether the confirmation box is
+visible — the one defect class no test here can reach (PLAN Q70). And for a real file the
+suite cannot ship, `CLECTA_PROBE="a.mp3;a.mp4" cargo test probe_files -- --ignored --nocapture`
+prints what the app learns about each: both lengths, two seeks, and the scan.
 
 CI runs clippy and the tests on **both** shipped targets — natively on Windows, and
 cross-compiled against `x86_64-apple-darwin` on the macOS runner, which is Apple Silicon.
@@ -284,6 +298,7 @@ cargo build --release
 | `browser.rs` | extension → kind, the natural-numeric sort, the hidden filter, a selection surviving (or not) a refresh — and the selection itself: each of the three click kinds, a shift-click adjusted by a second one, a range with no anchor falling back to a plain click, the selection coming back in **row order** however it was clicked, ⌘A meaning every row *on screen*, and a `.txt` that can be selected but is never handed to a player; then the ready marks — a refresh keeping the mark of a row it still lists and dropping the one it lost, a file worked out while the pane shows it getting one, a path the pane has never heard of not, and clearing the store clearing the column — and the playing time and tempo riding in the same map, a scanned file's seconds and beats coming back together, a scanned *silent* one coming back marked with neither, and a file nobody has scanned told apart from both |
 | `tree.rs` | expand asks for a re-list, reveal asks only for what was never listed, collapse keeps its cache, `None` ≠ `Some(vec![])` |
 | `paths.rs` | `clecta-data/` beside an ordinary binary, beside the `.app` for a bundled one, and no walk-up for a folder that merely looks like a bundle |
+| `plan.rs` | the one part of PLAN.md the build can check: every pin in `Cargo.toml` is what `Cargo.lock` resolves, and PLAN §3's table names the same version in that dependency's row — the table had gone stale once, and the first run of this test found a pin the last upgrade had missed |
 | `cache.rs` | the record encoding without a database — an exact round trip, a changed size or timestamp reading as a miss, another format byte read as a miss rather than as noise, a length told apart from the absence of one, a tempo told apart from the absence of one with a stored `NaN` or negative read as a miss, a key told apart from the absence of one with a byte past the twenty-four keys read as a miss, and a payload that is not a whole number of columns thrown away rather than truncated — then one pass over a real database in a temporary folder: store a whole scan and get the same one back, rewrite the fixture and watch its entry go stale, delete another and watch pruning drop exactly its three entries — one per table, which is what says the whole scan was written and not just its first third — then clear the lot and confirm the store still works; and what the files pane asks: "prepared" naming the file that has every table and not the one still missing a trim — a state the interface can no longer produce, so the test writes it through the private door, which is what an older build effectively is — and a listing's own size and modified time building the same stamp a `stat` does, with the playing time and the tempo read back out of the same answer — the seconds between a scanned file's edges and the beats it runs at, a mark with neither for one scanned and found silent, and nothing at all for the one still missing a table |
 | `app.rs` | what a divider drag may store: a drag inside the bounds kept to the pixel, a drag past the bottom still leaving the browser its minimum at every window height, a drag above the top reading as the floor, and an impossible window storing a finite height; plus what each key means — F5, ⌘R, ⌘A and Escape yes, a bare `r` or `a` no — and the folder scan's three counters, run through a whole ten-file scan an answer at a time: the fan-out never exceeded, every file out exactly once, no thread unaccounted for, and a **Stop** that hands out nothing more while still waiting for the four already decoding, reporting those four **out of order** so that exactly one row stops spinning per answer and none is left turning; and the duplicate warning's answer filtering a batch by position — Yes keeping repeats, No only the fresh ones, Cancel nothing, and rows zipped with tracks filtering together |
 | `waveform.rs` | a scan staying bounded for a file of any length, a halving keeping the loudest sample, a `NaN` not blanking its column, and every pixel column of every width in range; then the music's edges — a leader and a run-out found to the sample, a file of silence having no edges rather than edges at its ends, one loud sample being enough to be one, and a channel not being a second (a stereo file holds twice the sample rate per second, and getting that backwards puts every trim at twice its real depth), and how long the music runs between them — four seconds of leader and two of run-out subtracted away, and edges the wrong way round giving `0:00` rather than the panic a `Duration` subtraction would otherwise be; then the tempo — a click track built at 100, 128 and 174 BPM read back to a fiftieth of a BPM (174 on purpose, since 87 fits every other click just as well and the faster reading has to win), a channel not being a beat either, and the two kinds of nothing: silence, a clip too short to hold two of the slowest beats it is asked about, a rate the decoder would not answer for, and a stream of `NaN`s all having *no* tempo rather than a number somebody would act on; then the key — a tonic-weighted C major scale reading back as C and an A harmonic minor reading back as A minor (the minor third against the same spelling's relative major is the discrimination that matters), silence, a clip shorter than one analysis frame and a rate of zero all having *no* key, and the label printing sharps with an `m` for the minors |

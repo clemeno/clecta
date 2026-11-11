@@ -105,11 +105,19 @@ jobs:
         with:
           tool: cargo-audit
       # No `--ignore` list, unlike cmote's, because clecta's tree has no vulnerability to
-      # accept. Two crates are flagged *unmaintained* — `paste` (RUSTSEC-2024-0436) and
-      # `ttf-parser` (RUSTSEC-2026-0192), both transitive through iced — and cargo-audit
-      # exits 0 on warnings, so they are printed and the build stays green. That is the
-      # behaviour we want: neither is a vulnerability and neither is ours to replace, but
+      # accept. Six crates are flagged, all transitive through iced: *unmaintained* `paste`,
+      # `ttf-parser` and three of the zbus family (Linux only, so built for no shipped
+      # target), and *unsound* `lru` under iced's text renderer. cargo-audit exits 0 on
+      # warnings, so they are printed and the build stays green. That is the behaviour we
+      # want: none is a vulnerability and none is ours to replace, but
       # silencing them by ID would also hide the day one turns into something real. No
       # `--deny warnings` for the same reason in reverse: it would fail every build over
       # a dependency we do not control.
       - run: cargo audit
+      # The vendored rodio (PLAN Q69) is the published 0.23.0 plus one patched file, and
+      # this keeps it that way: any other difference from the crates.io tarball fails. The
+      # tarball ships CRLF and git stores LF, hence --strip-trailing-cr.
+      - name: vendored rodio is the published crate plus its one patched file
+        run: |
+          curl -sSfL https://static.crates.io/crates/rodio/rodio-0.23.0.crate | tar -xz -C "$RUNNER_TEMP"
+          if diff -rq --strip-trailing-cr "$RUNNER_TEMP/rodio-0.23.0" vendor/rodio | grep -v '/src/decoder/symphonia.rs differ$'; then exit 1; fi
