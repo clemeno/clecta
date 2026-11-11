@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run every CI gate before a push leaves the machine (desktop/check.sh).
+# Enabled per clone: git config core.hooksPath .githooks
+exec desktop/check.sh

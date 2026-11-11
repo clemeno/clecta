@@ -129,6 +129,10 @@ const SCAN_JOBS: usize = 4;
 const CACHE_FILE: &str = "cache.redb";
 
 pub fn run() -> iced::Result {
+	// First, so that the settings read below has somewhere to complain to.
+	#[cfg(windows)]
+	crate::paths::log_stderr();
+
 	// Read before the window exists, because its size is one of the things restored. A
 	// blocking read of one small file, once, before anything is on screen.
 	let settings = Settings::load();

@@ -84,6 +84,35 @@ fn per_user() -> PathBuf {
 	base.join("clecta")
 }
 
+/// On Windows, give stderr somewhere to go: `clecta-data/clecta.log`, the last run's only.
+///
+/// The app has no console there (`windows_subsystem`, `main.rs`), so a launch from Explorer
+/// has no stderr at all and every `eprintln!` — a cache it could not open, a settings file it
+/// ignored — was written to nothing. Only that case is redirected: a run that inherited a
+/// stderr (a terminal, `cargo run`, a pipe) keeps it. Truncated at each launch, so the log is
+/// bounded without rotation. It works because `std` asks Windows for the handle on every
+/// write rather than caching it.
+#[cfg(windows)]
+pub fn log_stderr() {
+	use std::ffi::c_void;
+	use std::os::windows::io::IntoRawHandle;
+
+	const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4; // (DWORD)-12
+	unsafe extern "system" {
+		fn GetStdHandle(which: u32) -> *mut c_void;
+		fn SetStdHandle(which: u32, handle: *mut c_void) -> i32;
+	}
+
+	// SAFETY: both calls take a constant and a handle; an owned file handle given to the
+	// process's standard error lives for the rest of the run, which is what it is for.
+	if !unsafe { GetStdHandle(STD_ERROR_HANDLE) }.is_null() {
+		return;
+	}
+	if let Ok(log) = std::fs::File::create(data_dir().join("clecta.log")) {
+		unsafe { SetStdHandle(STD_ERROR_HANDLE, log.into_raw_handle()) };
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

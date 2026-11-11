@@ -2,5 +2,7 @@
 # stored with LF, and checked out with whatever the platform uses.
 * text=auto
 
-# Run by bash on macOS and in CI, where a CR at the end of the shebang line breaks it.
+# Run by sh on every platform, where a CR at the end of the shebang line breaks it. Hooks
+# carry no extension, so they are named by their folder.
 *.sh text eol=lf
+.githooks/* text eol=lf
