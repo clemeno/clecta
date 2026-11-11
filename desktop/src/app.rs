@@ -886,7 +886,7 @@ impl Clecta {
 				// to undo, but cutting audible playback is the mistake a modal exists for —
 				// the same dialog the two destructive buttons in the corrections pane use.
 				if self.decks[id.index()].is_playing() {
-					let confirmed = rfd::MessageDialog::new()
+					let confirmed = ask(rfd::MessageDialog::new()
 						.set_level(rfd::MessageLevel::Warning)
 						.set_title("Unload the playing track")
 						.set_description(format!(
@@ -894,8 +894,8 @@ impl Clecta {
 							id.label(),
 							self.decks[id.index()].title(),
 						))
-						.set_buttons(rfd::MessageButtons::OkCancel)
-						.show() == rfd::MessageDialogResult::Ok;
+						.set_buttons(rfd::MessageButtons::OkCancel))
+						== rfd::MessageDialogResult::Ok;
 					if !confirmed {
 						return Task::none();
 					}
@@ -1062,15 +1062,15 @@ impl Clecta {
 				// The same warning **Clear cache** shows, and deliberately a different sentence:
 				// that one costs time, this one costs answers nothing can work out again
 				// (PLAN §14d).
-				let confirmed = rfd::MessageDialog::new()
+				let confirmed = ask(rfd::MessageDialog::new()
 					.set_level(rfd::MessageLevel::Warning)
 					.set_title("Clear the tempo corrections")
 					.set_description(
 						"Throw away every tempo you have corrected by hand?\n\n\
 						 Every row goes back to what the detector said. Nothing else is touched.",
 					)
-					.set_buttons(rfd::MessageButtons::OkCancel)
-					.show() == rfd::MessageDialogResult::Ok;
+					.set_buttons(rfd::MessageButtons::OkCancel))
+					== rfd::MessageDialogResult::Ok;
 
 				if confirmed {
 					// No re-reading and no re-scanning: the corrections were applied as the rows
@@ -1688,15 +1688,15 @@ impl Clecta {
 				// so macOS draws it from another process and logs
 				// `CFUserNotificationDisplayAlert: called from main application thread` — the
 				// warning the shortcut earns rather than a fault (PLAN §7a).
-				let confirmed = rfd::MessageDialog::new()
+				let confirmed = ask(rfd::MessageDialog::new()
 					.set_level(rfd::MessageLevel::Warning)
 					.set_title("Clear the cache")
 					.set_description(
 						"Throw away every waveform, length and music-start clecta has worked out?\n\n\
 						 Nothing is lost but the time to work them out again.",
 					)
-					.set_buttons(rfd::MessageButtons::OkCancel)
-					.show() == rfd::MessageDialogResult::Ok;
+					.set_buttons(rfd::MessageButtons::OkCancel))
+					== rfd::MessageDialogResult::Ok;
 				if !confirmed {
 					return Task::none();
 				}
@@ -2027,12 +2027,11 @@ impl Clecta {
 			},
 		);
 
-		match rfd::MessageDialog::new()
+		match ask(rfd::MessageDialog::new()
 			.set_level(rfd::MessageLevel::Warning)
 			.set_title("Already queued")
 			.set_description(description)
-			.set_buttons(rfd::MessageButtons::YesNoCancel)
-			.show()
+			.set_buttons(rfd::MessageButtons::YesNoCancel))
 		{
 			rfd::MessageDialogResult::Yes => Admission::All,
 			rfd::MessageDialogResult::No => Admission::Fresh,
@@ -2807,6 +2806,25 @@ fn watch(folder: &PathBuf) -> impl Stream<Item = Message> + use<> {
 		// future is — when the folder changes, or when the app quits.
 		std::future::pending::<()>().await
 	})
+}
+
+/// Ask the user a question, and wait for the answer.
+///
+/// On Windows the box gets a thread of its own. A message box stays hidden until its thread's
+/// message queue is empty, and the GUI thread's never is while `update` is blocked inside the
+/// box: the box was created, never shown, and the app hung with a core spinning (PLAN Q70). A
+/// fresh thread has an empty queue, and the GUI thread waits for it exactly as it waited for
+/// the box before. `ponytail:` still modal by blocking — the window does not repaint while the
+/// box is open, and a click on it waits for the box to close; `rfd::AsyncMessageDialog` and a
+/// `Task` are the upgrade if that ever matters.
+fn ask(dialog: rfd::MessageDialog) -> rfd::MessageDialogResult {
+	if cfg!(windows) {
+		std::thread::spawn(move || dialog.show())
+			.join()
+			.unwrap_or(rfd::MessageDialogResult::Cancel)
+	} else {
+		dialog.show()
+	}
 }
 
 /// Run one blocking job on a thread of its own, and hand the executor a `oneshot` to wait

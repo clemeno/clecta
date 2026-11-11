@@ -424,10 +424,12 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   threads decode, that **Stop** stops it within a file or so, and that pressing it and starting
   again immediately does not double-count. Then the point of it: load a track from that folder
   and watch the waveform appear with no sweep at all (PLAN §11b).
-- **Clearing the cache.** *Not checked yet.* That the dialog appears and **Cancel** really does
-  nothing, that the waveform of a *playing* track is not blanked by it, and that the next track
-  loaded after it sweeps again — which is the whole visible difference between a cache that was
-  cleared and a button that lied (PLAN §11a, §11b).
+- **Clearing the cache.** *Half checked, on Windows, by script.* The dialog appears, in front,
+  and **OK** clears: the status line says `cache cleared`. On Windows it first did neither —
+  the box was created hidden and the app hung (PLAN Q70). Still unchecked: that **Cancel**
+  really does nothing, that the waveform of a *playing* track is not blanked by it, and that
+  the next track loaded after it sweeps again — which is the whole visible difference between
+  a cache that was cleared and a button that lied (PLAN §11a, §11b).
 - **Playing a queued row on demand.** *Not checked yet.* That a double click on a cue row
   loads it into the player it sits under and on a **Next up** row into whichever player is
   free; that the row leaves the queue either way; and that the press which opened the double
