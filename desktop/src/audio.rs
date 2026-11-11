@@ -333,6 +333,193 @@ mod tests {
 		assert_eq!(duration(&std::env::temp_dir().join("clecta-nothing")), None);
 	}
 
+	/// The shape of almost every downloaded video: the picture is the first track and the
+	/// sound the second (PLAN §3). The decoder plays the sound, so the sound is what has to
+	/// be measured — rodio read the length off the picture's frame count instead, and an
+	/// MP4 of 3:48 showed 1:06. The fixture's video counts in a different unit from its
+	/// audio exactly so that mistake cannot come out right by luck.
+	#[test]
+	fn a_video_first_mp4_is_as_long_as_its_sound() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-video-first-length.mp4");
+		std::fs::write(&path, video_first_mp4()).expect("writing the fixture");
+
+		// Act
+		let measured = duration(&path);
+		let samples = decoder(&path).expect("opening the fixture").count();
+		let _ = std::fs::remove_file(&path);
+
+		// Assert: one second exactly, the audio's own 8 000 frames over its own 8 kHz.
+		assert_eq!(
+			measured,
+			Some(Duration::from_secs(1)),
+			"the length came off the video"
+		);
+		// And every one of those frames is sound: the picture's bytes, handed to the audio
+		// decoder, would have come out as samples of their own.
+		assert_eq!(samples, 8_000, "the video track was decoded as sound");
+	}
+
+	/// The same file, sought. rodio clamped every seek to the wrong length above, and then
+	/// placed it on the video track's clock — so on the real file a seek to 2:30 landed at
+	/// 1:06, and one to 0:30 a frame early. The fixture's samples count up from zero, so the
+	/// first one after the seek says exactly where it landed.
+	#[test]
+	fn a_seek_in_a_video_first_mp4_lands_where_it_was_aimed() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-video-first-seek.mp4");
+		std::fs::write(&path, video_first_mp4()).expect("writing the fixture");
+		let mut source = decoder(&path).expect("opening the fixture");
+
+		// Act
+		let sought = source.try_seek(Duration::from_millis(500));
+		let landed = source
+			.next()
+			.map(|sample| (sample * 32_768.0).round() as i32);
+		drop(source);
+		let _ = std::fs::remove_file(&path);
+
+		// Assert: half a second in is frame 4 000, whose sample is 4 000.
+		assert!(sought.is_ok(), "the seek failed: {sought:?}");
+		assert_eq!(landed, Some(4_000), "the seek landed somewhere else");
+	}
+
+	/// One second of MP4 with the video first: a 1 kHz track of 25 opaque frames, then 8 kHz
+	/// mono PCM whose sample `n` is `n`. Built by hand for the same reason `wav` is — it is
+	/// eleven kinds of box, each a header and a few numbers. `avc1` with no body is enough of
+	/// a picture: symphonia decodes no video, so the track only has to exist and be timed.
+	fn video_first_mp4() -> Vec<u8> {
+		const RATE: u32 = 8_000;
+		const VIDEO_SCALE: u32 = 1_000;
+		const VIDEO_FRAMES: u32 = 25; // 40 ticks each: one second at 1 kHz
+		const VIDEO_FRAME_BYTES: u32 = 4;
+
+		let video_data = vec![0x7f; (VIDEO_FRAMES * VIDEO_FRAME_BYTES) as usize];
+		let audio_data: Vec<u8> = (0..RATE as i16).flat_map(i16::to_le_bytes).collect();
+
+		let pcm_entry = mp4_atom(
+			b"sowt",
+			&[
+				&[0; 6],                     // reserved
+				&1u16.to_be_bytes(),         // data reference index
+				&[0; 8],                     // version 0, revision, vendor
+				&1u16.to_be_bytes(),         // one channel
+				&16u16.to_be_bytes(),        // bits per sample
+				&[0; 4],                     // compression id, packet size
+				&(RATE << 16).to_be_bytes(), // 16.16 fixed point
+			],
+		);
+		let tracks = |video_offset: u32, audio_offset: u32| {
+			[
+				mp4_track(
+					1,
+					b"vide",
+					VIDEO_SCALE,
+					mp4_atom(b"avc1", &[]),
+					VIDEO_FRAMES,
+					40,
+					VIDEO_FRAME_BYTES,
+					video_offset,
+				),
+				mp4_track(
+					2,
+					b"soun",
+					RATE,
+					pcm_entry.clone(),
+					RATE,
+					1,
+					2,
+					audio_offset,
+				),
+			]
+			.concat()
+		};
+		let ftyp = mp4_atom(b"ftyp", &[b"isom", &512u32.to_be_bytes(), b"isom"]);
+		let mvhd = mp4_atom(
+			b"mvhd",
+			&[
+				&[0; 12], // version 0, flags, creation and modification times
+				&VIDEO_SCALE.to_be_bytes(),
+				&VIDEO_SCALE.to_be_bytes(),    // one second
+				&0x0001_0000u32.to_be_bytes(), // rate 1.0
+				&0x0100u16.to_be_bytes(),      // volume 1.0
+				&[0; 70],                      // reserved, matrix, pre-defined
+				&3u32.to_be_bytes(),           // next track id
+			],
+		);
+
+		// The chunk offsets are absolute, and the moov box before the data is the same size
+		// whatever they are, so measure it once with zeros and build it again for real.
+		let data_start = (ftyp.len() + mp4_atom(b"moov", &[&mvhd, &tracks(0, 0)]).len() + 8) as u32;
+		let moov = mp4_atom(
+			b"moov",
+			&[
+				&mvhd,
+				&tracks(data_start, data_start + video_data.len() as u32),
+			],
+		);
+
+		[ftyp, moov, mp4_atom(b"mdat", &[&video_data, &audio_data])].concat()
+	}
+
+	/// One track whose samples all sit in a single chunk at `offset`, all the same size and
+	/// all `delta` ticks long.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "a test fixture's table of numbers"
+	)]
+	fn mp4_track(
+		id: u32,
+		handler: &[u8; 4],
+		scale: u32,
+		entry: Vec<u8>,
+		count: u32,
+		delta: u32,
+		size: u32,
+		offset: u32,
+	) -> Vec<u8> {
+		let one = 1u32.to_be_bytes();
+		let full = [0; 4]; // a full box's version 0 and no flags
+		let tkhd = mp4_atom(
+			b"tkhd",
+			&[&[0, 0, 0, 3], &[0; 8], &id.to_be_bytes(), &[0; 68]],
+		);
+		let mdhd = mp4_atom(
+			b"mdhd",
+			&[
+				&full,
+				&[0; 8],
+				&scale.to_be_bytes(),
+				&(count * delta).to_be_bytes(),
+				&[0; 4],
+			],
+		);
+		let hdlr = mp4_atom(b"hdlr", &[&full, &[0; 4], handler, &[0; 13]]);
+		let stbl = mp4_atom(
+			b"stbl",
+			&[
+				&mp4_atom(b"stsd", &[&full, &one, &entry]),
+				&mp4_atom(
+					b"stts",
+					&[&full, &one, &count.to_be_bytes(), &delta.to_be_bytes()],
+				),
+				&mp4_atom(b"stsc", &[&full, &one, &one, &count.to_be_bytes(), &one]),
+				&mp4_atom(b"stsz", &[&full, &size.to_be_bytes(), &count.to_be_bytes()]),
+				&mp4_atom(b"stco", &[&full, &one, &offset.to_be_bytes()]),
+			],
+		);
+		let minf = mp4_atom(b"minf", &[&stbl]);
+		let mdia = mp4_atom(b"mdia", &[&mdhd, &hdlr, &minf]);
+
+		mp4_atom(b"trak", &[&tkhd, &mdia])
+	}
+
+	/// An ISO-BMFF box: a big-endian length that counts its own eight bytes, then its kind.
+	fn mp4_atom(kind: &[u8; 4], parts: &[&[u8]]) -> Vec<u8> {
+		let body = parts.concat();
+		[&(8 + body.len() as u32).to_be_bytes()[..], &kind[..], &body].concat()
+	}
+
 	/// A mono sixteen-bit PCM file: the forty-four byte canonical header, then the samples.
 	fn wav(samples: &[i16], rate: u32) -> Vec<u8> {
 		let data_len = samples.len() as u32 * 2;

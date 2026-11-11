@@ -44,6 +44,17 @@ rodio = { version = "0.23.0", features = ["symphonia-mkv"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
+# rodio 0.23.0 exactly as published, plus a fix in `src/decoder/symphonia.rs` (every changed
+# line is marked `clecta patch`): it read a file's length and resolved its seeks on the
+# container's *default* track while decoding a different one, so an MP4 whose video comes
+# first — every downloaded video — showed the wrong length and clamped its seeks to it
+# (PLAN §3, Q69, `audio::tests::a_video_first_mp4_is_as_long_as_its_sound`). The crate ships
+# with CRLF endings and git stores LF, so check the copy with `diff -r --strip-trailing-cr`.
+# `ponytail:` a vendored copy to carry a few lines; delete `vendor/` and this table the day
+# a rodio release fixes it, and the two tests will say whether it did.
+[patch.crates-io]
+rodio = { path = "vendor/rodio" }
+
 # Optimize the *dependencies* in a debug build, and only them. Decoding a track for its
 # waveform (PLAN §14a) took 16.7 s under `cargo run` against 325 ms under `--release` —
 # symphonia is arithmetic in a tight loop, and unoptimized arithmetic is 50× arithmetic.
