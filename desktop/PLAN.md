@@ -49,7 +49,7 @@ the app either. §15 is the log.
 | Crate root | **`desktop/`** — this folder is the whole Rust project, so a later `mobile/` or `web/` sibling does not have to move it |
 | Crate shape | **One binary crate**, not a workspace. Small cohesive modules (<800 lines each) |
 | GUI | **iced 0.14** — pure Rust, Elm architecture (state / `Message` / `update` / `view`). Same as cmote: the pattern is already learned, so the *audio* is the new lesson. Re-examined against egui and the rest in §16, with the trigger that would overturn it |
-| Audio | **rodio 0.22** over cpal — one device sink, its `Mixer`, one `rodio::Player` per deck (§4) |
+| Audio | **rodio 0.23** over cpal — one device sink, its `Mixer`, one `rodio::Player` per deck (§4) |
 | Decoding | rodio's **symphonia** backend: flac / mp3 / mp4+aac / vorbis / wav by default, plus **`symphonia-mkv`**. Pure Rust, no C toolchain |
 | Crossfader | **Switchable curve** — constant-power (default) or linear, selectable in the mixer strip (§8) |
 | Async runtime | **None of ours.** cmote needed tokio for SSH; clecta has no network, and no `async fn` is written here. iced still needs *an* executor for its own `Task`s and timers, so it gets `smol` — see §3 |
@@ -100,20 +100,21 @@ the app either. §15 is the log.
 | Crate | Version | Purpose | Notes |
 |---|---|---|---|
 | `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | Pure Rust, wgpu/tiny-skia renderer. **Feature `smol`** — see below. `advanced` **not** needed in v1 — no custom widget yet (a waveform would be the first, §14). `lazy` if the files pane needs it (§9) |
-| `rodio` | 0.22.2 | Audio output, mixing, decoding | Wraps `cpal` (device) + `symphonia` (decode). Default features give flac/mp3/mp4-aac/vorbis/wav; add **`symphonia-mkv`** for `.mkv`/`.webm` |
-| `cpal` | 0.17.3 (via rodio) | OS audio device + callback thread | Not a direct dependency; named here because it owns the real-time thread. Version confirmed by the spike, not guessed |
+| `rodio` | 0.23.0 | Audio output, mixing, decoding | Wraps `cpal` (device) + `symphonia` (decode). Default features give flac/mp3/mp4-aac/vorbis/wav; add **`symphonia-mkv`** for `.mkv`/`.webm` |
+| `cpal` | 0.18.2 (via rodio) | OS audio device + callback thread | Not a direct dependency; named here because it owns the real-time thread. Version confirmed by the spike, not guessed |
 | `symphonia` | 0.5.5 (via rodio) | Container demux + codec decode | Pure Rust. MPL-2.0 — permissive, file-level copyleft; fine to link, and `cargo deny`'s licence allow-list must include it |
-| `rfd` | 0.17.2 | Native folder-open dialog | `NSOpenPanel` / Win32. Same crate as cmote |
-| `notify` | 8.2.0 | Watching the shown folder (§9) | FSEvents / `ReadDirectoryChangesW` — the OS pushes, nothing polls. CC0-1.0, already on the allow-list, and no `cc` on either target. Added after v1, on the strength of the pane being cheap to redraw |
-| `redb` | 4.1.0 | The file cache (§11a) | An embedded ACID key/value store in pure Rust, one dependency of its own (`libc` — declarations, not a compilation). MIT OR Apache-2.0, both already on the allow-list, and no `cc` on either target. **SQLite is what this is instead of**: `libsqlite3-sys` compiles C, which is the one thing `deny.toml` bans |
-| `serde` / `serde_json` | 1.0.229 / 1.0.151 | `clecta-data/settings.json` (§11) | `derive` on one small struct. A corrupt file is logged and treated as absent |
+| `rfd` | 0.18.0 | Native folder-open dialog | `NSOpenPanel` / Win32. Same crate as cmote |
+| `notify` | 8.2.2 | Watching the shown folder (§9) | FSEvents / `ReadDirectoryChangesW` — the OS pushes, nothing polls. CC0-1.0, already on the allow-list, and no `cc` on either target. Added after v1, on the strength of the pane being cheap to redraw |
+| `redb` | 4.5.0 | The file cache (§11a) | An embedded ACID key/value store in pure Rust, one dependency of its own (`libc` — declarations, not a compilation). MIT OR Apache-2.0, both already on the allow-list, and no `cc` on either target. **SQLite is what this is instead of**: `libsqlite3-sys` compiles C, which is the one thing `deny.toml` bans |
+| `serde` / `serde_json` | 1.0.229 / 1.0.154 | `clecta-data/settings.json` (§11) | `derive` on one small struct. A corrupt file is logged and treated as absent |
 | `anyhow` | 1.0.104 | App-level error handling | Context-rich errors, `?` everywhere |
 
-Every version above is the **latest stable as of 2026-08-01**, checked against the
-crates.io index rather than remembered. The two that are not are transitive and pinned by
-rodio: it depends on `symphonia ^0.5` and `cpal ^0.17`, so newer majors of either cannot
-be taken without rodio taking them first. Nothing to do — a `[patch]` override to force
-them would be a compatibility break bought for no feature we need.
+Every version above is the **latest stable as of 2026-11-11**, checked against the
+crates.io index rather than remembered. The one that is not is transitive and pinned by
+rodio: it depends on `symphonia ^0.5.5`, so the 0.6 line cannot be taken without rodio
+taking it first. Nothing to do — a `[patch]` override to force it would be a compatibility
+break bought for no feature we need. `notify` 9 exists only as a release candidate, and a
+prerelease is not a version this manifest pins.
 
 **The one surprise, found at build time: iced's `smol` feature is not optional.** §1 says
 there is no async runtime, and no `async fn` of ours exists — but iced's default backend
@@ -126,7 +127,7 @@ No `dirs` / `directories` crate: `std::env::current_exe()` plus a write-probe is
 whole portable-path rule (§11), the same call cmote's `paths.rs` makes.
 
 Caret (`^`) requirements in `Cargo.toml` written to the exact patch level in use
-(`rodio = "0.22.2"`, not `"0.22"`) so the manifest records what was actually tested, and
+(`rodio = "0.23.0"`, not `"0.23"`) so the manifest records what was actually tested, and
 **`Cargo.lock` committed** — the idiomatic reproducibility guarantee for a binary crate,
 same call as cmote. `cargo update` then moves the whole tree forward within semver.
 

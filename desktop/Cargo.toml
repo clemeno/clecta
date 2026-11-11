@@ -29,20 +29,20 @@ notify = "8.2.0"
 # dependency of its own (`libc`, which is declarations rather than C), MIT OR Apache-2.0, and
 # no `cc` on either target — so the no-C-toolchain property (PLAN §11) survives it. SQLite
 # would not have: `libsqlite3-sys` compiles C, which is the one thing `deny.toml` bans.
-redb = "4.1.0"
+redb = "4.5.0"
 # Native folder picker (PLAN §3). NSOpenPanel / Win32, same crate as cmote.
-rfd = "0.17.2"
+rfd = "0.18.0"
 # Audio output, mixing and decoding (PLAN §7, §8). Wraps `cpal` for the device and its
 # real-time callback thread, and `symphonia` for demux + decode. Default features already
 # give flac / mp3 / mp4-aac / vorbis / wav; `symphonia-mkv` adds Matroska, which is what
 # makes `.mkv` and `.webm` playable (PLAN §3). Pure Rust top to bottom — cpal binds
 # CoreAudio / WASAPI through `objc2` / `windows-sys` — so the no-C-toolchain portable
 # build holds (PLAN §11).
-rodio = { version = "0.22.2", features = ["symphonia-mkv"] }
+rodio = { version = "0.23.0", features = ["symphonia-mkv"] }
 # `clecta-data/settings.json` (PLAN §11). `derive` on one small struct, and JSON because a
 # settings file someone can open in a text editor is a feature, not an accident.
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 
 # Optimize the *dependencies* in a debug build, and only them. Decoding a track for its
 # waveform (PLAN §14a) took 16.7 s under `cargo run` against 325 ms under `--release` —
