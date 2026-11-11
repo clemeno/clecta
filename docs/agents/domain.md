@@ -6,7 +6,7 @@ How the engineering skills should consume this repo's domain documentation when 
 
 - **`desktop/PLAN.md`** — the standing design record. It predates this file, it is written to explain
   *why* every choice was made, and its §15 is the decision log (Q1…). It wins on **decisions**.
-- **`CONTEXT.md`** at the repo root — the product glossary. It wins on **vocabulary**: which word
+- **`GLOSSARY.md`** at the repo root — the product glossary. It wins on **vocabulary**: which word
   names which concept, and which synonyms are retired. A term defined in both places is a bug in
   `PLAN.md`; the plan keeps its *reasoning* and points here for the *word*.
 - **`desktop/README.md`** — the feature list, the per-module test table and the manual-check list.
@@ -21,7 +21,7 @@ Single-context. One crate, rooted at `desktop/`, not at the repo root:
 ```
 /
 ├── AGENTS.md
-├── CONTEXT.md                         ← the product glossary (vocabulary wins here)
+├── GLOSSARY.md                         ← the product glossary (vocabulary wins here)
 ├── docs/
 │   ├── agents/                        ← this file, and the tracker + label config
 │   └── adr/                           ← if and when a decision needs one
@@ -40,9 +40,9 @@ release policy, or anything that outlives the crate.
 
 ## Use the glossary's vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as `CONTEXT.md` defines it — *deck*, *queue*, *scan*, *trim*, *prepared*, and so on. Its `_Avoid_` lines are rulings, not suggestions: *playlist*, *list* (as the name of a queue) and *transition* (as the name of a handover) are retired.
+When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as `GLOSSARY.md` defines it — *deck*, *queue*, *scan*, *trim*, *prepared*, and so on. Its `_Avoid_` lines are rulings, not suggestions: *playlist*, *list* (as the name of a queue) and *transition* (as the name of a handover) are retired.
 
-If the concept you need isn't in `CONTEXT.md` yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+If the concept you need isn't in `GLOSSARY.md` yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
 
 ## Flag conflicts
 
