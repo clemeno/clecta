@@ -1,0 +1,6 @@
+# Line endings, settled here rather than by each clone's `core.autocrlf`: every text file is
+# stored with LF, and checked out with whatever the platform uses.
+* text=auto
+
+# Run by bash on macOS and in CI, where a CR at the end of the shebang line breaks it.
+*.sh text eol=lf
