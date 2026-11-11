@@ -19,7 +19,7 @@ each choice was made, and every deliberate shortcut carries a `ponytail:` note s
 The product's **vocabulary** lives in [`../GLOSSARY.md`](../GLOSSARY.md): this plan wins on
 decisions, that file wins on words, and a term defined in both places is a bug here (Q49).
 
-Status: **v0.1 complete, and the first piece of v2 landed.** Two players with a working
+Status: **v0.1 complete, and v2 well under way.** Two players with a working
 transport, the mixer strip, the browser (files pane + folder tree), portable persistence,
 both drop gestures, `bundle-macos.sh` (§11) and the CI workflow with its supply-chain gate
 (§12) are all built and green. Running v0.1 found the two things the plan got wrong:
@@ -27,12 +27,16 @@ both drop gestures, `bundle-macos.sh` (§11) and the CI workflow with its supply
 quit, and the window ceiling in `settings.rs` was **above what wgpu can render**, so a
 hand-edited file crashed the app at launch. Both are fixed, and §11 records what each
 cost. On top of that sits the **waveform** (§14a), which is where the plan promised the
-app would need its own `Widget`. The **manual smoke test** (§12) is now clean on macOS,
+app would need its own `Widget`. Since then: the queues and their handover (§7a, §7b),
+multi-row selection (§9a), the cache and folder preparation (§11a, §11b), scrubbing, the
+music's edges, the tempo and the key (§14b–§14e), and the rate slider with its key lock
+(§7c). The **manual smoke test** (§12) is now clean on macOS,
 every item of it — and the last pass earned its keep: the seek gesture and the mixer's
 preset buttons were right, and the players' section **wobbled** on a vertical resize, which
 is Q16 and the second half of §6. What is left before a v0.1 tag is **one run on Windows**,
 which is the shipped target that has never been executed: CI type-checks it every push, and
-type-checking is not running. §15 is the log.
+type-checking is not running; the test suite now passes on Windows too, and that is not running
+the app either. §15 is the log.
 
 ---
 
@@ -40,7 +44,7 @@ type-checking is not running. §15 is the log.
 
 | Area | Decision |
 |---|---|
-| Language | Rust, stable channel (verified: 1.97.1 on `x86_64-apple-darwin`) |
+| Language | Rust, stable channel (verified: 1.98.0 on `x86_64-apple-darwin`, 1.99.1 on `x86_64-pc-windows-msvc`) |
 | Edition | 2024 (same as cmote) |
 | Crate root | **`desktop/`** — this folder is the whole Rust project, so a later `mobile/` or `web/` sibling does not have to move it |
 | Crate shape | **One binary crate**, not a workspace. Small cohesive modules (<800 lines each) |
@@ -228,7 +232,7 @@ clecta/
         │                three questions only the set can answer — is this a duplicate, what
         │                needs measuring, where does the next track come from (§7a, Q47)
         ├── settings.rs  load/save clecta-data/settings.json; a corrupt file reads as defaults (§11)
-        ├── stretch.rs   a player's rate fader, the file-timeline playhead the player cannot
+        ├── stretch.rs   a player's rate slider, the file-timeline playhead the player cannot
         │                keep itself, and the key lock's WSOLA time-stretch: every source is
         │                wrapped on its way in (§7c)
         ├── waveform.rs  PURE, and about what is in a *file*: `Scanner` folds its samples to a
@@ -939,10 +943,10 @@ is the whole reason the folder scan of §11b has a button.
 
 ## 7c. The rate slider (`stretch.rs`, `deck.rs`, `audio.rs`, `ui/deck.rs`)
 
-Each player gets a rate fader under its strip: 0..=200%, with 100% the track's own speed. It is
+Each player gets a rate slider under its strip: 0..=200%, with 100% the track's own speed. It is
 varispeed, like a record — the pitch moves with the speed — and it is a **fader, not track
 state**: it survives loads, unloads, stops and track ends, exactly like the volume fader above
-it, so the next track plays at whatever the fader already says. The readout beside it shows the
+it, so the next track plays at whatever the slider already says. The readout beside it shows the
 percentage, the tempo it produces once the track's own is known, and the key coming out:
 `150% · 192.0 · G`. The tempo is the corrected one (§14d) times the rate, to one decimal —
 scaled precision is not detector precision — and the key is the detected one transposed by the
@@ -2482,10 +2486,10 @@ path, so `/ponytail-debt` can harvest them later.
 - **Video rendering.** v1 decodes the audio track only. Upgrade path: an ffmpeg binding
   and a texture in a custom iced widget — a large C dependency and a licensing question,
   worth paying only when the picture is actually the feature.
-- **Cue points, loops, tempo / pitch *adjustment*.** Real DJ features. Changing a tempo needs a
-  time-stretch stage rodio does not have (`rubato` or a phase vocoder). **BPM detection came off
-  this list** — §14d, because the decode that finds it was already running for the waveform;
-  *playing* a track at a different one is still the hard half.
+- **Cue points and loops.** Real DJ features. **Tempo detection came off this list** — §14d,
+  because the decode that finds it was already running for the waveform — and so did *playing*
+  a track at another tempo: the rate slider and its key lock (§7c) brought the time-stretch
+  rodio does not have, hand-written rather than `rubato` (Q63).
 - **Typing a tempo in.** Ruled out rather than deferred, strictly (§14d): an octave error is
   the only mistake the detector makes that a person can spot at a glance, and `/2` / `×2`
   reverse it exactly. Reopens the day a real track comes back wrong by something that is not

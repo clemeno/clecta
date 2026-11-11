@@ -24,6 +24,26 @@ _Avoid_: using it for a handover, which is the other end of the app entirely.
 Where in the track a deck currently is.
 _Avoid_: cursor, position marker
 
+**Rate**:
+How fast a deck plays against the track's own speed — 0% to 200%, 100% being the track as
+recorded, 0% a pause. It belongs to the deck, not the track: it survives a load, an unload
+and a quit.
+_Avoid_: speed, pitch — pitch is what the key lock holds still
+
+**Rate slider**:
+The control that sets a deck's rate, under its strip. It survives a load the way a fader
+does, and the plan says so by comparison — but it is not called one.
+_Avoid_: rate fader — a fader is a volume
+
+**Key lock**:
+The switch beside the rate slider, labelled *MT/KL* (master tempo / key lock). On, the rate
+moves the tempo alone and the key stays put; off, the rate is varispeed.
+_Avoid_: master tempo as a second concept — MT and KL are two names for this one switch
+
+**Varispeed**:
+The rate with the key lock off: the track plays faster or slower and its pitch moves with
+it, like a record.
+
 ## The queues
 
 **Queue**:
@@ -88,8 +108,8 @@ Something on disk.
 The audio a file contains, once something has read it.
 
 **Scan**:
-One decode of one file, yielding its peaks, its trim and its tempo together. All three or
-none — there is no half-scanned file.
+One decode of one file, yielding its peaks, its trim, its tempo and its key together. All
+four or none — there is no half-scanned file.
 
 **Prepare**:
 Scanning every file in a folder.
@@ -99,8 +119,8 @@ A file the cache holds a whole scan for. Shown as a ✓ in the files pane.
 _Avoid_: ready, cached
 
 **Ready**:
-The facts a prepared file yields — its tempo and its trim. A payload, not a synonym for
-prepared.
+The facts a prepared file yields — its tempo, its trim and its key. A payload, not a
+synonym for prepared.
 
 **Measure**:
 Learning a file's numbers, whoever asked for the decode.
@@ -120,6 +140,11 @@ How long a track's music runs — the length of its trim. Labelled *⇥ music* o
 **Tempo**:
 How fast a track beats. BPM is its unit, not another name for it.
 _Avoid_: BPM as the quantity
+
+**Key**:
+A track's musical key — a root, major or minor — as the scan detects it. Printed with
+sharps only and an `m` for minor: `Am`, `F♯`. On a deck's readout it is the key coming
+out: transposed by the rate unless the key lock holds it.
 
 **Correction**:
 A tempo a person set by hand. Kept in `settings.json` and not in the cache, because

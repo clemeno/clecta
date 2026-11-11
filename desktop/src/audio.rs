@@ -26,7 +26,7 @@ pub struct Engine {
 	/// Held, never read: dropping the sink stops every player connected to it.
 	_sink: MixerDeviceSink,
 	players: [Player; 2],
-	/// One per player, surviving every load: the rate fader and the file-timeline playhead
+	/// One per player, surviving every load: the rate slider and the file-timeline playhead
 	/// (PLAN §7c). The wrapper around each loaded source holds a clone.
 	shared: [Arc<Shared>; 2],
 	description: String,

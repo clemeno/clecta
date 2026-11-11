@@ -181,7 +181,7 @@ cargo build --release --target x86_64-apple-darwin
   (PLAN §11b, §9a).
 - **Every row says whether it is ready.** A column at the left of the files pane, before the
   `♪`: a **turning glyph** while a thread is decoding that file, and a green **✓** once the
-  cache holds a full scan of it — waveform, music edges *and* tempo, for that exact version of
+  cache holds a full scan of it — waveform, music edges, tempo *and* key, for that exact version of
   the file, which is the same test a load uses to decide it can skip the work. So a prepared folder
   is readable at a glance, still is after a relaunch, and stops being one the moment you edit a
   track. The spinner covers any decode, not just a batch one: load a track into a player and its
