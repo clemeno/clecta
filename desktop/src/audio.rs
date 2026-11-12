@@ -345,20 +345,11 @@ mod tests {
 		let path = std::env::temp_dir().join("clecta-video-first-length.mp4");
 		std::fs::write(&path, video_first_mp4()).expect("writing the fixture");
 
-		// Act
-		let measured = duration(&path);
-		let samples = decoder(&path).expect("opening the fixture").count();
-		let _ = std::fs::remove_file(&path);
-
-		// Assert: one second exactly, the audio's own 8 000 frames over its own 8 kHz.
-		assert_eq!(
-			measured,
-			Some(Duration::from_secs(1)),
-			"the length came off the video"
-		);
-		// And every one of those frames is sound: the picture's bytes, handed to the audio
+		// Act and assert: one second exactly, the audio's own 8 000 frames over its own 8 kHz,
+		// and every one of those frames is sound — the picture's bytes, handed to the audio
 		// decoder, would have come out as samples of their own.
-		assert_eq!(samples, 8_000, "the video track was decoded as sound");
+		assert_one_timeline(&path, Duration::from_secs(1));
+		let _ = std::fs::remove_file(&path);
 	}
 
 	/// The same file, sought. rodio clamped every seek to the wrong length above, and then
@@ -393,44 +384,144 @@ mod tests {
 	#[test]
 	fn a_video_first_opus_webm_is_as_long_as_its_sound() {
 		// Arrange
-		let path = std::env::temp_dir().join("clecta-video-first-length.webm");
-		std::fs::write(&path, video_first_webm()).expect("writing the fixture");
+		let path = std::env::temp_dir().join("clecta-video-first.webm");
+		std::fs::write(&path, video_first_webm(1_000, true)).expect("writing the fixture");
 
-		// Act
-		let measured = duration(&path);
-		let samples = decoder(&path).expect("opening the fixture").count();
+		// Act and assert
+		assert_one_timeline(&path, Duration::from_secs(1));
 		let _ = std::fs::remove_file(&path);
-
-		// Assert: the container's one second, and exactly one second of 48 kHz frames.
-		assert_eq!(measured, Some(Duration::from_secs(1)), "the length");
-		assert_eq!(samples, 50 * 960, "the decoded sound");
 	}
 
-	/// The same file, sought: half a second in, the remaining 25 packets decode to exactly
-	/// the half second the length says is left.
+	/// A WebM whose header ends partway through its last packet, as every encoder's does: Opus
+	/// codes whole 20 ms frames, so the last one is padded, and Matroska says where the sound
+	/// ends only by its length. rodio played the padding (PLAN Q72); it now stops where the
+	/// header says.
 	#[test]
-	fn a_seek_in_an_opus_webm_lands_where_it_was_aimed() {
+	fn a_webm_ends_where_its_header_says() {
+		// Arrange: fifty packets, and a header that claims 990 ms of them.
+		let path = std::env::temp_dir().join("clecta-short-header.webm");
+		std::fs::write(&path, video_first_webm(990, true)).expect("writing the fixture");
+
+		// Act and assert
+		assert_one_timeline(&path, Duration::from_millis(990));
+		let _ = std::fs::remove_file(&path);
+	}
+
+	/// A WebM with no cues, as a WebM written to a pipe can be: symphonia then has nothing to
+	/// seek back with, only forward, to the first packet at or after the target. Q72's step
+	/// back cannot help there and must not walk on — it did, a packet per try, and landed
+	/// 0.3 s late in a long file. The seek lands at most one packet late, as it always has.
+	#[test]
+	fn a_webm_without_cues_seeks_at_most_one_packet_late() {
 		// Arrange
-		let path = std::env::temp_dir().join("clecta-video-first-seek.webm");
-		std::fs::write(&path, video_first_webm()).expect("writing the fixture");
+		let path = std::env::temp_dir().join("clecta-no-cues.webm");
+		std::fs::write(&path, video_first_webm(1_000, false)).expect("writing the fixture");
 		let mut source = decoder(&path).expect("opening the fixture");
 
-		// Act
-		let sought = source.try_seek(Duration::from_millis(500));
+		// Act: 495 ms is 5 ms into the packet that starts at 480.
+		let sought = source.try_seek(Duration::from_millis(495));
 		let remaining = source.count();
 		let _ = std::fs::remove_file(&path);
 
-		// Assert
+		// Assert: it lands on the next packet, at 500 ms, with half a second of sound left.
 		assert!(sought.is_ok(), "the seek failed: {sought:?}");
 		assert_eq!(remaining, 25 * 960, "what the seek left");
 	}
 
-	/// One second of WebM with the video first: a VP9 track of opaque frames, then mono Opus
-	/// made of the three-byte packet every Opus decoder reads as 20 ms of silence. Built by
-	/// hand for the same reason `video_first_mp4` is. Each element's size is written in the
-	/// eight-byte form, which EBML allows for any size and which keeps the arithmetic out.
-	fn video_first_webm() -> Vec<u8> {
-		const SILENCE: [u8; 3] = [0xf8, 0xff, 0xfe]; // CELT, fullband, 20 ms, one frame
+	/// The same padding in Ogg, which states it exactly: the last page's granule position
+	/// stops short of what its packets decode to (RFC 7845 §4.4), and the demuxer turns that
+	/// into a trim on the last packet. A decoder applies the trims it is handed, as
+	/// symphonia's own do; the Opus one did not, and played 10 ms of padding (PLAN Q72).
+	#[test]
+	fn an_ogg_opus_ends_where_its_last_page_says() {
+		use opus_pure::{OggOpusWriter, OpusHead};
+
+		// Arrange: fifty packets, the last one declared 480 samples long rather than 960.
+		let packets = opus_packets();
+		let mut writer =
+			OggOpusWriter::new(Vec::new(), OpusHead::new(1, 48_000).expect("a header"))
+				.expect("a writer");
+		for packet in &packets[..49] {
+			writer.write_packet(packet).expect("writing a packet");
+		}
+		writer
+			.write_packet_with_duration(&packets[49], 480)
+			.expect("writing the last packet");
+		let path = std::env::temp_dir().join("clecta-end-trim.ogg");
+		std::fs::write(&path, writer.finish().expect("finishing the stream"))
+			.expect("writing the fixture");
+
+		// Act and assert
+		assert_one_timeline(&path, Duration::from_millis(990));
+		let _ = std::fs::remove_file(&path);
+	}
+
+	/// What every file must agree with itself on: the length its header gives, the sound a
+	/// decode gives, and what a seek to the middle leaves. Each timing bug so far was two of
+	/// those disagreeing — a length read off the picture's track (PLAN Q69), a pre-skip
+	/// dropped from the start but not after a seek (Q71), padding played past the header's
+	/// end (Q72). The fixtures are mono with an even frame count, so half is exact.
+	fn assert_one_timeline(path: &Path, length: Duration) {
+		assert_eq!(duration(path), Some(length), "the header's length");
+
+		let source = decoder(path).expect("opening the fixture");
+		let per_second =
+			u128::from(source.sample_rate().get()) * u128::from(source.channels().get());
+		let samples = (length.as_nanos() * per_second / 1_000_000_000) as usize;
+		assert_eq!(source.count(), samples, "the decoded sound");
+
+		let mut sought = decoder(path).expect("opening the fixture");
+		let seek = sought.try_seek(length / 2);
+		assert!(seek.is_ok(), "the seek failed: {seek:?}");
+		assert_eq!(
+			sought.count(),
+			samples / 2,
+			"what a seek to the middle left"
+		);
+	}
+
+	/// One second of real Opus, mono: fifty 20 ms packets encoded from a tone with a burst of
+	/// noise every quarter second. Real packets rather than the three-byte silence one,
+	/// because silence skips nearly all of a decoder, and the bursts are transients, which take
+	/// CELT down its short-block paths. They do not reproduce the crash that ruled out the first
+	/// Opus crate tried (PLAN Q71) — only a real file did, which is what
+	/// `scripts/probe-formats.sh` takes as arguments.
+	fn opus_packets() -> Vec<Vec<u8>> {
+		use opus_pure::{Application, MAX_PACKET_BYTES, OpusEncoder};
+
+		let mut encoder = OpusEncoder::new(48_000, 1, Application::Audio).expect("an encoder");
+		let mut noise = 1u32; // a fixed generator, so every run encodes the same file
+		let pcm: Vec<f32> = (0..48_000u32)
+			.map(|n| {
+				noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+				let tone = (n as f32 * 440.0 * std::f32::consts::TAU / 48_000.0).sin() * 0.3;
+				let burst = if n % 12_000 < 480 {
+					(noise >> 8) as f32 / (1 << 24) as f32 - 0.5
+				} else {
+					0.0
+				};
+				tone + burst
+			})
+			.collect();
+
+		let mut packet = vec![0; MAX_PACKET_BYTES];
+		pcm.as_chunks::<960>()
+			.0
+			.iter()
+			.map(|frame| {
+				let size = encoder.encode(frame, 960, &mut packet).expect("encoding");
+				packet[..size].to_vec()
+			})
+			.collect()
+	}
+
+	/// A WebM with the video first: a VP9 track of opaque frames, then mono Opus — the fifty
+	/// packets of `opus_packets`, under a header that claims `length_ms`, and with or without
+	/// the cues that index the cluster. No block carries a duration and the track no default
+	/// one, so symphonia seeks to the first block at or after a target. Built by hand for the
+	/// same reason `video_first_mp4` is. Each element's size is written in the eight-byte
+	/// form, which EBML allows for any size and which keeps the arithmetic out.
+	fn video_first_webm(length_ms: u32, with_cues: bool) -> Vec<u8> {
 		const PRE_SKIP: u16 = 312;
 
 		let uint = |n: u64| n.to_be_bytes();
@@ -451,7 +542,7 @@ mod tests {
 			&[0x15, 0x49, 0xa9, 0x66],
 			&[
 				&webm_element(&[0x2a, 0xd7, 0xb1], &[&uint(1_000_000)]), // timestamps in ms
-				&webm_element(&[0x44, 0x89], &[&1_000f64.to_be_bytes()]), // one second
+				&webm_element(&[0x44, 0x89], &[&f64::from(length_ms).to_be_bytes()]),
 			],
 		);
 		let track = |number: u64, kind: u64, codec: &[u8], extra: &[&[u8]]| {
@@ -508,20 +599,25 @@ mod tests {
 			)
 		};
 		let mut cluster = vec![webm_element(&[0xe7], &[&uint(0)])];
-		for at in (0..1_000).step_by(20) {
+		for (at, packet) in (0..).step_by(20).zip(opus_packets()) {
 			if at % 40 == 0 {
 				cluster.push(block(1, at, &[0; 4]));
 			}
-			cluster.push(block(2, at, &SILENCE));
+			cluster.push(block(2, at, &packet));
 		}
 		let cluster = webm_element(&[0x1f, 0x43, 0xb6, 0x75], &[&cluster.concat()]);
 
 		// The cue points at the cluster from the start of the segment's body, and the cues
 		// before the cluster are the same size whatever that number is.
 		let before = info.len() + tracks.len() + cues(0).len();
+		let cues = if with_cues {
+			cues(before as u64)
+		} else {
+			Vec::new()
+		};
 		let segment = webm_element(
 			&[0x18, 0x53, 0x80, 0x67],
-			&[&info, &tracks, &cues(before as u64), &cluster],
+			&[&info, &tracks, &cues, &cluster],
 		);
 
 		[ebml, segment].concat()
@@ -535,33 +631,50 @@ mod tests {
 		[id, &size, &body].concat()
 	}
 
-	/// Not a check but a probe, for files the suite cannot ship: what the app learns about
-	/// each file named in `CLECTA_PROBE` (a path list, `;`-separated on Windows and
-	/// `:`-separated elsewhere) — the length from the header and from a full decode, where
-	/// two seeks land, and the scan's answers — so two files that should agree can be read
-	/// side by side. It found Q69: an MP4 whose header said 66 s and whose decode said 228.
+	/// A probe, for files the suite cannot ship: what the app learns about each file named in
+	/// `CLECTA_PROBE` (a path list, `;`-separated on Windows and `:`-separated elsewhere) —
+	/// the length from the header and from a full decode, where two seeks land, and the
+	/// scan's answers — so two files that should agree can be read side by side. It found Q69,
+	/// an MP4 whose header said 66 s and whose decode said 228, and Q72's padding and late
+	/// seeks. It fails when a file disagrees with itself the way `assert_one_timeline` checks
+	/// a fixture, within `TOLERANCE`, after printing every file; `scripts/probe-formats.sh`
+	/// runs it on one generated file per format.
 	///
 	/// `CLECTA_PROBE="a.mp3;a.mp4" cargo test probe_files -- --ignored --nocapture`
 	#[test]
 	#[ignore = "reads the files named in CLECTA_PROBE"]
 	fn probe_files() {
+		// Matroska's timestamps are whole milliseconds, so its lengths and landings can be one
+		// off either side. Everything Q72 fixed was 7 ms or more.
+		const TOLERANCE: f64 = 0.002;
+
 		let paths = std::env::var_os("CLECTA_PROBE").expect("CLECTA_PROBE names no files");
+		let mut wrong = Vec::new();
 		for path in std::env::split_paths(&paths) {
 			let source = decoder(&path).expect("opening the file");
 			let (rate, channels) = (source.sample_rate().get(), source.channels().get());
 			let seconds = |samples: usize| samples as f64 / f64::from(rate * u32::from(channels));
 			let decoded = seconds(source.count());
+			let header = duration(&path);
 			eprintln!(
-				"{}: header {:?}, decoded {decoded:.3} s, {rate} Hz × {channels}",
+				"{}: header {header:?}, decoded {decoded:.3} s, {rate} Hz × {channels}",
 				path.display(),
-				duration(&path),
 			);
+			// No length is no claim: the footer shows a `+`, and there is nothing to disagree with.
+			if let Some(header) = header
+				&& (header.as_secs_f64() - decoded).abs() > TOLERANCE
+			{
+				wrong.push(format!("{}: decodes to {decoded:.3} s", path.display()));
+			}
 
 			for target in [decoded / 4.0, decoded * 3.0 / 4.0] {
 				let mut sought = decoder(&path).expect("opening the file");
 				let result = sought.try_seek(Duration::from_secs_f64(target));
 				let landed = decoded - seconds(sought.count());
 				eprintln!("  seek to {target:.3} s: {result:?}, landed at {landed:.3} s");
+				if result.is_err() || (landed - target).abs() > TOLERANCE {
+					wrong.push(format!("{}: a seek to {target:.3} s", path.display()));
+				}
 			}
 
 			let scanned = scan(&path).expect("scanning the file");
@@ -570,6 +683,7 @@ mod tests {
 				scanned.trim, scanned.tempo, scanned.key
 			);
 		}
+		assert!(wrong.is_empty(), "disagreements:\n{}", wrong.join("\n"));
 	}
 
 	/// One second of MP4 with the video first: a 1 kHz track of 25 opaque frames, then 8 kHz

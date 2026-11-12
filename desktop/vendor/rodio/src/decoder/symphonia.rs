@@ -35,6 +35,19 @@ pub(crate) struct SymphoniaDecoder {
     buffer: SampleBuffer<Sample>,
     spec: SignalSpec,
     seek_mode: SeekMode,
+    // clecta patch: where the decode is on the track's clock, for `span` and `refine_position`.
+    time_base: Option<units::TimeBase>,
+    /// The track's first timestamp, which `n_frames` counts from.
+    start_ts: u64,
+    /// The frame the next buffer starts at; `None` at the start and after a seek, until a
+    /// packet's timestamp says.
+    frame: Option<u64>,
+    /// The frame the container says the sound ends at.
+    end: Option<u64>,
+    /// The samples of `buffer` that are played: all of them, except in the packet `end` cuts.
+    span_len: usize,
+    /// The timestamp of the packet `buffer` was decoded from.
+    span_ts: u64,
 }
 
 impl SymphoniaDecoder {
@@ -83,6 +96,8 @@ impl SymphoniaDecoder {
         };
         let mut probed = get_probe().format(&hint, mss, &format_opts, &metadata_opts)?;
 
+        // clecta patch: an empty container is still `None`, but its default track is no longer
+        // the one decoded; `track`, below, is.
         if probed.format.default_track().is_none() {
             return Ok(None);
         }
@@ -121,11 +136,14 @@ impl SymphoniaDecoder {
             .zip(track.codec_params.n_frames)
             .map(|(base, spans)| base.calc_time(spans).into())
             .filter(|d: &Duration| !d.is_zero());
+        // clecta patch: kept for `span`, before `track`'s borrow of the format ends.
+        let (time_base, start_ts) = (track.codec_params.time_base, track.codec_params.start_ts);
 
-        let decoded = loop {
+        // clecta patch: and the packet's timestamp with it, for `span`.
+        let (decoded, ts) = loop {
             let current_span = match probed.format.next_packet() {
                 Ok(packet) => packet,
-                Err(Error::IoError(_)) => break decoder.last_decoded(),
+                Err(Error::IoError(_)) => break (decoder.last_decoded(), 0), // clecta patch
                 Err(e) => return Err(e),
             };
 
@@ -135,7 +153,7 @@ impl SymphoniaDecoder {
             }
 
             match decoder.decode(&current_span) {
-                Ok(decoded) => break decoded,
+                Ok(decoded) => break (decoded, current_span.ts()), // clecta patch
                 Err(e) => match e {
                     Error::DecodeError(_) => {
                         // Decode errors are intentionally ignored with no retry limit.
@@ -148,17 +166,56 @@ impl SymphoniaDecoder {
             }
         };
         let spec = decoded.spec().to_owned();
+        // clecta patch: the end in frames, and the first buffer placed — and cut, in a file
+        // shorter than one packet — exactly as `fill` places every later one.
+        let frames = decoded.frames() as u64;
+        let end = total_duration.map(|d| (d.as_secs_f64() * f64::from(spec.rate)).round() as u64);
         let buffer = SymphoniaDecoder::get_buffer(decoded, &spec);
-        Ok(Some(SymphoniaDecoder {
+        let mut this = SymphoniaDecoder { // clecta patch: placed by `span`, below
             decoder,
             current_span_offset: 0,
             format: probed.format,
-            track_id,
+            track_id, // clecta patch
             total_duration,
             buffer,
             spec,
             seek_mode,
-        }))
+            time_base,
+            start_ts,
+            frame: None,
+            end,
+            span_len: 0,
+            span_ts: 0,
+        };
+        this.span(ts, frames);
+        Ok(Some(this))
+    }
+
+    // clecta patch: place a freshly decoded buffer of `frames` frames, from the packet at `ts`,
+    // on the track, and cut it if it runs past the end the container states. That end is where
+    // the sound stops inside the last packet: Opus and AAC code whole frames and pad the last,
+    // and an MP4 or a Matroska file says where the padding starts only by its length, which no
+    // symphonia 0.5 decoder of theirs applies (PLAN Q72). A packet wholly past the end is kept,
+    // as the header is then what is wrong.
+    fn span(&mut self, ts: u64, frames: u64) {
+        let start = self.frame.unwrap_or_else(|| self.frame_at(ts));
+        let kept = match self.end {
+            Some(end) if start < end && end < start + frames => end - start,
+            _ => frames,
+        };
+        self.span_len = kept as usize * self.spec.channels.count();
+        self.span_ts = ts;
+        self.frame = Some(start + frames);
+    }
+
+    // clecta patch: a timestamp, on the track's clock, as a frame at the decoded rate, counted
+    // from the track's start as `n_frames` is: an Ogg stream cut from a longer one starts late.
+    fn frame_at(&self, ts: u64) -> u64 {
+        let rate = u64::from(self.spec.rate);
+        self.time_base.map_or(0, |base| {
+            let time = base.calc_time(ts.saturating_sub(self.start_ts));
+            time.seconds * rate + (time.frac * rate as f64).round() as u64
+        })
     }
 
     #[inline]
@@ -173,7 +230,7 @@ impl SymphoniaDecoder {
 impl Source for SymphoniaDecoder {
     #[inline]
     fn current_span_len(&self) -> Option<usize> {
-        Some(self.buffer.len())
+        Some(self.span_len) // clecta patch: what `span` kept
     }
 
     #[inline]
@@ -217,7 +274,10 @@ impl Source for SymphoniaDecoder {
         }
 
         // Remember the current channel, so we can restore it after seeking.
-        let active_channel = self.current_span_offset % self.channels().get() as usize;
+        // clecta patch: `min`, as a seek that found nothing to decode leaves the offset at
+        // `usize::MAX`, which is the second channel of two: left and right swapped.
+        let active_channel =
+            self.current_span_offset.min(self.span_len) % self.channels().get() as usize;
 
         let seek_res = match self.format.seek(
             self.seek_mode,
@@ -240,6 +300,7 @@ impl Source for SymphoniaDecoder {
         // so we need to reset the decoder to make sure it's in sync and prevent
         // audio glitches.
         self.decoder.reset();
+        self.frame = None; // clecta patch: the next packet's timestamp says where the decode is
 
         // Force the iterator to decode the next packet.
         self.current_span_offset = usize::MAX;
@@ -282,29 +343,88 @@ assert_error_traits!(SeekError);
 
 impl SymphoniaDecoder {
     /// Note span offset must be set after
+    // clecta patch: count the skip from the first packet that gives sound, not from where the
+    // demuxer landed, and make sure that packet starts at or before the target (PLAN Q72). Two
+    // ways it did not: right after a reset a Vorbis packet gives no sound — it only primes the
+    // overlap — so the sound began one packet past the landing; and a Matroska file without
+    // block durations lands on the first block *after* the target. Either way the seek was up
+    // to a packet late. So while the sound starts past the target, seek back from it by 1, 2,
+    // 4… ticks — one packet for Vorbis, a few tries for Matroska — and decode again.
     fn refine_position(&mut self, seek_res: SeekedTo) -> Result<(), source::SeekError> {
-        // Calculate the number of samples to skip.
-        let mut samples_to_skip = (Duration::from(
-            self.decoder
-                .codec_params()
-                .time_base
-                .expect("time base availability guaranteed by caller")
-                .calc_time(seek_res.required_ts.saturating_sub(seek_res.actual_ts)),
-        )
-        .as_secs_f32()
-            * self.sample_rate().get() as f32
-            * self.channels().get() as f32)
-            .ceil() as usize;
-
-        // Re-align the seek position to the first channel.
-        samples_to_skip -= samples_to_skip % self.channels().get() as usize;
+        let mut ask = seek_res.actual_ts.min(seek_res.required_ts); // clecta patch: as above
+        let mut step = 1;
+        loop {
+            if self.fill().is_none() {
+                return Ok(());
+            }
+            if self.span_ts <= seek_res.required_ts || ask == 0 {
+                break;
+            }
+            ask = ask.saturating_sub(step);
+            step *= 2;
+            let to = SeekTo::TimeStamp {
+                ts: ask,
+                track_id: self.track_id,
+            };
+            match self.format.seek(SeekMode::Accurate, to) {
+                Ok(to) if to.actual_ts <= self.span_ts => {}
+                // A demuxer that cannot go back keeps the late landing, as upstream did. One that
+                // only seeks forward (Matroska without cues) answers with the packet after the
+                // one in hand, and asking again would land a packet later each time.
+                _ => break,
+            }
+            self.decoder.reset();
+            self.frame = None;
+        }
 
         // Skip ahead to the precise position.
-        for _ in 0..samples_to_skip {
+        // clecta patch: from the packet that gives sound, as above.
+        let frames = self
+            .frame_at(seek_res.required_ts)
+            .saturating_sub(self.frame_at(self.span_ts));
+        for _ in 0..frames * u64::from(self.channels().get()) {
             self.next();
         }
 
         Ok(())
+    }
+
+    // clecta patch: `next`'s decode, on its own so `refine_position` can decode a packet
+    // without taking a sample from it. `None` at the end of the stream.
+    fn fill(&mut self) -> Option<()> {
+        let (decoded, ts) = loop {
+            let packet = self.format.next_packet().ok()?;
+            // clecta patch: skip other tracks' packets, as `init` does.
+            if packet.track_id() != self.track_id {
+                continue;
+            }
+            let decoded = match self.decoder.decode(&packet) {
+                Ok(decoded) => decoded,
+                Err(Error::DecodeError(_)) => {
+                    // Skip over packets that cannot be decoded. This ensures the iterator
+                    // continues processing subsequent packets instead of terminating due to
+                    // non-critical decode errors.
+                    continue;
+                }
+                Err(_) => return None,
+            };
+
+            // Loop until we get a packet with audio frames. This is necessary because some
+            // formats can have packets with only metadata, particularly when rewinding, in
+            // which case the iterator would otherwise end with `None`.
+            // Note: checking `decoded.frames()` is more reliable than `packet.dur()`, which
+            // can resturn non-zero durations for packets without audio frames.
+            if decoded.frames() > 0 {
+                break (decoded, packet.ts());
+            }
+        };
+
+        decoded.spec().clone_into(&mut self.spec);
+        let frames = decoded.frames() as u64;
+        self.buffer = SymphoniaDecoder::get_buffer(decoded, &self.spec);
+        self.current_span_offset = 0;
+        self.span(ts, frames);
+        Some(())
     }
 }
 
@@ -312,37 +432,10 @@ impl Iterator for SymphoniaDecoder {
     type Item = Sample;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_span_offset >= self.buffer.len() {
-            let decoded = loop {
-                let packet = self.format.next_packet().ok()?;
-                // clecta patch: skip other tracks' packets, as `init` does.
-                if packet.track_id() != self.track_id {
-                    continue;
-                }
-                let decoded = match self.decoder.decode(&packet) {
-                    Ok(decoded) => decoded,
-                    Err(Error::DecodeError(_)) => {
-                        // Skip over packets that cannot be decoded. This ensures the iterator
-                        // continues processing subsequent packets instead of terminating due to
-                        // non-critical decode errors.
-                        continue;
-                    }
-                    Err(_) => return None,
-                };
-
-                // Loop until we get a packet with audio frames. This is necessary because some
-                // formats can have packets with only metadata, particularly when rewinding, in
-                // which case the iterator would otherwise end with `None`.
-                // Note: checking `decoded.frames()` is more reliable than `packet.dur()`, which
-                // can resturn non-zero durations for packets without audio frames.
-                if decoded.frames() > 0 {
-                    break decoded;
-                }
-            };
-
-            decoded.spec().clone_into(&mut self.spec);
-            self.buffer = SymphoniaDecoder::get_buffer(decoded, &self.spec);
-            self.current_span_offset = 0;
+        // clecta patch: `span_len`, not the buffer's length, as `span` may have cut it; and the
+        // decode moved into `fill`.
+        if self.current_span_offset >= self.span_len {
+            self.fill()?;
         }
 
         let sample = *self.buffer.samples().get(self.current_span_offset)?;

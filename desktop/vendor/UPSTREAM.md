@@ -1,8 +1,10 @@
 # Upstream draft: rodio, video-first MP4s
 
-Not posted. Text for an issue and a pull request on `RustAudio/rodio`, for the maintainer
-to post by hand. When a rodio release carries the fix, delete this file together with
-`vendor/rodio` and the `[patch.crates-io]` table in `Cargo.toml` (PLAN Q69).
+Not posted. Text for issues and a pull request on `RustAudio/rodio`, for the maintainer
+to post by hand. When a rodio release carries these fixes, delete this file together with
+`vendor/rodio` and the `[patch.crates-io]` table in `Cargo.toml` (PLAN Q69, Q72) — once
+Opus is decodable without the `CODECS` hook too (PLAN Q71). The second issue, at the end,
+has no pull request drafted yet.
 
 ---
 
@@ -135,3 +137,38 @@ The builder is about 100 lines and can be ported into rodio's tests if wanted.
                      Ok(decoded) => decoded,
                      Err(Error::DecodeError(_)) => {
 ```
+
+---
+
+## Issue 2
+
+**Title:** Symphonia decoder: playback runs past the container's stated end, and accurate seeks land one packet late for Vorbis
+
+**Body:**
+
+With rodio 0.23.0, a 3 s 440 Hz tone at 48 kHz, made by ffmpeg in each format, decodes to
+these lengths. Gapless is on, as it is by default.
+
+| file | `total_duration()` | samples decoded | an accurate seek a quarter in lands |
+|---|---|---|---|
+| `.m4a` (AAC) | 3.0213 s | 3.0293 s | exactly |
+| `.mkv` (Vorbis) | 3.003 s | 3.020 s | 19 ms late |
+| `.ogg` (Vorbis) | 3.000 s | 3.000 s | 21 ms late |
+
+Each is a different cause.
+
+1. **The last packet's padding is played.** In the `.m4a` the last sample is 640 ticks long,
+   but the AAC decoder outputs all 1 024 frames. A Matroska file says where the sound ends
+   only by its `Duration`. symphonia 0.5 sets no trim for either, and its AAC decoder would
+   not apply one anyway. Cutting the packet that crosses `n_frames` makes the decode agree
+   with `total_duration()`.
+2. **The skip after an accurate seek is counted from the wrong packet.** `refine_position`
+   skips `required_ts - actual_ts`. But a Vorbis packet decoded right after `reset()` gives
+   no frames (it only primes the overlap), and `next` silently moves on to the following
+   packet. Every Vorbis seek therefore lands one block late: 1 024 frames, 21 ms. Counting
+   the skip from the timestamp of the first packet that gives frames fixes it. When that
+   packet already starts past the target, seek earlier and decode again.
+3. **Matroska without block durations lands after the target.** symphonia-mkv's seek returns
+   the first block with `timestamp + duration >= ts`. With no duration, that is the first
+   block *after* the target, and `required_ts.saturating_sub(actual_ts)` is then 0. The
+   seek-earlier step in (2) covers this too.

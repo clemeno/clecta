@@ -122,6 +122,10 @@ impl Decoder for Opus {
 				*sample = self.interleaved[frame * channels + channel] * self.gain;
 			}
 		}
+		// The container's trims, as symphonia's own decoders apply them: Ogg states where the
+		// sound ends inside the last packet (PLAN Q72). Matroska states none.
+		self.buffer
+			.trim(packet.trim_start as usize, packet.trim_end as usize);
 
 		Ok(self.buffer.as_audio_buffer_ref())
 	}

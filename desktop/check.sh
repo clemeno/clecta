@@ -15,3 +15,4 @@ cargo test
 cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings
 cargo deny check bans licenses sources
 cargo audit
+sh scripts/check-vendor.sh

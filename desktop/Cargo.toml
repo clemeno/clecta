@@ -53,17 +53,19 @@ serde_json = "1.0.154"
 # exact version rodio resolves, so the tree still holds one symphonia.
 symphonia = { version = "0.5.5", default-features = false }
 
-# rodio 0.23.0 exactly as published, plus two changes in `src/decoder/symphonia.rs` (every
-# changed line is marked `clecta patch`). A fix: it read a file's length and resolved its seeks
-# on the container's *default* track while decoding a different one, so an MP4 whose video
-# comes first — every downloaded video — showed the wrong length and clamped its seeks to it
-# (PLAN Q69, `audio::tests::a_video_first_mp4_is_as_long_as_its_sound`). And a hook: a
-# `CODECS` registry the app fills, which is how `src/opus.rs` gives it the Opus decoder WebM
-# needs (PLAN Q71). The crate ships with CRLF endings and git stores LF, so check the copy
-# with `diff -r --strip-trailing-cr`.
-# `ponytail:` a vendored copy to carry a few lines. It can go the day a rodio release both
-# fixes Q69 (the two MP4 tests will say) and decodes Opus or takes a codec registry (the two
-# WebM tests will say); until both, deleting `vendor/` breaks one of them.
+# rodio 0.23.0 exactly as published, plus changes in `src/decoder/symphonia.rs`, every change
+# block marked `clecta patch` (`scripts/check-vendor.sh` holds it to that). A fix: it read a
+# file's length and resolved its seeks on the container's *default* track while decoding a
+# different one, so an MP4 whose video comes first — every downloaded video — showed the
+# wrong length and clamped its seeks to it (PLAN Q69, `audio::tests::a_video_first_mp4_is_as_
+# long_as_its_sound`). A hook: a `CODECS` registry the app fills, which is how `src/opus.rs`
+# gives it the Opus decoder WebM needs (PLAN Q71). And two more fixes: the packet that runs
+# past the container's stated end is cut there, and a seek counts from the first packet that
+# gives sound (PLAN Q72, `a_webm_ends_where_its_header_says`, `scripts/probe-formats.sh`).
+# `ponytail:` a vendored copy to carry a few dozen lines. It can go the day a rodio release
+# fixes Q69 and Q72 (the MP4 and WebM tests and the format probe will say) and decodes Opus or
+# takes a codec registry (the Opus tests will say); until then, deleting `vendor/` breaks one
+# of them.
 [patch.crates-io]
 rodio = { path = "vendor/rodio" }
 

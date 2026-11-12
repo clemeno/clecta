@@ -9,6 +9,7 @@ directory: `desktop/PLAN.md` is the design record and carries the decision log, 
 
 - **Checks**: `desktop/check.sh` runs every gate CI runs, in CI's order. Run it before committing;
   the `pre-push` hook in `.githooks/` runs it too, once `git config core.hooksPath .githooks` is set.
+  After touching decoding or `desktop/vendor/`, also run `desktop/scripts/probe-formats.sh` (needs ffmpeg).
 - **Naming** is idiomatic Rust, and PLAN §13 records why the organization's prefix rules yield
   to `rustc`'s own lints here.
 - **Windows**: a running `clecta.exe` locks `target/debug/clecta.exe`, so `cargo build` fails with
