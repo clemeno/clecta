@@ -56,7 +56,10 @@ impl TrackState {
 
         // clecta patch: an edit list's delay and length, given as symphonia's MP3 reader gives
         // a LAME tag's: the length without them, and each packet trimmed to it (`next_packet`).
-        let edit = if gapless { edit_of(trak, movie_scale) } else { None };
+        // Sound tracks only, which are the ones with a sample rate: a video track's edit is not
+        // priming, and its delay put seeks near the end past its last sample.
+        let sound = codec_params.sample_rate.is_some();
+        let edit = if gapless && sound { edit_of(trak, movie_scale) } else { None };
         if let Some((delay, frames)) = edit {
             codec_params.with_delay(delay).with_n_frames(frames);
         }
@@ -90,7 +93,7 @@ fn edit_of(trak: &TrakAtom, movie_scale: u32) -> Option<(u32, u64)> {
         u128::from(edit.segment_duration) * u128::from(media.timescale) / u128::from(movie_scale),
     )
     .ok()?;
-    (frames > 0 && u64::from(delay) + frames <= media.duration).then_some((delay, frames))
+    (frames > 0 && u64::from(delay).checked_add(frames)? <= media.duration).then_some((delay, frames))
 }
 
 /// Information regarding the next sample.
@@ -282,7 +285,10 @@ impl IsoMp4Reader {
         // delay going in and take it off coming out, as symphonia's MP3 reader does.
         let delay = self.track_states.get(track_num).and_then(|t| t.edit).map_or(0, |e| e.0);
         let delay = u64::from(delay);
-        let ts = ts + delay;
+        let ts = match ts.checked_add(delay) {
+            Some(ts) => ts,
+            None => return seek_error(SeekErrorKind::OutOfRange),
+        };
 
         debug!("seeking track={} to frame_ts={}", track_num, ts);
 
@@ -320,17 +326,20 @@ impl IsoMp4Reader {
             let seg = &self.segs[seek_loc.seg_idx];
 
             // Get the sample information.
-            let data_desc = seg.sample_data(track_num, seek_loc.sample_num, true)?;
+            // clecta patch: one sample early, so the decoder has the overlap an MDCT codec such
+            // as AAC needs before the target; rodio counts its skip from the packet it decodes.
+            let sample_num = seek_loc.sample_num.saturating_sub(1);
+            let data_desc = seg.sample_data(track_num, sample_num, true)?;
 
             // Update the track's next sample information to point to the seeked sample.
             let track = &mut self.track_states[track_num];
 
             track.cur_seg = seek_loc.seg_idx;
-            track.next_sample = seek_loc.sample_num;
+            track.next_sample = sample_num; // clecta patch
             track.next_sample_pos = data_desc.base_pos + data_desc.offset.unwrap();
 
             // Get the actual timestamp for this sample.
-            let timing = seg.sample_timing(track_num, seek_loc.sample_num)?.unwrap();
+            let timing = seg.sample_timing(track_num, sample_num)?.unwrap(); // clecta patch
 
             debug!(
                 "seeked track={} to packet_ts={} (delta={})",

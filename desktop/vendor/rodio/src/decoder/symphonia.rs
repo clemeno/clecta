@@ -150,7 +150,7 @@ impl SymphoniaDecoder {
             match decoder.decode(&current_span) {
                 Ok(decoded) => {
                     // clecta patch
-                    let trim = untrimmed(&current_span, decoded.frames());
+                    let trim = untrimmed(&current_span, &decoded, time_base);
                     break (decoded, current_span.ts(), trim);
                 }
                 Err(e) => match e {
@@ -172,7 +172,10 @@ impl SymphoniaDecoder {
         let origin = ts.max(start_ts);
         let total_duration: Option<Duration> = time_base
             .zip(n_frames)
-            .map(|(base, frames)| base.calc_time((start_ts + frames).saturating_sub(origin)).into())
+            .map(|(base, frames)| {
+                let end = start_ts.saturating_add(frames);
+                base.calc_time(end.saturating_sub(origin)).into()
+            })
             .filter(|d: &Duration| !d.is_zero());
         // clecta patch: the end in frames, and the first buffer placed — and cut, in a file
         // shorter than one packet — exactly as `fill` places every later one.
@@ -295,7 +298,7 @@ impl Source for SymphoniaDecoder {
         // early by the gap (PLAN Q72).
         let to = match self.time_base {
             Some(base) => SeekTo::TimeStamp {
-                ts: self.origin + base.calc_timestamp(target.into()),
+                ts: self.origin.saturating_add(base.calc_timestamp(target.into())),
                 track_id: self.track_id,
             },
             None => SeekTo::Time {
@@ -374,7 +377,8 @@ impl SymphoniaDecoder {
             if self.fill().is_none() {
                 return Ok(());
             }
-            if self.span_ts <= seek_res.required_ts || ask == 0 {
+            // Never back past the track's first packet: a late-starting Ogg refuses it.
+            if self.span_ts <= seek_res.required_ts || ask <= self.origin {
                 break;
             }
             // Back first by as far as the sound started late, then by twice as far each try.
@@ -382,7 +386,7 @@ impl SymphoniaDecoder {
                 0 => self.span_ts - seek_res.required_ts,
                 _ => step * 2,
             };
-            ask = ask.saturating_sub(step);
+            ask = ask.saturating_sub(step).max(self.origin);
             let to = SeekTo::TimeStamp {
                 ts: ask,
                 track_id: self.track_id,
@@ -436,7 +440,7 @@ impl SymphoniaDecoder {
             // Note: checking `decoded.frames()` is more reliable than `packet.dur()`, which
             // can resturn non-zero durations for packets without audio frames.
             // clecta patch: and frames left once the packet's trims are applied.
-            let trim = untrimmed(&packet, decoded.frames());
+            let trim = untrimmed(&packet, &decoded, self.time_base);
             if decoded.frames() > trim.0 + trim.1 {
                 break (decoded, packet.ts(), trim);
             }
@@ -468,9 +472,24 @@ impl SymphoniaDecoder {
 // Vorbis decoders, and `opus.rs`, apply a packet's trims themselves; its AAC and PCM ones return
 // the whole block, which is how to tell. The MP4 reader's trims come from the edit list
 // (PLAN Q72), and without these an AAC file's priming was played.
-fn untrimmed(packet: &Packet, frames: usize) -> (usize, usize) {
-    let (start, end) = (packet.trim_start() as usize, packet.trim_end() as usize);
-    if start + end > 0 && frames as u64 == packet.block_dur() {
+// The trims and the block are in ticks of the track's clock, which an MP4 need not run at its
+// sample rate (HE-AAC's runs at twice the rate symphonia decodes at), so they are compared as
+// frames at the decoded rate.
+fn untrimmed(
+    packet: &Packet,
+    decoded: &AudioBufferRef,
+    base: Option<units::TimeBase>,
+) -> (usize, usize) {
+    let rate = u128::from(decoded.spec().rate);
+    let frames = |ticks: u64| match base {
+        Some(base) => {
+            (u128::from(ticks) * rate * u128::from(base.numer) / u128::from(base.denom)) as usize
+        }
+        None => ticks as usize,
+    };
+    let start = frames(packet.trim_start().into());
+    let end = frames(packet.trim_end().into());
+    if start + end > 0 && decoded.frames() == frames(packet.block_dur()) {
         (start, end)
     } else {
         (0, 0)

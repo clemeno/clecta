@@ -343,7 +343,7 @@ mod tests {
 	fn a_video_first_mp4_is_as_long_as_its_sound() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-video-first-length.mp4");
-		std::fs::write(&path, video_first_mp4(None)).expect("writing the fixture");
+		std::fs::write(&path, video_first_mp4(None, 1, None)).expect("writing the fixture");
 
 		// Act and assert: one second exactly, the audio's own 8 000 frames over its own 8 kHz,
 		// and every one of those frames is sound — the picture's bytes, handed to the audio
@@ -362,7 +362,53 @@ mod tests {
 	fn an_mp4_plays_what_its_edit_list_says() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-edit-list.mp4");
-		std::fs::write(&path, video_first_mp4(Some((800, 800)))).expect("writing the fixture");
+		std::fs::write(&path, video_first_mp4(Some((800, 800)), 1, None))
+			.expect("writing the fixture");
+
+		// Act
+		let first = decoder(&path)
+			.expect("opening the fixture")
+			.next()
+			.map(|sample| (sample * 32_768.0).round() as i32);
+
+		// Assert
+		assert_eq!(first, Some(800), "the first sample heard");
+		assert_one_timeline(&path, Duration::from_millis(800));
+		let _ = std::fs::remove_file(&path);
+	}
+
+	/// A picture track's edit list is not priming: a video cut without re-encoding keeps one
+	/// that skips the picture's start. Read as a delay, it pushed a seek near the end past the
+	/// picture's last frame, and the whole seek failed, which the app shows as a stream it
+	/// cannot seek (PLAN Q72).
+	#[test]
+	fn a_picture_tracks_edit_does_not_stop_a_seek_near_the_end() {
+		// Arrange: the picture's edit skips its first half second.
+		let path = std::env::temp_dir().join("clecta-picture-edit.mp4");
+		std::fs::write(&path, video_first_mp4(None, 1, Some((500, 500))))
+			.expect("writing the fixture");
+		let mut source = decoder(&path).expect("opening the fixture");
+
+		// Act
+		let sought = source.try_seek(Duration::from_millis(950));
+		let remaining = source.count();
+		let _ = std::fs::remove_file(&path);
+
+		// Assert: 50 ms of 8 kHz sound left.
+		assert!(sought.is_ok(), "the seek failed: {sought:?}");
+		assert_eq!(remaining, 400, "what the seek left");
+	}
+
+	/// The same edit on a sound whose clock ticks twice a frame, as an MP4's can: its timescale
+	/// need not be its sample rate, and in HE-AAC it is twice the rate symphonia decodes at.
+	/// The trims arrive in ticks and the decoder's frames are frames, and comparing the two
+	/// skipped the trims, so the priming played while the length and the seeks left it out.
+	#[test]
+	fn an_mp4_edit_list_holds_when_the_clock_is_not_the_rate() {
+		// Arrange: 1 600 ticks is the same 800 frames.
+		let path = std::env::temp_dir().join("clecta-edit-list-ticks.mp4");
+		std::fs::write(&path, video_first_mp4(Some((1_600, 800)), 2, None))
+			.expect("writing the fixture");
 
 		// Act
 		let first = decoder(&path)
@@ -384,7 +430,7 @@ mod tests {
 	fn a_seek_in_a_video_first_mp4_lands_where_it_was_aimed() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-video-first-seek.mp4");
-		std::fs::write(&path, video_first_mp4(None)).expect("writing the fixture");
+		std::fs::write(&path, video_first_mp4(None, 1, None)).expect("writing the fixture");
 		let mut source = decoder(&path).expect("opening the fixture");
 
 		// Act
@@ -714,7 +760,9 @@ mod tests {
 				wrong.push(format!("{}: decodes to {decoded:.3} s", path.display()));
 			}
 
-			for target in [decoded / 4.0, decoded * 3.0 / 4.0] {
+			// Just after the start and just before the end too, where a late start, a priming
+			// edit and a picture track's edit bite.
+			for target in [0.005, decoded / 4.0, decoded * 3.0 / 4.0, decoded - 0.05] {
 				let mut sought = decoder(&path).expect("opening the file");
 				let result = sought.try_seek(Duration::from_secs_f64(target));
 				let landed = decoded - seconds(sought.count());
@@ -749,9 +797,14 @@ mod tests {
 	/// mono PCM whose sample `n` is `n`. Built by hand for the same reason `wav` is — it is
 	/// eleven kinds of box, each a header and a few numbers. `avc1` with no body is enough of
 	/// a picture: symphonia decodes no video, so the track only has to exist and be timed.
-	/// `edit`, when given, is the sound's edit list: one edit playing the media from the frame
-	/// it names for the milliseconds it names.
-	fn video_first_mp4(edit: Option<(u32, u32)>) -> Vec<u8> {
+	/// `edit`, when given, is the sound's edit list: one edit playing the media from the tick
+	/// it names for the milliseconds it names. The sound's clock ticks `ticks` times a frame.
+	/// `picture_edit` is the same for the picture's track, whose clock is in milliseconds.
+	fn video_first_mp4(
+		edit: Option<(u32, u32)>,
+		ticks: u32,
+		picture_edit: Option<(u32, u32)>,
+	) -> Vec<u8> {
 		const RATE: u32 = 8_000;
 		const VIDEO_SCALE: u32 = 1_000;
 		const VIDEO_FRAMES: u32 = 25; // 40 ticks each: one second at 1 kHz
@@ -783,15 +836,15 @@ mod tests {
 					40,
 					VIDEO_FRAME_BYTES,
 					video_offset,
-					None,
+					picture_edit,
 				),
 				mp4_track(
 					2,
 					b"soun",
-					RATE,
+					RATE * ticks,
 					pcm_entry.clone(),
 					RATE,
-					1,
+					ticks,
 					2,
 					audio_offset,
 					edit,
