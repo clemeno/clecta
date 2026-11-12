@@ -240,8 +240,7 @@ cargo build --release --target x86_64-apple-darwin
   the one under the cursor — the position is thrown away by winit and is not recoverable
   in clecta's own code. The upgrade path is upstream, and PLAN §10 spells it out.
 - **No video picture** — the audio track of an `.mp4` / `.mkv` / `.webm` plays, Opus included
-  (PLAN Q71), and that is v1 (PLAN §14). No cue points, and no *changing* a tempo: reading one is §14d, playing a track at
-  a different one needs a time-stretch stage rodio does not have.
+  (PLAN Q71), and that is v1 (PLAN §14). No cue points or loops.
 - **The row menu is centred, not at the pointer.** iced's press messages carry no position, and
   the only route to one is a subscription that fires on every mouse move — which would rebuild
   every row of the files pane each time (PLAN §14d, §6).
