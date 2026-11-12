@@ -19,6 +19,12 @@ vendored() {
 	shift 2
 	curl -sSfL "https://static.crates.io/crates/$name/$name-$version.crate" | tar -xz -C "$dir"
 	published="$dir/$name-$version"
+	# bsdtar (macOS, Windows' own tar.exe) exits 0 on the empty input a failed download leaves,
+	# and every diff below would then compare nothing and pass.
+	[ -d "$published" ] || {
+		echo "cannot fetch $name $version from crates.io" >&2
+		exit 1
+	}
 
 	diff -rq --strip-trailing-cr "$published" "vendor/$name" >"$dir/differences" || true
 	for file in "$@"; do

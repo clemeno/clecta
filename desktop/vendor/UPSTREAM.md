@@ -1,4 +1,4 @@
-# Upstream draft: rodio, video-first MP4s
+# Upstream drafts: rodio and symphonia, the timing of MP4, Matroska and Ogg
 
 Not posted. Text for issues and a pull request on `RustAudio/rodio`, for the maintainer
 to post by hand. When a rodio release carries these fixes, delete this file together with
@@ -171,7 +171,7 @@ Each is a different cause.
    packet already starts past the target, seek earlier and decode again.
 3. **Matroska without block durations lands after the target.** symphonia-mkv's seek returns
    the first block with `timestamp + duration >= ts`. With no duration, that is the first
-   block *after* the target, and `required_ts.saturating_sub(actual_ts)` is then 0. The
+   block that starts at or after the target, and `required_ts.saturating_sub(actual_ts)` is then 0. The
    seek-earlier step in (2) covers this too.
 
 ---
@@ -190,10 +190,20 @@ is decoded and played; and with `enable_gapless` nothing is trimmed.
 The fix carried in this repository reads a single edit at normal rate into the media as a
 delay and a length:
 
+- it reads sound tracks' edits only: a picture's edit, as a video cut without re-encoding
+  keeps, read as a delay pushed a seek near the end past the picture's last frame, and the
+  whole seek failed;
+- it stops an edit that runs a few ticks past the media at the media's end, as a muxer
+  rounding up to a coarser movie clock (QuickTime's 1/600 s) writes, rather than refusing it;
 - it sets them as the track's `delay` and `n_frames`;
 - it calls `formats::util::trim_packet` on each packet;
-- it adds the delay to seek timestamps going in, and takes it off `SeekedTo` coming out.
+- it adds the delay to seek timestamps going in, and takes it off `SeekedTo` coming out;
+- it starts a seek's decode one sample early, so an AAC decoder has the overlap it needs
+  before the target, looking back into the previous fragment when the target is a
+  fragment's first sample.
 
 That is what the MP3 reader does with a LAME tag. One more part is needed:
 `symphonia-codec-aac`, like the PCM decoder, ignores `trim_start` and `trim_end`. rodio now
-applies them itself when a decoder returns the whole block.
+applies them itself when a decoder returns the whole block. The trims are in ticks of the
+track's clock, which need not be the sample rate (HE-AAC's is twice the rate decoded), so they
+are converted to frames, to the nearest, before being compared with the decoded block.

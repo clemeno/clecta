@@ -67,7 +67,7 @@ symphonia = { version = "0.5.5", default-features = false }
 # every AAC file's encoder priming was played and counted; it now trims to the edit (PLAN Q72,
 # `an_mp4_plays_what_its_edit_list_says`). MPL-2.0, so the modified source must be offered with
 # a binary, and `vendor/` is it (PLAN §12).
-# `ponytail:` vendored copies to carry a few dozen lines. rodio's can go the day a release
+# `ponytail:` vendored copies to carry a few hundred lines. rodio's can go the day a release
 # fixes Q69 and Q72 (the MP4 and WebM tests and the format probe will say) and decodes Opus or
 # takes a codec registry (the Opus tests will say); the MP4 reader's, the day symphonia reads
 # edit lists. Until then, deleting a vendored crate breaks a test.

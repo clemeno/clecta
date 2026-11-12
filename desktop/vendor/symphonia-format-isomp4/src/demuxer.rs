@@ -75,8 +75,9 @@ impl TrackState {
 // clecta patch: where an edit list says a track's sound is, in the track's own ticks: the frames
 // to skip at the start, which is an AAC encoder's priming, and how many to play, which stops
 // short of the last frame's padding. Only a lone edit into the media at normal rate is read, the
-// shape AAC encoders write; anything else (an empty edit, several, a length past the media's
-// end) plays the media whole, as symphonia always did.
+// shape AAC encoders write; anything else (an empty edit, several) plays the media whole, as
+// symphonia always did. A length past the media's end stops at it: the movie's clock is coarser
+// than the media's, and a muxer rounds the edit's length up to it.
 fn edit_of(trak: &TrakAtom, movie_scale: u32) -> Option<(u32, u64)> {
     use std::convert::TryFrom; // edition 2018: not in the prelude
 
@@ -92,8 +93,9 @@ fn edit_of(trak: &TrakAtom, movie_scale: u32) -> Option<(u32, u64)> {
     let frames = u64::try_from(
         u128::from(edit.segment_duration) * u128::from(media.timescale) / u128::from(movie_scale),
     )
-    .ok()?;
-    (frames > 0 && u64::from(delay).checked_add(frames)? <= media.duration).then_some((delay, frames))
+    .ok()?
+    .min(media.duration.checked_sub(u64::from(delay))?);
+    (frames > 0).then_some((delay, frames))
 }
 
 /// Information regarding the next sample.
@@ -323,18 +325,28 @@ impl IsoMp4Reader {
         }
 
         if let Some(seek_loc) = seek_loc {
-            let seg = &self.segs[seek_loc.seg_idx];
-
-            // Get the sample information.
             // clecta patch: one sample early, so the decoder has the overlap an MDCT codec such
             // as AAC needs before the target; rodio counts its skip from the packet it decodes.
-            let sample_num = seek_loc.sample_num.saturating_sub(1);
-            let data_desc = seg.sample_data(track_num, sample_num, true)?;
+            // At a fragment's first sample that one is in an earlier fragment (PLAN Q72).
+            let (seg_idx, sample_num) = seek_loc
+                .sample_num
+                .checked_sub(1)
+                .and_then(|early| {
+                    self.segs[..=seek_loc.seg_idx]
+                        .iter()
+                        .rposition(|seg| seg.track_sample_range(track_num).contains(&early))
+                        .map(|idx| (idx, early))
+                })
+                .unwrap_or((seek_loc.seg_idx, seek_loc.sample_num));
+            let seg = &self.segs[seg_idx];
+
+            // Get the sample information.
+            let data_desc = seg.sample_data(track_num, sample_num, true)?; // clecta patch
 
             // Update the track's next sample information to point to the seeked sample.
             let track = &mut self.track_states[track_num];
 
-            track.cur_seg = seek_loc.seg_idx;
+            track.cur_seg = seg_idx; // clecta patch
             track.next_sample = sample_num; // clecta patch
             track.next_sample_pos = data_desc.base_pos + data_desc.offset.unwrap();
 

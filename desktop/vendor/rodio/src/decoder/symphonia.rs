@@ -44,7 +44,8 @@ pub(crate) struct SymphoniaDecoder {
     frame: Option<u64>,
     /// The frame the container says the sound ends at.
     end: Option<u64>,
-    /// The samples of `buffer` that are played: all of them, except in the packet `end` cuts.
+    /// The samples of `buffer` that are played: all of them, less the trims its decoder left
+    /// undone (`untrimmed`) and what lies past `end`.
     span_len: usize,
     /// The timestamp of the packet `buffer` was decoded from.
     span_ts: u64,
@@ -206,7 +207,8 @@ impl SymphoniaDecoder {
     // clecta patch: place a freshly decoded buffer of `frames` frames, from the packet at `ts`,
     // on the track, and cut it if it runs past the end the container states. That end is where
     // the sound stops inside the last packet: Opus and AAC code whole frames and pad the last,
-    // and an MP4 or a Matroska file says where the padding starts only by its length, which no
+    // and an MP4 without an edit list, or a Matroska file, says where the padding starts only by
+    // its length, which no
     // symphonia 0.5 decoder of theirs applies (PLAN Q72). A packet wholly past the end is kept,
     // as the header is then what is wrong.
     fn span(&mut self, ts: u64, frames: u64) {
@@ -226,7 +228,10 @@ impl SymphoniaDecoder {
         let rate = u64::from(self.spec.rate);
         self.time_base.map_or(0, |base| {
             let time = base.calc_time(ts.saturating_sub(self.origin));
-            time.seconds * rate + (time.frac * rate as f64).round() as u64
+            // Saturating: a corrupt file's timestamp can be anything.
+            time.seconds
+                .saturating_mul(rate)
+                .saturating_add((time.frac * rate as f64).round() as u64)
         })
     }
 
@@ -367,7 +372,8 @@ impl SymphoniaDecoder {
     // demuxer landed, and make sure that packet starts at or before the target (PLAN Q72). Two
     // ways it did not: right after a reset a Vorbis packet gives no sound — it only primes the
     // overlap — so the sound began one packet past the landing; and a Matroska file without
-    // block durations lands on the first block *after* the target. Either way the seek was up
+    // block durations lands on the first block that starts at or after the target, not the one
+    // holding it. Either way the seek was up
     // to a packet late. So while the sound starts past the target, seek back from it and decode
     // again — once for Vorbis, once or twice for Matroska.
     fn refine_position(&mut self, seek_res: SeekedTo) -> Result<(), source::SeekError> {
@@ -393,10 +399,15 @@ impl SymphoniaDecoder {
             };
             match self.format.seek(SeekMode::Accurate, to) {
                 Ok(to) if to.actual_ts <= self.span_ts => {}
-                // A demuxer that cannot go back keeps the late landing, as upstream did. One that
-                // only seeks forward (Matroska without cues) answers with the packet after the
-                // one in hand, and asking again would land a packet later each time.
-                _ => break,
+                // A demuxer that only seeks forward (Matroska without cues) answers with the
+                // packet after the one in hand, or with the end of the stream after the last, and
+                // asking again would land a packet later each time: keep the late landing, as
+                // upstream did.
+                Ok(_) => break,
+                Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                // Any other failure can leave the demuxer anywhere — Ogg's moves before it
+                // fails — and the buffer in hand no longer says where.
+                Err(e) => return Err(SeekError::Demuxer(Arc::new(e)).into()),
             }
             self.decoder.reset();
             self.frame = None;
@@ -474,7 +485,8 @@ impl SymphoniaDecoder {
 // (PLAN Q72), and without these an AAC file's priming was played.
 // The trims and the block are in ticks of the track's clock, which an MP4 need not run at its
 // sample rate (HE-AAC's runs at twice the rate symphonia decodes at), so they are compared as
-// frames at the decoded rate.
+// frames at the decoded rate, to the nearest: a clock that does not divide the rate stores a
+// block's length rounded to whole ticks. Rounded, the two trims can overrun the block by one.
 fn untrimmed(
     packet: &Packet,
     decoded: &AudioBufferRef,
@@ -483,13 +495,15 @@ fn untrimmed(
     let rate = u128::from(decoded.spec().rate);
     let frames = |ticks: u64| match base {
         Some(base) => {
-            (u128::from(ticks) * rate * u128::from(base.numer) / u128::from(base.denom)) as usize
+            let denom = u128::from(base.denom);
+            ((u128::from(ticks) * rate * u128::from(base.numer) + denom / 2) / denom) as usize
         }
         None => ticks as usize,
     };
-    let start = frames(packet.trim_start().into());
-    let end = frames(packet.trim_end().into());
-    if start + end > 0 && decoded.frames() == frames(packet.block_dur()) {
+    let block = frames(packet.block_dur());
+    let start = frames(packet.trim_start().into()).min(block);
+    let end = frames(packet.trim_end().into()).min(block - start);
+    if start + end > 0 && decoded.frames() == block {
         (start, end)
     } else {
         (0, 0)

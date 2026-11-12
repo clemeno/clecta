@@ -343,7 +343,7 @@ mod tests {
 	fn a_video_first_mp4_is_as_long_as_its_sound() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-video-first-length.mp4");
-		std::fs::write(&path, video_first_mp4(None, 1, None)).expect("writing the fixture");
+		std::fs::write(&path, video_first_mp4(Sound::default())).expect("writing the fixture");
 
 		// Act and assert: one second exactly, the audio's own 8 000 frames over its own 8 kHz,
 		// and every one of those frames is sound — the picture's bytes, handed to the audio
@@ -362,8 +362,14 @@ mod tests {
 	fn an_mp4_plays_what_its_edit_list_says() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-edit-list.mp4");
-		std::fs::write(&path, video_first_mp4(Some((800, 800)), 1, None))
-			.expect("writing the fixture");
+		std::fs::write(
+			&path,
+			video_first_mp4(Sound {
+				edit: Some((800, 800)),
+				..Sound::default()
+			}),
+		)
+		.expect("writing the fixture");
 
 		// Act
 		let first = decoder(&path)
@@ -385,8 +391,14 @@ mod tests {
 	fn a_picture_tracks_edit_does_not_stop_a_seek_near_the_end() {
 		// Arrange: the picture's edit skips its first half second.
 		let path = std::env::temp_dir().join("clecta-picture-edit.mp4");
-		std::fs::write(&path, video_first_mp4(None, 1, Some((500, 500))))
-			.expect("writing the fixture");
+		std::fs::write(
+			&path,
+			video_first_mp4(Sound {
+				picture_edit: Some((500, 500)),
+				..Sound::default()
+			}),
+		)
+		.expect("writing the fixture");
 		let mut source = decoder(&path).expect("opening the fixture");
 
 		// Act
@@ -407,8 +419,15 @@ mod tests {
 	fn an_mp4_edit_list_holds_when_the_clock_is_not_the_rate() {
 		// Arrange: 1 600 ticks is the same 800 frames.
 		let path = std::env::temp_dir().join("clecta-edit-list-ticks.mp4");
-		std::fs::write(&path, video_first_mp4(Some((1_600, 800)), 2, None))
-			.expect("writing the fixture");
+		std::fs::write(
+			&path,
+			video_first_mp4(Sound {
+				edit: Some((1_600, 800)),
+				scale: 2 * MP4_RATE,
+				..Sound::default()
+			}),
+		)
+		.expect("writing the fixture");
 
 		// Act
 		let first = decoder(&path)
@@ -422,6 +441,104 @@ mod tests {
 		let _ = std::fs::remove_file(&path);
 	}
 
+	/// The same on a clock that does not divide the rate, as a 90 kHz video clock does not
+	/// divide 44.1 kHz: a packet of 100 frames is 112.5 ticks of 9 kHz, stored as 112, and
+	/// 112 ticks read back as 99.56 frames. Rounded down to 99, they no longer matched the
+	/// 100 the decoder gave, so the trims were taken as done and the priming played.
+	#[test]
+	fn an_mp4_edit_list_holds_when_the_clock_does_not_divide_the_rate() {
+		// Arrange: the edit skips two packets, 224 ticks.
+		let path = std::env::temp_dir().join("clecta-edit-list-rounded.mp4");
+		std::fs::write(
+			&path,
+			video_first_mp4(Sound {
+				edit: Some((224, 800)),
+				scale: 9_000,
+				frames: 100,
+				..Sound::default()
+			}),
+		)
+		.expect("writing the fixture");
+
+		// Act
+		let first = decoder(&path)
+			.expect("opening the fixture")
+			.next()
+			.map(|sample| (sample * 32_768.0).round() as i32);
+		let _ = std::fs::remove_file(&path);
+
+		// Assert
+		assert_eq!(first, Some(200), "the first sample heard");
+	}
+
+	/// An edit that starts and ends partway through a packet, as nearly every AAC file's does:
+	/// its packets hold 1 024 frames, and Apple's encoders prime with 2 112, two packets and a
+	/// part. The decoder then keeps the end of one packet and the start of another, and in
+	/// stereo every frame it keeps or drops is two samples.
+	#[test]
+	fn an_mp4_edit_can_start_and_end_partway_through_a_stereo_packet() {
+		// Arrange: packets of 100 frames, and an edit from frame 150 to frame 6 550.
+		let path = std::env::temp_dir().join("clecta-edit-list-stereo.mp4");
+		std::fs::write(
+			&path,
+			video_first_mp4(Sound {
+				edit: Some((150, 800)),
+				channels: 2,
+				frames: 100,
+				..Sound::default()
+			}),
+		)
+		.expect("writing the fixture");
+		let frame = |source: &mut dyn Iterator<Item = f32>| -> Vec<i32> {
+			source
+				.take(2)
+				.map(|sample| (sample * 32_768.0).round() as i32)
+				.collect()
+		};
+
+		// Act
+		let first = frame(&mut decoder(&path).expect("opening the fixture"));
+		let mut sought = decoder(&path).expect("opening the fixture");
+		let seek = sought.try_seek(Duration::from_millis(400));
+		let landed = frame(&mut sought);
+
+		// Assert: left is `n` and right is `-n`; 400 ms in is 3 200 frames past frame 150.
+		assert_eq!(first, [150, -150], "the first frame heard");
+		assert!(seek.is_ok(), "the seek failed: {seek:?}");
+		assert_eq!(landed, [3_350, -3_350], "the frame a seek landed on");
+		assert_one_timeline(&path, Duration::from_millis(800));
+		let _ = std::fs::remove_file(&path);
+	}
+
+	/// An edit a few ticks longer than the sound after its priming: the movie's clock counts
+	/// whole milliseconds, or QuickTime's 1/600 s, and a muxer rounds the edit's length up to
+	/// it. The edit was then refused as a whole, and the priming played (PLAN Q72). Here
+	/// 901 ms from frame 800 would end 8 frames past the 8 000 there are.
+	#[test]
+	fn an_mp4_edit_that_runs_past_its_sound_still_skips_the_priming() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-edit-list-long.mp4");
+		std::fs::write(
+			&path,
+			video_first_mp4(Sound {
+				edit: Some((800, 901)),
+				..Sound::default()
+			}),
+		)
+		.expect("writing the fixture");
+
+		// Act
+		let first = decoder(&path)
+			.expect("opening the fixture")
+			.next()
+			.map(|sample| (sample * 32_768.0).round() as i32);
+
+		// Assert: from frame 800 to the last, 900 ms.
+		assert_eq!(first, Some(800), "the first sample heard");
+		assert_one_timeline(&path, Duration::from_millis(900));
+		let _ = std::fs::remove_file(&path);
+	}
+
 	/// The same file, sought. rodio clamped every seek to the wrong length above, and then
 	/// placed it on the video track's clock — so on the real file a seek to 2:30 landed at
 	/// 1:06, and one to 0:30 a frame early. The fixture's samples count up from zero, so the
@@ -430,7 +547,7 @@ mod tests {
 	fn a_seek_in_a_video_first_mp4_lands_where_it_was_aimed() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-video-first-seek.mp4");
-		std::fs::write(&path, video_first_mp4(None, 1, None)).expect("writing the fixture");
+		std::fs::write(&path, video_first_mp4(Sound::default())).expect("writing the fixture");
 		let mut source = decoder(&path).expect("opening the fixture");
 
 		// Act
@@ -444,6 +561,31 @@ mod tests {
 		// Assert: half a second in is frame 4 000, whose sample is 4 000.
 		assert!(sought.is_ok(), "the seek failed: {sought:?}");
 		assert_eq!(landed, Some(4_000), "the seek landed somewhere else");
+	}
+
+	/// A seek to the first sample of a fragment. Q72 starts a seek's decode one sample early,
+	/// which an AAC decoder needs, and that sample is the last of the fragment before; read
+	/// from the target's own fragment, its number underflowed — a panic in a debug build, a
+	/// failed seek in a release one.
+	#[test]
+	fn a_seek_to_the_start_of_an_mp4_fragment_lands_there() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-fragmented.mp4");
+		std::fs::write(&path, fragmented_mp4()).expect("writing the fixture");
+		let mut source = decoder(&path).expect("opening the fixture");
+
+		// Act: the second fragment starts at frame 4 000, half a second in.
+		let sought = source.try_seek(Duration::from_millis(500));
+		let landed = source
+			.next()
+			.map(|sample| (sample * 32_768.0).round() as i32);
+		let rest = source.count();
+		let _ = std::fs::remove_file(&path);
+
+		// Assert
+		assert!(sought.is_ok(), "the seek failed: {sought:?}");
+		assert_eq!(landed, Some(4_000), "the seek landed somewhere else");
+		assert_eq!(rest, 3_999, "what the seek left after that sample");
 	}
 
 	/// A WebM as video sites serve it: the picture first, the sound in Opus. symphonia 0.5
@@ -724,12 +866,12 @@ mod tests {
 
 	/// A probe, for files the suite cannot ship: what the app learns about each file named in
 	/// `CLECTA_PROBE` (a path list, `;`-separated on Windows and `:`-separated elsewhere) —
-	/// the length from the header and from a full decode, where two seeks land, and the
+	/// the length from the header and from a full decode, where four seeks land, and the
 	/// scan's answers — so two files that should agree can be read side by side. It found Q69,
 	/// an MP4 whose header said 66 s and whose decode said 228, and Q72's padding and late
 	/// seeks. It fails when a file disagrees with itself the way `assert_one_timeline` checks
 	/// a fixture, within `TOLERANCE`, after printing every file; `scripts/probe-formats.sh`
-	/// runs it on one generated file per format.
+	/// runs it on a tone per format, a few shaped the ways that broke, and any files given.
 	///
 	/// `CLECTA_PROBE="a.mp3;a.mp4" cargo test probe_files -- --ignored --nocapture`
 	#[test]
@@ -744,6 +886,21 @@ mod tests {
 		let paths = std::env::var_os("CLECTA_PROBE").expect("CLECTA_PROBE names no files");
 		let mut wrong = Vec::new();
 		for path in std::env::split_paths(&paths) {
+			// A file still being probed after five minutes is stuck — Q72's step-back loop once
+			// spun forever — and fails the probe rather than hanging it. `_probed` drops at the
+			// end of the file, and the watchdog then ends quietly.
+			let (_probed, watched) = std::sync::mpsc::channel::<()>();
+			let name = path.display().to_string();
+			std::thread::spawn(move || {
+				let five_minutes = Duration::from_secs(300);
+				if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+					watched.recv_timeout(five_minutes)
+				{
+					eprintln!("{name}: still probing after five minutes, so stuck");
+					std::process::exit(1);
+				}
+			});
+
 			let source = decoder(&path).expect("opening the file");
 			let (rate, channels) = (source.sample_rate().get(), source.channels().get());
 			let seconds = |samples: usize| samples as f64 / f64::from(rate * u32::from(channels));
@@ -780,7 +937,16 @@ mod tests {
 			let mut reused = decoder(&path).expect("opening the file");
 			let _ = reused.try_seek(Duration::from_secs_f64(decoded));
 			let _ = reused.try_seek(quarter);
-			if !fresh.take(4_800).eq(reused.take(4_800)) {
+			// 4 800 samples run past the packet a seek lands in, at any rate a file has. Equal
+			// to within -60 dB, not exactly: symphonia's AAC decoder keeps its noise generator
+			// across a reset, so the packet a seek decodes first comes out a hair different
+			// after another seek (1.7e-5 on a tone). A swap or a misplaced decode is off by the
+			// sound itself.
+			let fresh: Vec<f32> = fresh.take(4_800).collect();
+			let reused: Vec<f32> = reused.take(4_800).collect();
+			if fresh.len() != reused.len()
+				|| fresh.iter().zip(&reused).any(|(a, b)| (a - b).abs() > 1e-3)
+			{
 				wrong.push(format!("{}: a seek after one to the end", path.display()));
 			}
 
@@ -793,38 +959,55 @@ mod tests {
 		assert!(wrong.is_empty(), "disagreements:\n{}", wrong.join("\n"));
 	}
 
-	/// One second of MP4 with the video first: a 1 kHz track of 25 opaque frames, then 8 kHz
-	/// mono PCM whose sample `n` is `n`. Built by hand for the same reason `wav` is — it is
-	/// eleven kinds of box, each a header and a few numbers. `avc1` with no body is enough of
-	/// a picture: symphonia decodes no video, so the track only has to exist and be timed.
-	/// `edit`, when given, is the sound's edit list: one edit playing the media from the tick
-	/// it names for the milliseconds it names. The sound's clock ticks `ticks` times a frame.
-	/// `picture_edit` is the same for the picture's track, whose clock is in milliseconds.
-	fn video_first_mp4(
+	/// The rate of every MP4 fixture's sound.
+	const MP4_RATE: u32 = 8_000;
+
+	/// What `video_first_mp4`'s sound is. By default: one mono frame a packet, a clock that
+	/// ticks once a frame, and no edits.
+	#[derive(Clone, Copy)]
+	struct Sound {
+		/// The sound's edit list: one edit playing the media from the tick it names for the
+		/// milliseconds it names.
 		edit: Option<(u32, u32)>,
-		ticks: u32,
+		/// The same for the picture's track, whose clock is in milliseconds.
 		picture_edit: Option<(u32, u32)>,
-	) -> Vec<u8> {
-		const RATE: u32 = 8_000;
+		/// The sound clock's ticks a second, which an MP4 need not make its rate. A packet's
+		/// length is rounded down to whole ticks, as a muxer must when the two do not divide.
+		scale: u32,
+		channels: u16,
+		/// Frames a packet: AAC's hold 1 024.
+		frames: u32,
+	}
+
+	impl Default for Sound {
+		fn default() -> Self {
+			Sound {
+				edit: None,
+				picture_edit: None,
+				scale: MP4_RATE,
+				channels: 1,
+				frames: 1,
+			}
+		}
+	}
+
+	/// One second of MP4 with the video first: a 1 kHz track of 25 opaque frames, then 8 kHz
+	/// PCM whose frame `n` is `n`, and `-n` on the right when there is a right. Built by hand
+	/// for the same reason `wav` is — it is eleven kinds of box, each a header and a few
+	/// numbers. `avc1` with no body is enough of a picture: symphonia decodes no video, so the
+	/// track only has to exist and be timed.
+	fn video_first_mp4(sound: Sound) -> Vec<u8> {
 		const VIDEO_SCALE: u32 = 1_000;
 		const VIDEO_FRAMES: u32 = 25; // 40 ticks each: one second at 1 kHz
 		const VIDEO_FRAME_BYTES: u32 = 4;
 
 		let video_data = vec![0x7f; (VIDEO_FRAMES * VIDEO_FRAME_BYTES) as usize];
-		let audio_data: Vec<u8> = (0..RATE as i16).flat_map(i16::to_le_bytes).collect();
+		let audio_data: Vec<u8> = (0..MP4_RATE as i16)
+			.flat_map(|n| [n, -n].into_iter().take(sound.channels.into()))
+			.flat_map(i16::to_le_bytes)
+			.collect();
 
-		let pcm_entry = mp4_atom(
-			b"sowt",
-			&[
-				&[0; 6],                     // reserved
-				&1u16.to_be_bytes(),         // data reference index
-				&[0; 8],                     // version 0, revision, vendor
-				&1u16.to_be_bytes(),         // one channel
-				&16u16.to_be_bytes(),        // bits per sample
-				&[0; 4],                     // compression id, packet size
-				&(RATE << 16).to_be_bytes(), // 16.16 fixed point
-			],
-		);
+		let pcm_entry = lpcm_entry(sound.channels, sound.frames);
 		let tracks = |video_offset: u32, audio_offset: u32| {
 			[
 				mp4_track(
@@ -836,35 +1019,24 @@ mod tests {
 					40,
 					VIDEO_FRAME_BYTES,
 					video_offset,
-					picture_edit,
+					sound.picture_edit,
 				),
 				mp4_track(
 					2,
 					b"soun",
-					RATE * ticks,
+					sound.scale,
 					pcm_entry.clone(),
-					RATE,
-					ticks,
-					2,
+					MP4_RATE / sound.frames,
+					sound.frames * sound.scale / MP4_RATE,
+					sound.frames * u32::from(sound.channels) * 2,
 					audio_offset,
-					edit,
+					sound.edit,
 				),
 			]
 			.concat()
 		};
 		let ftyp = mp4_atom(b"ftyp", &[b"isom", &512u32.to_be_bytes(), b"isom"]);
-		let mvhd = mp4_atom(
-			b"mvhd",
-			&[
-				&[0; 12], // version 0, flags, creation and modification times
-				&VIDEO_SCALE.to_be_bytes(),
-				&VIDEO_SCALE.to_be_bytes(),    // one second
-				&0x0001_0000u32.to_be_bytes(), // rate 1.0
-				&0x0100u16.to_be_bytes(),      // volume 1.0
-				&[0; 70],                      // reserved, matrix, pre-defined
-				&3u32.to_be_bytes(),           // next track id
-			],
-		);
+		let mvhd = mp4_movie_header(VIDEO_SCALE);
 
 		// The chunk offsets are absolute, and the moov box before the data is the same size
 		// whatever they are, so measure it once with zeros and build it again for real.
@@ -878,6 +1050,109 @@ mod tests {
 		);
 
 		[ftyp, moov, mp4_atom(b"mdat", &[&video_data, &audio_data])].concat()
+	}
+
+	/// One second of the same 8 kHz mono PCM, fragmented, as DASH, OBS and stream captures
+	/// write MP4: the moov box lists no samples, and two fragments follow, each a moof box
+	/// listing 4 000 one-frame samples and the mdat box holding them.
+	fn fragmented_mp4() -> Vec<u8> {
+		const FRAGMENT: u32 = MP4_RATE / 2;
+		let full = [0; 4]; // a full box's version 0 and no flags
+		let one = 1u32.to_be_bytes();
+
+		// The fragments' samples take their length and size from here: one tick, two bytes.
+		let trex = mp4_atom(
+			b"trex",
+			&[&full, &one, &one, &one, &2u32.to_be_bytes(), &[0; 4]],
+		);
+		let moov = mp4_atom(
+			b"moov",
+			&[
+				&mp4_movie_header(0),
+				&mp4_track(1, b"soun", MP4_RATE, lpcm_entry(1, 1), 0, 1, 2, 0, None),
+				&mp4_atom(b"mvex", &[&trex]),
+			],
+		);
+		let fragments = (0..2u32).flat_map(|index| {
+			// The run's data starts this far from the moof box's start: just past it and the
+			// mdat header. The moof box is the same size whatever the offset is.
+			let moof = |data_offset: u32| {
+				mp4_atom(
+					b"moof",
+					&[
+						&mp4_atom(b"mfhd", &[&full, &(index + 1).to_be_bytes()]),
+						&mp4_atom(
+							b"traf",
+							&[
+								&mp4_atom(b"tfhd", &[&full, &one]),
+								&mp4_atom(
+									b"trun",
+									&[
+										&[0, 0, 0, 1], // a data offset follows the count
+										&FRAGMENT.to_be_bytes(),
+										&data_offset.to_be_bytes(),
+									],
+								),
+							],
+						),
+					],
+				)
+			};
+			let moof = moof(moof(0).len() as u32 + 8);
+			let samples: Vec<u8> = (index * FRAGMENT..(index + 1) * FRAGMENT)
+				.flat_map(|n| (n as i16).to_le_bytes())
+				.collect();
+			[moof, mp4_atom(b"mdat", &[&samples])].concat()
+		});
+
+		[
+			mp4_atom(b"ftyp", &[b"isom", &512u32.to_be_bytes(), b"isom"]),
+			moov,
+		]
+		.into_iter()
+		.flatten()
+		.chain(fragments)
+		.collect()
+	}
+
+	/// The movie's header: its clock in milliseconds, and the length given.
+	fn mp4_movie_header(duration: u32) -> Vec<u8> {
+		mp4_atom(
+			b"mvhd",
+			&[
+				&[0; 12], // version 0, flags, creation and modification times
+				&1_000u32.to_be_bytes(),
+				&duration.to_be_bytes(),
+				&0x0001_0000u32.to_be_bytes(), // rate 1.0
+				&0x0100u16.to_be_bytes(),      // volume 1.0
+				&[0; 70],                      // reserved, matrix, pre-defined
+				&3u32.to_be_bytes(),           // next track id
+			],
+		)
+	}
+
+	/// A sound's sample entry: version 2 of QuickTime's, the one that says how many frames a
+	/// packet holds and how many channels a frame has, as 16-bit little-endian PCM.
+	fn lpcm_entry(channels: u16, frames: u32) -> Vec<u8> {
+		mp4_atom(
+			b"lpcm",
+			&[
+				&[0; 6],                          // reserved
+				&1u16.to_be_bytes(),              // data reference index
+				&2u16.to_be_bytes(),              // version 2
+				&[0; 6],                          // revision, vendor
+				&[0, 3, 0, 16, 0xff, 0xfe, 0, 0], // version 0's fields, at their version 2 values
+				&0x0001_0000u32.to_be_bytes(),    // and its rate, 1.0
+				&72u32.to_be_bytes(),             // the size of the entry's fixed fields
+				&f64::from(MP4_RATE).to_be_bytes(),
+				&u32::from(channels).to_be_bytes(),
+				&0x7f00_0000u32.to_be_bytes(),            // reserved
+				&16u32.to_be_bytes(),                     // bits a sample
+				&4u32.to_be_bytes(),                      // signed integers, little-endian
+				&(u32::from(channels) * 2).to_be_bytes(), // bytes a frame
+				&frames.to_be_bytes(),
+			],
+		)
 	}
 
 	/// One track whose samples all sit in a single chunk at `offset`, all the same size and
@@ -915,17 +1190,23 @@ mod tests {
 			],
 		);
 		let hdlr = mp4_atom(b"hdlr", &[&full, &[0; 4], handler, &[0; 13]]);
+		// A table of one row, or of none for a track of no samples, as a fragmented file's
+		// is: its fragments list them.
+		let table = |row: &[&[u8]]| match count {
+			0 => [full, [0; 4]].concat(),
+			_ => [&full[..], &one, &row.concat()].concat(),
+		};
 		let stbl = mp4_atom(
 			b"stbl",
 			&[
 				&mp4_atom(b"stsd", &[&full, &one, &entry]),
 				&mp4_atom(
 					b"stts",
-					&[&full, &one, &count.to_be_bytes(), &delta.to_be_bytes()],
+					&[&table(&[&count.to_be_bytes(), &delta.to_be_bytes()])],
 				),
-				&mp4_atom(b"stsc", &[&full, &one, &one, &count.to_be_bytes(), &one]),
+				&mp4_atom(b"stsc", &[&table(&[&one, &count.to_be_bytes(), &one])]),
 				&mp4_atom(b"stsz", &[&full, &size.to_be_bytes(), &count.to_be_bytes()]),
-				&mp4_atom(b"stco", &[&full, &one, &offset.to_be_bytes()]),
+				&mp4_atom(b"stco", &[&table(&[&offset.to_be_bytes()])]),
 			],
 		);
 		let minf = mp4_atom(b"minf", &[&stbl]);
