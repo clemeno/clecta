@@ -199,6 +199,7 @@ impl Engine {
 /// (PLAN §7). Two call sites getting that subtly different is a bug that only shows up as
 /// a track that will not rewind.
 fn decoder(path: &Path) -> Result<Decoder<File>> {
+	crate::opus::install();
 	let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
 	let byte_len = file
 		.metadata()
@@ -382,6 +383,156 @@ mod tests {
 		// Assert: half a second in is frame 4 000, whose sample is 4 000.
 		assert!(sought.is_ok(), "the seek failed: {sought:?}");
 		assert_eq!(landed, Some(4_000), "the seek landed somewhere else");
+	}
+
+	/// A WebM as video sites serve it: the picture first, the sound in Opus. symphonia 0.5
+	/// demuxes WebM but has no Opus decoder, so the row was offered and every load failed
+	/// (PLAN Q71). One second of Opus is fifty 20 ms packets, and all of it is decoded —
+	/// the encoder's 312-sample pre-skip included, so the decode, the container's length and
+	/// every seek count from the same zero.
+	#[test]
+	fn a_video_first_opus_webm_is_as_long_as_its_sound() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-video-first-length.webm");
+		std::fs::write(&path, video_first_webm()).expect("writing the fixture");
+
+		// Act
+		let measured = duration(&path);
+		let samples = decoder(&path).expect("opening the fixture").count();
+		let _ = std::fs::remove_file(&path);
+
+		// Assert: the container's one second, and exactly one second of 48 kHz frames.
+		assert_eq!(measured, Some(Duration::from_secs(1)), "the length");
+		assert_eq!(samples, 50 * 960, "the decoded sound");
+	}
+
+	/// The same file, sought: half a second in, the remaining 25 packets decode to exactly
+	/// the half second the length says is left.
+	#[test]
+	fn a_seek_in_an_opus_webm_lands_where_it_was_aimed() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-video-first-seek.webm");
+		std::fs::write(&path, video_first_webm()).expect("writing the fixture");
+		let mut source = decoder(&path).expect("opening the fixture");
+
+		// Act
+		let sought = source.try_seek(Duration::from_millis(500));
+		let remaining = source.count();
+		let _ = std::fs::remove_file(&path);
+
+		// Assert
+		assert!(sought.is_ok(), "the seek failed: {sought:?}");
+		assert_eq!(remaining, 25 * 960, "what the seek left");
+	}
+
+	/// One second of WebM with the video first: a VP9 track of opaque frames, then mono Opus
+	/// made of the three-byte packet every Opus decoder reads as 20 ms of silence. Built by
+	/// hand for the same reason `video_first_mp4` is. Each element's size is written in the
+	/// eight-byte form, which EBML allows for any size and which keeps the arithmetic out.
+	fn video_first_webm() -> Vec<u8> {
+		const SILENCE: [u8; 3] = [0xf8, 0xff, 0xfe]; // CELT, fullband, 20 ms, one frame
+		const PRE_SKIP: u16 = 312;
+
+		let uint = |n: u64| n.to_be_bytes();
+		let opus_head = [
+			&b"OpusHead"[..],
+			&[1, 1],                  // version 1, one channel
+			&PRE_SKIP.to_le_bytes(),  // samples to drop at the start, at 48 kHz
+			&48_000u32.to_le_bytes(), // the input's rate, for information only
+			&[0, 0, 0],               // no output gain, channel mapping family 0
+		]
+		.concat();
+
+		let ebml = webm_element(
+			&[0x1a, 0x45, 0xdf, 0xa3],
+			&[&webm_element(&[0x42, 0x82], &[b"webm"])],
+		);
+		let info = webm_element(
+			&[0x15, 0x49, 0xa9, 0x66],
+			&[
+				&webm_element(&[0x2a, 0xd7, 0xb1], &[&uint(1_000_000)]), // timestamps in ms
+				&webm_element(&[0x44, 0x89], &[&1_000f64.to_be_bytes()]), // one second
+			],
+		);
+		let track = |number: u64, kind: u64, codec: &[u8], extra: &[&[u8]]| {
+			let head = [
+				webm_element(&[0xd7], &[&uint(number)]),
+				webm_element(&[0x73, 0xc5], &[&uint(number)]),
+				webm_element(&[0x83], &[&uint(kind)]),
+				webm_element(&[0x86], &[codec]),
+			]
+			.concat();
+			webm_element(&[0xae], &[&head, &extra.concat()])
+		};
+		let tracks = webm_element(
+			&[0x16, 0x54, 0xae, 0x6b],
+			&[
+				&track(1, 1, b"V_VP9", &[&webm_element(&[0xe0], &[])]),
+				&track(
+					2,
+					2,
+					b"A_OPUS",
+					&[
+						&webm_element(&[0x63, 0xa2], &[&opus_head]),
+						&webm_element(
+							&[0xe1],
+							&[
+								&webm_element(&[0xb5], &[&48_000f64.to_be_bytes()]),
+								&webm_element(&[0x9f], &[&uint(1)]),
+							],
+						),
+					],
+				),
+			],
+		);
+		let cues = |cluster: u64| {
+			let position = webm_element(
+				&[0xb7],
+				&[
+					&webm_element(&[0xf7], &[&uint(2)]),
+					&webm_element(&[0xf1], &[&uint(cluster)]),
+				],
+			);
+			webm_element(
+				&[0x1c, 0x53, 0xbb, 0x6b],
+				&[&webm_element(
+					&[0xbb],
+					&[&webm_element(&[0xb3], &[&uint(0)]), &position],
+				)],
+			)
+		};
+		let block = |track: u8, at: i16, frame: &[u8]| {
+			webm_element(
+				&[0xa3],
+				&[&[0x80 | track], &at.to_be_bytes(), &[0x80], frame],
+			)
+		};
+		let mut cluster = vec![webm_element(&[0xe7], &[&uint(0)])];
+		for at in (0..1_000).step_by(20) {
+			if at % 40 == 0 {
+				cluster.push(block(1, at, &[0; 4]));
+			}
+			cluster.push(block(2, at, &SILENCE));
+		}
+		let cluster = webm_element(&[0x1f, 0x43, 0xb6, 0x75], &[&cluster.concat()]);
+
+		// The cue points at the cluster from the start of the segment's body, and the cues
+		// before the cluster are the same size whatever that number is.
+		let before = info.len() + tracks.len() + cues(0).len();
+		let segment = webm_element(
+			&[0x18, 0x53, 0x80, 0x67],
+			&[&info, &tracks, &cues(before as u64), &cluster],
+		);
+
+		[ebml, segment].concat()
+	}
+
+	/// An EBML element: its ID as written, an eight-byte size, then its body.
+	fn webm_element(id: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+		let body = parts.concat();
+		let mut size = (body.len() as u64).to_be_bytes();
+		size[0] = 0x01; // the width marker: seven bytes of size follow
+		[id, &size, &body].concat()
 	}
 
 	/// Not a check but a probe, for files the suite cannot ship: what the app learns about

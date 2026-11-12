@@ -20,6 +20,11 @@ use crate::{
     source, Source,
 };
 
+// clecta patch: decoders beyond symphonia's own, registered by the application before the
+// first file is opened. Unset, symphonia's defaults are used, as upstream does.
+pub static CODECS: std::sync::OnceLock<symphonia::core::codecs::CodecRegistry> =
+    std::sync::OnceLock::new();
+
 pub(crate) struct SymphoniaDecoder {
     decoder: Box<dyn Decoder>,
     current_span_offset: usize,
@@ -103,7 +108,10 @@ impl SymphoniaDecoder {
             None => return Ok(None),
         };
 
-        let mut decoder = symphonia::default::get_codecs()
+        // clecta patch: the application's registry when it has given one, as `CODECS` says.
+        let mut decoder = CODECS
+            .get()
+            .unwrap_or_else(symphonia::default::get_codecs)
             .make(&track.codec_params, &DecoderOptions::default())?;
         let total_duration: Option<Duration> = track
             .codec_params

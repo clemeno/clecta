@@ -15,6 +15,7 @@ mod focus; // which list ⌘A and Escape are talking to
 mod fsio;
 mod known; // what this run has learned about files, and the door answers arrive through
 mod mixer;
+mod opus; // the Opus decoder symphonia 0.5 lacks, for WebM
 mod paths;
 #[cfg(test)]
 mod plan; // the facts PLAN.md states that the build can check
