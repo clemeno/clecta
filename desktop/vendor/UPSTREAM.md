@@ -3,8 +3,9 @@
 Not posted. Text for issues and a pull request on `RustAudio/rodio`, for the maintainer
 to post by hand. When a rodio release carries these fixes, delete this file together with
 `vendor/rodio` and the `[patch.crates-io]` table in `Cargo.toml` (PLAN Q69, Q72) — once
-Opus is decodable without the `CODECS` hook too (PLAN Q71). The second issue, at the end,
-has no pull request drafted yet.
+Opus is decodable without the `CODECS` hook too (PLAN Q71). Issues 2 and 3, at the end,
+have no pull request drafted yet, and issue 3 is for symphonia, whose MP4 reader is vendored
+too: delete `vendor/symphonia-format-isomp4` once a symphonia release carries that fix.
 
 ---
 
@@ -172,3 +173,27 @@ Each is a different cause.
    the first block with `timestamp + duration >= ts`. With no duration, that is the first
    block *after* the target, and `required_ts.saturating_sub(actual_ts)` is then 0. The
    seek-earlier step in (2) covers this too.
+
+---
+
+## Issue 3, on `pdeljanov/Symphonia`
+
+**Title:** isomp4: the edit list is parsed but never applied, so AAC encoder priming is played
+
+**Body:**
+
+With symphonia 0.5.5, an `.m4a` that ffmpeg makes from a 3 s tone has one edit: media time
+1 024 (the AAC encoder's priming), lasting 3 s. `symphonia-format-isomp4` reads it into
+`EdtsAtom` and then never uses it. So `n_frames` is the whole media, 3.0213 s; the priming
+is decoded and played; and with `enable_gapless` nothing is trimmed.
+
+The fix carried in this repository reads a single edit at normal rate into the media as a
+delay and a length:
+
+- it sets them as the track's `delay` and `n_frames`;
+- it calls `formats::util::trim_packet` on each packet;
+- it adds the delay to seek timestamps going in, and takes it off `SeekedTo` coming out.
+
+That is what the MP3 reader does with a LAME tag. One more part is needed:
+`symphonia-codec-aac`, like the PCM decoder, ignores `trim_start` and `trim_end`. rodio now
+applies them itself when a decoder returns the whole block.

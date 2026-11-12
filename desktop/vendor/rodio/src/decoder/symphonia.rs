@@ -5,7 +5,7 @@ use symphonia::{
         audio::{AudioBufferRef, SampleBuffer, SignalSpec},
         codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL},
         errors::Error,
-        formats::{FormatOptions, FormatReader, SeekMode, SeekTo, SeekedTo},
+        formats::{FormatOptions, FormatReader, Packet, SeekMode, SeekTo, SeekedTo}, // clecta patch: Packet
         io::MediaSourceStream,
         meta::MetadataOptions,
         probe::Hint,
@@ -37,8 +37,8 @@ pub(crate) struct SymphoniaDecoder {
     seek_mode: SeekMode,
     // clecta patch: where the decode is on the track's clock, for `span` and `refine_position`.
     time_base: Option<units::TimeBase>,
-    /// The track's first timestamp, which `n_frames` counts from.
-    start_ts: u64,
+    /// The track's first timestamp: where its timeline, its length and its seeks start.
+    origin: u64,
     /// The frame the next buffer starts at; `None` at the start and after a seek, until a
     /// packet's timestamp says.
     frame: Option<u64>,
@@ -128,22 +128,17 @@ impl SymphoniaDecoder {
             .get()
             .unwrap_or_else(symphonia::default::get_codecs)
             .make(&track.codec_params, &DecoderOptions::default())?;
-        let total_duration: Option<Duration> = track
-            .codec_params
-            .time_base
-            // clecta patch: the decoded track's frame count, not the default track's. In an
-            // MP4 the default track is the video, counted in its own time base.
-            .zip(track.codec_params.n_frames)
-            .map(|(base, spans)| base.calc_time(spans).into())
-            .filter(|d: &Duration| !d.is_zero());
-        // clecta patch: kept for `span`, before `track`'s borrow of the format ends.
-        let (time_base, start_ts) = (track.codec_params.time_base, track.codec_params.start_ts);
+        // clecta patch: the decoded track's clock and frame count, not the default track's (in an
+        // MP4 the default track is the video, counted in its own time base); kept for the
+        // length and for `span`, before `track`'s borrow of the format ends.
+        let params = &track.codec_params;
+        let (time_base, start_ts, n_frames) = (params.time_base, params.start_ts, params.n_frames);
 
-        // clecta patch: and the packet's timestamp with it, for `span`.
-        let (decoded, ts) = loop {
+        // clecta patch: and the packet's timestamp and undone trims with it, for `span`.
+        let (decoded, ts, trim) = loop {
             let current_span = match probed.format.next_packet() {
                 Ok(packet) => packet,
-                Err(Error::IoError(_)) => break (decoder.last_decoded(), 0), // clecta patch
+                Err(Error::IoError(_)) => break (decoder.last_decoded(), 0, (0, 0)), // clecta patch
                 Err(e) => return Err(e),
             };
 
@@ -153,7 +148,11 @@ impl SymphoniaDecoder {
             }
 
             match decoder.decode(&current_span) {
-                Ok(decoded) => break (decoded, current_span.ts()), // clecta patch
+                Ok(decoded) => {
+                    // clecta patch
+                    let trim = untrimmed(&current_span, decoded.frames());
+                    break (decoded, current_span.ts(), trim);
+                }
                 Err(e) => match e {
                     Error::DecodeError(_) => {
                         // Decode errors are intentionally ignored with no retry limit.
@@ -166,9 +165,18 @@ impl SymphoniaDecoder {
             }
         };
         let spec = decoded.spec().to_owned();
+        // clecta patch: the track's timeline starts at its first packet. Most start at zero, but
+        // one cut from a longer stream can keep its timestamps, and then a Matroska length,
+        // counted from zero, ran long by the gap, and an Ogg one, counted from the stream's
+        // `start_ts`, did not (PLAN Q72). The length is from there to where the container ends.
+        let origin = ts.max(start_ts);
+        let total_duration: Option<Duration> = time_base
+            .zip(n_frames)
+            .map(|(base, frames)| base.calc_time((start_ts + frames).saturating_sub(origin)).into())
+            .filter(|d: &Duration| !d.is_zero());
         // clecta patch: the end in frames, and the first buffer placed — and cut, in a file
         // shorter than one packet — exactly as `fill` places every later one.
-        let frames = decoded.frames() as u64;
+        let frames = decoded.frames();
         let end = total_duration.map(|d| (d.as_secs_f64() * f64::from(spec.rate)).round() as u64);
         let buffer = SymphoniaDecoder::get_buffer(decoded, &spec);
         let mut this = SymphoniaDecoder { // clecta patch: placed by `span`, below
@@ -181,13 +189,14 @@ impl SymphoniaDecoder {
             spec,
             seek_mode,
             time_base,
-            start_ts,
+            origin,
             frame: None,
             end,
             span_len: 0,
             span_ts: 0,
         };
-        this.span(ts, frames);
+        let kept = this.trim(frames, trim);
+        this.span(ts, kept);
         Ok(Some(this))
     }
 
@@ -209,11 +218,11 @@ impl SymphoniaDecoder {
     }
 
     // clecta patch: a timestamp, on the track's clock, as a frame at the decoded rate, counted
-    // from the track's start as `n_frames` is: an Ogg stream cut from a longer one starts late.
+    // from the track's first packet as its length is.
     fn frame_at(&self, ts: u64) -> u64 {
         let rate = u64::from(self.spec.rate);
         self.time_base.map_or(0, |base| {
-            let time = base.calc_time(ts.saturating_sub(self.start_ts));
+            let time = base.calc_time(ts.saturating_sub(self.origin));
             time.seconds * rate + (time.frac * rate as f64).round() as u64
         })
     }
@@ -279,15 +288,23 @@ impl Source for SymphoniaDecoder {
         let active_channel =
             self.current_span_offset.min(self.span_len) % self.channels().get() as usize;
 
-        let seek_res = match self.format.seek(
-            self.seek_mode,
-            SeekTo::Time {
-                time: target.into(),
-                // clecta patch: seek on the decoded track. `None` means the default track,
-                // whose timestamps `refine_position` would then read in the wrong time base.
-                track_id: Some(self.track_id),
+        // clecta patch: seek on the decoded track. `None` means the default track, whose
+        // timestamps `refine_position` would then read in the wrong time base. And seek from
+        // the track's first packet: `SeekTo::Time` counts from zero, so a track whose
+        // timestamps start late refused every seek before its start and landed later ones
+        // early by the gap (PLAN Q72).
+        let to = match self.time_base {
+            Some(base) => SeekTo::TimeStamp {
+                ts: self.origin + base.calc_timestamp(target.into()),
+                track_id: self.track_id,
             },
-        ) {
+            None => SeekTo::Time {
+                time: target.into(),
+                track_id: Some(self.track_id), // clecta patch
+            },
+        };
+        // clecta patch: `to`, above.
+        let seek_res = match self.format.seek(self.seek_mode, to) {
             Err(Error::SeekError(symphonia::core::errors::SeekErrorKind::ForwardOnly)) => {
                 return Err(source::SeekError::SymphoniaDecoder(
                     SeekError::RandomAccessNotSupported,
@@ -348,11 +365,11 @@ impl SymphoniaDecoder {
     // ways it did not: right after a reset a Vorbis packet gives no sound — it only primes the
     // overlap — so the sound began one packet past the landing; and a Matroska file without
     // block durations lands on the first block *after* the target. Either way the seek was up
-    // to a packet late. So while the sound starts past the target, seek back from it by 1, 2,
-    // 4… ticks — one packet for Vorbis, a few tries for Matroska — and decode again.
+    // to a packet late. So while the sound starts past the target, seek back from it and decode
+    // again — once for Vorbis, once or twice for Matroska.
     fn refine_position(&mut self, seek_res: SeekedTo) -> Result<(), source::SeekError> {
         let mut ask = seek_res.actual_ts.min(seek_res.required_ts); // clecta patch: as above
-        let mut step = 1;
+        let mut step = 0;
         loop {
             if self.fill().is_none() {
                 return Ok(());
@@ -360,8 +377,12 @@ impl SymphoniaDecoder {
             if self.span_ts <= seek_res.required_ts || ask == 0 {
                 break;
             }
+            // Back first by as far as the sound started late, then by twice as far each try.
+            step = match step {
+                0 => self.span_ts - seek_res.required_ts,
+                _ => step * 2,
+            };
             ask = ask.saturating_sub(step);
-            step *= 2;
             let to = SeekTo::TimeStamp {
                 ts: ask,
                 track_id: self.track_id,
@@ -392,7 +413,7 @@ impl SymphoniaDecoder {
     // clecta patch: `next`'s decode, on its own so `refine_position` can decode a packet
     // without taking a sample from it. `None` at the end of the stream.
     fn fill(&mut self) -> Option<()> {
-        let (decoded, ts) = loop {
+        let (decoded, ts, trim) = loop {
             let packet = self.format.next_packet().ok()?;
             // clecta patch: skip other tracks' packets, as `init` does.
             if packet.track_id() != self.track_id {
@@ -414,17 +435,45 @@ impl SymphoniaDecoder {
             // which case the iterator would otherwise end with `None`.
             // Note: checking `decoded.frames()` is more reliable than `packet.dur()`, which
             // can resturn non-zero durations for packets without audio frames.
-            if decoded.frames() > 0 {
-                break (decoded, packet.ts());
+            // clecta patch: and frames left once the packet's trims are applied.
+            let trim = untrimmed(&packet, decoded.frames());
+            if decoded.frames() > trim.0 + trim.1 {
+                break (decoded, packet.ts(), trim);
             }
         };
 
         decoded.spec().clone_into(&mut self.spec);
-        let frames = decoded.frames() as u64;
+        let frames = decoded.frames();
         self.buffer = SymphoniaDecoder::get_buffer(decoded, &self.spec);
         self.current_span_offset = 0;
-        self.span(ts, frames);
+        let kept = self.trim(frames, trim);
+        self.span(ts, kept);
         Some(())
+    }
+
+    // clecta patch: drop the frames a packet's trims cover, which its decoder left in (see
+    // `untrimmed`), and say how many are kept.
+    fn trim(&mut self, frames: usize, (start, end): (usize, usize)) -> u64 {
+        if start > 0 {
+            let channels = self.spec.channels.count();
+            self.buffer
+                .samples_mut()
+                .copy_within(start * channels..(frames - end) * channels, 0);
+        }
+        (frames - start - end) as u64
+    }
+}
+
+// clecta patch: the trims a decoder left undone, at the start and the end. symphonia's MP3 and
+// Vorbis decoders, and `opus.rs`, apply a packet's trims themselves; its AAC and PCM ones return
+// the whole block, which is how to tell. The MP4 reader's trims come from the edit list
+// (PLAN Q72), and without these an AAC file's priming was played.
+fn untrimmed(packet: &Packet, frames: usize) -> (usize, usize) {
+    let (start, end) = (packet.trim_start() as usize, packet.trim_end() as usize);
+    if start + end > 0 && frames as u64 == packet.block_dur() {
+        (start, end)
+    } else {
+        (0, 0)
     }
 }
 

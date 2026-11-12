@@ -62,12 +62,18 @@ symphonia = { version = "0.5.5", default-features = false }
 # gives it the Opus decoder WebM needs (PLAN Q71). And two more fixes: the packet that runs
 # past the container's stated end is cut there, and a seek counts from the first packet that
 # gives sound (PLAN Q72, `a_webm_ends_where_its_header_says`, `scripts/probe-formats.sh`).
-# `ponytail:` a vendored copy to carry a few dozen lines. It can go the day a rodio release
+# And symphonia-format-isomp4 0.5.5, symphonia's MP4 reader, with `src/demuxer.rs` and
+# `src/atoms/elst.rs` patched the same way: it parses an MP4's edit list and never used it, so
+# every AAC file's encoder priming was played and counted; it now trims to the edit (PLAN Q72,
+# `an_mp4_plays_what_its_edit_list_says`). MPL-2.0, so the modified source must be offered with
+# a binary, and `vendor/` is it (PLAN §12).
+# `ponytail:` vendored copies to carry a few dozen lines. rodio's can go the day a release
 # fixes Q69 and Q72 (the MP4 and WebM tests and the format probe will say) and decodes Opus or
-# takes a codec registry (the Opus tests will say); until then, deleting `vendor/` breaks one
-# of them.
+# takes a codec registry (the Opus tests will say); the MP4 reader's, the day symphonia reads
+# edit lists. Until then, deleting a vendored crate breaks a test.
 [patch.crates-io]
 rodio = { path = "vendor/rodio" }
+symphonia-format-isomp4 = { path = "vendor/symphonia-format-isomp4" }
 
 # Optimize the *dependencies* in a debug build, and only them. Decoding a track for its
 # waveform (PLAN §14a) took 16.7 s under `cargo run` against 325 ms under `--release` —

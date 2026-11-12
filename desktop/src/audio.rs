@@ -343,12 +343,36 @@ mod tests {
 	fn a_video_first_mp4_is_as_long_as_its_sound() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-video-first-length.mp4");
-		std::fs::write(&path, video_first_mp4()).expect("writing the fixture");
+		std::fs::write(&path, video_first_mp4(None)).expect("writing the fixture");
 
 		// Act and assert: one second exactly, the audio's own 8 000 frames over its own 8 kHz,
 		// and every one of those frames is sound — the picture's bytes, handed to the audio
 		// decoder, would have come out as samples of their own.
 		assert_one_timeline(&path, Duration::from_secs(1));
+		let _ = std::fs::remove_file(&path);
+	}
+
+	/// An MP4 whose edit list says where its sound is. An AAC encoder puts 1 024 frames of
+	/// priming in front, and the file's one edit plays the media from after them for the
+	/// length of the sound alone; rodio played and counted the priming, 21 ms of near-silence
+	/// at the start of every AAC file (PLAN Q72). Here the edit skips the first 800 frames of
+	/// PCM that counts up from zero and plays 800 ms, so the first sample heard says where the
+	/// sound starts and the length says where it ends.
+	#[test]
+	fn an_mp4_plays_what_its_edit_list_says() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-edit-list.mp4");
+		std::fs::write(&path, video_first_mp4(Some((800, 800)))).expect("writing the fixture");
+
+		// Act
+		let first = decoder(&path)
+			.expect("opening the fixture")
+			.next()
+			.map(|sample| (sample * 32_768.0).round() as i32);
+
+		// Assert
+		assert_eq!(first, Some(800), "the first sample heard");
+		assert_one_timeline(&path, Duration::from_millis(800));
 		let _ = std::fs::remove_file(&path);
 	}
 
@@ -360,7 +384,7 @@ mod tests {
 	fn a_seek_in_a_video_first_mp4_lands_where_it_was_aimed() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-video-first-seek.mp4");
-		std::fs::write(&path, video_first_mp4()).expect("writing the fixture");
+		std::fs::write(&path, video_first_mp4(None)).expect("writing the fixture");
 		let mut source = decoder(&path).expect("opening the fixture");
 
 		// Act
@@ -385,7 +409,7 @@ mod tests {
 	fn a_video_first_opus_webm_is_as_long_as_its_sound() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-video-first.webm");
-		std::fs::write(&path, video_first_webm(1_000, true)).expect("writing the fixture");
+		std::fs::write(&path, video_first_webm(1_000, true, 0)).expect("writing the fixture");
 
 		// Act and assert
 		assert_one_timeline(&path, Duration::from_secs(1));
@@ -400,7 +424,7 @@ mod tests {
 	fn a_webm_ends_where_its_header_says() {
 		// Arrange: fifty packets, and a header that claims 990 ms of them.
 		let path = std::env::temp_dir().join("clecta-short-header.webm");
-		std::fs::write(&path, video_first_webm(990, true)).expect("writing the fixture");
+		std::fs::write(&path, video_first_webm(990, true, 0)).expect("writing the fixture");
 
 		// Act and assert
 		assert_one_timeline(&path, Duration::from_millis(990));
@@ -415,7 +439,7 @@ mod tests {
 	fn a_webm_without_cues_seeks_at_most_one_packet_late() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-no-cues.webm");
-		std::fs::write(&path, video_first_webm(1_000, false)).expect("writing the fixture");
+		std::fs::write(&path, video_first_webm(1_000, false, 0)).expect("writing the fixture");
 		let mut source = decoder(&path).expect("opening the fixture");
 
 		// Act: 495 ms is 5 ms into the packet that starts at 480.
@@ -426,6 +450,22 @@ mod tests {
 		// Assert: it lands on the next packet, at 500 ms, with half a second of sound left.
 		assert!(sought.is_ok(), "the seek failed: {sought:?}");
 		assert_eq!(remaining, 25 * 960, "what the seek left");
+	}
+
+	/// A WebM whose sound starts 2 s into the container's clock, as a file cut from a longer
+	/// stream can keep its timestamps: the header's duration runs from zero, and every block is
+	/// 2 s on. The app's timeline starts at the first sound, so it is one second long and a
+	/// seek half a second in lands half a second into the sound. rodio measured three seconds,
+	/// refused every seek into the first two and landed later ones 2 s early (PLAN Q72).
+	#[test]
+	fn a_webm_that_starts_late_is_timed_from_its_first_sound() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-late-start.webm");
+		std::fs::write(&path, video_first_webm(1_000, true, 2_000)).expect("writing the fixture");
+
+		// Act and assert
+		assert_one_timeline(&path, Duration::from_secs(1));
+		let _ = std::fs::remove_file(&path);
 	}
 
 	/// The same padding in Ogg, which states it exactly: the last page's granule position
@@ -516,12 +556,13 @@ mod tests {
 	}
 
 	/// A WebM with the video first: a VP9 track of opaque frames, then mono Opus — the fifty
-	/// packets of `opus_packets`, under a header that claims `length_ms`, and with or without
-	/// the cues that index the cluster. No block carries a duration and the track no default
+	/// packets of `opus_packets`, starting `start_ms` into the container's clock, under a header
+	/// that claims `length_ms` of sound after that, and with or without the cues that index
+	/// the cluster. No block carries a duration and the track no default
 	/// one, so symphonia seeks to the first block at or after a target. Built by hand for the
 	/// same reason `video_first_mp4` is. Each element's size is written in the eight-byte
 	/// form, which EBML allows for any size and which keeps the arithmetic out.
-	fn video_first_webm(length_ms: u32, with_cues: bool) -> Vec<u8> {
+	fn video_first_webm(length_ms: u32, with_cues: bool, start_ms: u32) -> Vec<u8> {
 		const PRE_SKIP: u16 = 312;
 
 		let uint = |n: u64| n.to_be_bytes();
@@ -542,7 +583,11 @@ mod tests {
 			&[0x15, 0x49, 0xa9, 0x66],
 			&[
 				&webm_element(&[0x2a, 0xd7, 0xb1], &[&uint(1_000_000)]), // timestamps in ms
-				&webm_element(&[0x44, 0x89], &[&f64::from(length_ms).to_be_bytes()]),
+				// The segment's duration, which Matroska counts from zero, not from the start.
+				&webm_element(
+					&[0x44, 0x89],
+					&[&f64::from(start_ms + length_ms).to_be_bytes()],
+				),
 			],
 		);
 		let track = |number: u64, kind: u64, codec: &[u8], extra: &[&[u8]]| {
@@ -588,7 +633,7 @@ mod tests {
 				&[0x1c, 0x53, 0xbb, 0x6b],
 				&[&webm_element(
 					&[0xbb],
-					&[&webm_element(&[0xb3], &[&uint(0)]), &position],
+					&[&webm_element(&[0xb3], &[&uint(start_ms.into())]), &position],
 				)],
 			)
 		};
@@ -598,7 +643,7 @@ mod tests {
 				&[&[0x80 | track], &at.to_be_bytes(), &[0x80], frame],
 			)
 		};
-		let mut cluster = vec![webm_element(&[0xe7], &[&uint(0)])];
+		let mut cluster = vec![webm_element(&[0xe7], &[&uint(start_ms.into())])];
 		for (at, packet) in (0..).step_by(20).zip(opus_packets()) {
 			if at % 40 == 0 {
 				cluster.push(block(1, at, &[0; 4]));
@@ -644,9 +689,11 @@ mod tests {
 	#[test]
 	#[ignore = "reads the files named in CLECTA_PROBE"]
 	fn probe_files() {
-		// Matroska's timestamps are whole milliseconds, so its lengths and landings can be one
-		// off either side. Everything Q72 fixed was 7 ms or more.
-		const TOLERANCE: f64 = 0.002;
+		// Matroska's timestamps are whole milliseconds, and ffmpeg's Matroska length can end a
+		// few past the sound (3 ms on a stereo Vorbis tone): no decode can reach it, and a
+		// landing, measured back from the decode's end, reads early by as much. Everything
+		// Q72 fixed was 6.5 ms or more.
+		const TOLERANCE: f64 = 0.005;
 
 		let paths = std::env::var_os("CLECTA_PROBE").expect("CLECTA_PROBE names no files");
 		let mut wrong = Vec::new();
@@ -677,6 +724,18 @@ mod tests {
 				}
 			}
 
+			// A seek after one to the very end, which can find nothing left to decode, must leave
+			// the decoder where a fresh one would be: rodio swapped left and right there (Q72).
+			let quarter = Duration::from_secs_f64(decoded / 4.0);
+			let mut fresh = decoder(&path).expect("opening the file");
+			let _ = fresh.try_seek(quarter);
+			let mut reused = decoder(&path).expect("opening the file");
+			let _ = reused.try_seek(Duration::from_secs_f64(decoded));
+			let _ = reused.try_seek(quarter);
+			if !fresh.take(4_800).eq(reused.take(4_800)) {
+				wrong.push(format!("{}: a seek after one to the end", path.display()));
+			}
+
 			let scanned = scan(&path).expect("scanning the file");
 			eprintln!(
 				"  trim {:?}, tempo {:?}, key {:?}",
@@ -690,7 +749,9 @@ mod tests {
 	/// mono PCM whose sample `n` is `n`. Built by hand for the same reason `wav` is — it is
 	/// eleven kinds of box, each a header and a few numbers. `avc1` with no body is enough of
 	/// a picture: symphonia decodes no video, so the track only has to exist and be timed.
-	fn video_first_mp4() -> Vec<u8> {
+	/// `edit`, when given, is the sound's edit list: one edit playing the media from the frame
+	/// it names for the milliseconds it names.
+	fn video_first_mp4(edit: Option<(u32, u32)>) -> Vec<u8> {
 		const RATE: u32 = 8_000;
 		const VIDEO_SCALE: u32 = 1_000;
 		const VIDEO_FRAMES: u32 = 25; // 40 ticks each: one second at 1 kHz
@@ -722,6 +783,7 @@ mod tests {
 					40,
 					VIDEO_FRAME_BYTES,
 					video_offset,
+					None,
 				),
 				mp4_track(
 					2,
@@ -732,6 +794,7 @@ mod tests {
 					1,
 					2,
 					audio_offset,
+					edit,
 				),
 			]
 			.concat()
@@ -765,7 +828,8 @@ mod tests {
 	}
 
 	/// One track whose samples all sit in a single chunk at `offset`, all the same size and
-	/// all `delta` ticks long.
+	/// all `delta` ticks long; and, given `edit`, an edit list of one edit, from that media
+	/// time for that many of the movie's ticks.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "a test fixture's table of numbers"
@@ -779,6 +843,7 @@ mod tests {
 		delta: u32,
 		size: u32,
 		offset: u32,
+		edit: Option<(u32, u32)>,
 	) -> Vec<u8> {
 		let one = 1u32.to_be_bytes();
 		let full = [0; 4]; // a full box's version 0 and no flags
@@ -813,7 +878,13 @@ mod tests {
 		let minf = mp4_atom(b"minf", &[&stbl]);
 		let mdia = mp4_atom(b"mdia", &[&mdhd, &hdlr, &minf]);
 
-		mp4_atom(b"trak", &[&tkhd, &mdia])
+		let edts = edit.map_or_else(Vec::new, |(media_time, duration)| {
+			let rate = 0x0001_0000u32; // 1.0, as a 16.16 fraction
+			let entry = [duration, media_time, rate].map(u32::to_be_bytes).concat();
+			mp4_atom(b"edts", &[&mp4_atom(b"elst", &[&full, &one, &entry])])
+		});
+
+		mp4_atom(b"trak", &[&tkhd, &edts, &mdia])
 	}
 
 	/// An ISO-BMFF box: a big-endian length that counts its own eight bytes, then its kind.
