@@ -1349,10 +1349,11 @@ mod tests {
 				&72u32.to_be_bytes(),             // the size of the entry's fixed fields
 				&f64::from(MP4_RATE).to_be_bytes(),
 				&u32::from(channels).to_be_bytes(),
-				&0x7f00_0000u32.to_be_bytes(),                     // reserved
-				&16u32.to_be_bytes(),                              // bits a sample
-				&4u32.to_be_bytes(),                               // signed integers, little-endian
-				&(u32::from(channels) * 2 * frames).to_be_bytes(), // bytes a packet, which symphonia ignores
+				&0x7f00_0000u32.to_be_bytes(), // reserved
+				&16u32.to_be_bytes(),          // bits a sample
+				&4u32.to_be_bytes(),           // signed integers, little-endian
+				// Bytes a packet, which symphonia ignores, then frames a packet.
+				&(u32::from(channels) * 2 * frames).to_be_bytes(),
 				&frames.to_be_bytes(),
 			],
 		)
