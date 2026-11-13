@@ -48,12 +48,19 @@ pub struct Panel<'a> {
 ///
 /// `at` is where the right press happened, from `ui::pointer` — `None` only if the cursor had
 /// no position at the press, which leaves the panel centred, the way both panels used to be.
+///
+/// With no panel up, the window is still put in a stack, alone: iced keeps a widget's state
+/// only while the same kind of widget stays at the same place in its tree, and a window that
+/// was the root without a panel and a stack's first layer with one lost every list's scroll
+/// offset each time a menu opened or closed.
 pub fn over<'a>(
 	body: Element<'a, Message>,
-	panel: Panel<'a>,
-	at: Option<Point>,
+	panel: Option<(Panel<'a>, Option<Point>)>,
 	window: (f32, f32),
 ) -> Element<'a, Message> {
+	let Some((panel, at)) = panel else {
+		return stack![body].into();
+	};
 	let dim = panel.dim;
 	let catcher = mouse_area(container(Space::new()).width(Fill).height(Fill).style(
 		move |_theme: &Theme| container::Style {
@@ -221,6 +228,38 @@ fn detected_line(value: f32, detected: Option<f32>) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use iced::advanced::widget::Tree;
+	use iced::widget::scrollable;
+
+	/// A panel opening, or closing, must leave the window under it where it was in iced's
+	/// widget tree. iced keeps a widget's state — a list's scroll offset among it — only
+	/// while the same kind of widget stays at the same place in the tree, and rebuilds it
+	/// otherwise. The window was the root with no panel up and a stack's first layer with
+	/// one, so a right-click put the files list back at its top while the app still drew the
+	/// rows it had scrolled to, and it jumped. Checked as the tree's own test, the kinds:
+	/// seeing the offset survive needs a renderer.
+	#[test]
+	fn a_panel_opening_leaves_the_window_where_it_was_in_the_tree() {
+		// Arrange
+		const WINDOW: (f32, f32) = (1000.0, 700.0);
+		let window = || -> Element<'static, Message> { scrollable(Space::new()).into() };
+
+		// Act
+		let closed = Tree::new(over(window(), None, WINDOW));
+		let open = Tree::new(over(
+			window(),
+			Some((menu("a.mp3", None), Some(Point::new(10.0, 10.0)))),
+			WINDOW,
+		));
+
+		// Assert
+		assert_eq!(closed.tag, open.tag, "what the window sits in");
+		assert_eq!(
+			closed.children.first().map(|window| window.tag),
+			open.children.first().map(|window| window.tag),
+			"the window itself"
+		);
+	}
 
 	#[test]
 	fn a_panel_opens_below_and_right_of_the_pointer_until_that_would_not_fit() {

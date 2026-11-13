@@ -2475,23 +2475,17 @@ impl Clecta {
 			Message::PointerPressed,
 		);
 
-		// The one place anything is drawn over the window (PLAN §14d). Built last and only when
-		// there is something to draw, so the app that has no menu open is the app as it was.
-		match (&self.menu, &self.correcting) {
-			(Some(menu), _) => ui::tempo::over(
-				window,
-				ui::tempo::menu(&menu.name, menu.tempo),
-				menu.at,
-				self.window,
-			),
-			(_, Some(correction)) => ui::tempo::over(
-				window,
+		// The one place anything is drawn over the window (PLAN §14d), and the window goes
+		// through it whether or not there is: see `over` for why it must.
+		let panel = match (&self.menu, &self.correcting) {
+			(Some(menu), _) => Some((ui::tempo::menu(&menu.name, menu.tempo), menu.at)),
+			(_, Some(correction)) => Some((
 				ui::tempo::editor(&correction.name, correction.value, correction.detected),
 				correction.at,
-				self.window,
-			),
-			_ => window,
-		}
+			)),
+			_ => None,
+		};
+		ui::tempo::over(window, panel, self.window)
 	}
 
 	/// The horizontal splitter, hand-written — the one thing `pane_grid` could not be bent

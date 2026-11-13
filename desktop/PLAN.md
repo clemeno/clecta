@@ -3059,6 +3059,16 @@ it is open. So it is `stack![window, shade, panel]` — the same widgets as ever
 over the top, with the dimmed rest of the window as the hit target that dismisses it. A panel that
 can only be closed by its own buttons traps the app the day one of them is missed.
 
+With no panel up it is still a stack, `stack![window]`. iced keeps a widget's state — a list's
+scroll offset, a scrollbar being dragged — only while the same kind of widget stays at the same
+place in its tree, and rebuilds it otherwise. The first version returned the bare window when
+nothing was drawn over it, so the window moved from the root to a stack's first layer at every
+right-click and back at every dismissal, and each move reset every list to its top while the
+app still built the rows it had scrolled to: the files list jumped. Pinned by
+`ui::tempo::tests::a_panel_opening_leaves_the_window_where_it_was_in_the_tree`, which checks the
+tree's own test, the kind of widget at each place; seeing the offset itself survive needs a
+renderer.
+
 ### At the pointer, without a cursor subscription
 
 It was centred for a while, and the reason was that iced's press messages carry no position:
