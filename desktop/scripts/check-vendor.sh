@@ -1,6 +1,6 @@
 #!/bin/sh
-# Each vendored crate (PLAN Q69, Q71, Q72) is its published release plus the files it patches,
-# and every change block in those files says why in a `clecta patch` comment. Any other
+# Each vendored crate (PLAN Q69, Q71, Q72, Q73) is its published release plus the files it
+# patches, and every change block in those files says why in a `clecta patch` comment. Any other
 # difference from the crates.io tarball fails, and so does a change block without the marker,
 # a removal included: what replaced the upstream lines is what has to explain itself. The
 # tarballs may ship CRLF and git may store LF, hence --strip-trailing-cr. CI runs this, and so
@@ -62,6 +62,8 @@ vendored() {
 
 vendored rodio 0.23.0 src/decoder/symphonia.rs
 vendored symphonia-format-isomp4 0.5.5 src/demuxer.rs src/atoms/elst.rs
+vendored symphonia-bundle-mp3 0.5.5 src/synthesis.rs
+vendored symphonia-codec-vorbis 0.5.5 src/dsp.rs
 
 if [ -s "$dir/wrong" ]; then
 	cat "$dir/wrong" >&2

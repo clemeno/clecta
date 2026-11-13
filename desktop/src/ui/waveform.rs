@@ -43,6 +43,10 @@ const EDGE: f32 = 1.0;
 /// difference between a fade-out and a scan that has not landed yet.
 const MIN_BAR: f32 = 1.0;
 
+/// The gap kept between the loudest bar and the strip's top and bottom edges, so the
+/// waveform never touches its box (PLAN Q73).
+const PADDING: f32 = 1.0;
+
 /// The scanning band's thickness. Thicker than the flat line it rides on, so it reads as
 /// something happening rather than as a defect in the line.
 const SWEEP_BAR: f32 = 4.0;
@@ -372,7 +376,7 @@ where
 
 			// Mirrored about the middle, because a waveform is an envelope and not a bar
 			// chart growing off the floor.
-			let half = (peak * bounds.height / 2.0).max(MIN_BAR / 2.0);
+			let half = bar_half(peak, bounds.height);
 			let colour = if (column as f32) < played {
 				palette.primary.base.color
 			} else {
@@ -467,6 +471,17 @@ pub fn sweep_band(width: f32, phase: f32) -> Option<(f32, f32)> {
 	(end > start).then_some((start, end))
 }
 
+/// How far a column's bar reaches above and below the strip's middle (PLAN Q73).
+///
+/// Full scale reaches the edge less `PADDING`, and a peak past it, which a lossy decode keeps,
+/// stops there too: the strip shows the shape, and the limiter on the mix is what deals with
+/// the level. The last `min` is for a strip too short for its padding, where even `MIN_BAR`
+/// would not fit.
+fn bar_half(peak: f32, height: f32) -> f32 {
+	let room = (height / 2.0 - PADDING).max(0.0);
+	(peak.min(1.0) * room).max(MIN_BAR / 2.0).min(room)
+}
+
 /// Where a click `x` pixels into a strip `width` wide lands in the track, as a fraction of
 /// its length. `None` for a strip with no width.
 ///
@@ -490,6 +505,28 @@ pub fn seek_fraction(width: f32, x: f32) -> Option<f32> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A bar stays inside its strip with a pixel to spare at each edge, however loud its
+	/// column: a lossy decode keeps what is past full scale now (PLAN Q73), and a peak of 1.2
+	/// once drew a bar a fifth taller than the strip, over the controls around it.
+	#[test]
+	fn a_bar_never_touches_the_edges_of_its_strip() {
+		// Arrange: the strip's own height, so a pixel's room is 27 either way.
+		let room = HEIGHT / 2.0 - 1.0;
+
+		// Act / Assert: full scale and past it reach the room and no further; below it, in
+		// proportion; and a strip with no room draws nothing rather than a negative bar.
+		for peak in [1.0, 1.2, 1.5] {
+			assert_eq!(bar_half(peak, HEIGHT), room, "a peak of {peak}");
+		}
+		assert_eq!(bar_half(0.5, HEIGHT), room / 2.0);
+		assert_eq!(
+			bar_half(0.001, HEIGHT),
+			MIN_BAR / 2.0,
+			"a quiet column still shows"
+		);
+		assert_eq!(bar_half(1.0, 1.0), 0.0, "a strip too short for its padding");
+	}
 
 	fn pressed() -> Event {
 		Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))

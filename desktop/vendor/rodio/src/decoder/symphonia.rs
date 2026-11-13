@@ -241,6 +241,16 @@ impl SymphoniaDecoder {
         let duration = units::Duration::from(decoded.capacity() as u64);
         let mut buffer = SampleBuffer::<Sample>::new(duration, *spec);
         buffer.copy_interleaved_ref(decoded);
+        // clecta patch: a lossy decode past full scale is kept, as the MP3 and Vorbis decoders
+        // now keep it too, up to 1.5, past anything real; a `NaN` from a corrupt file is
+        // silence, as it would otherwise poison the limiter on the mix (PLAN Q73).
+        for sample in buffer.samples_mut() {
+            *sample = if sample.is_nan() {
+                0.0
+            } else {
+                sample.clamp(-1.5, 1.5)
+            };
+        }
         buffer
     }
 }

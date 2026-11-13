@@ -11,6 +11,8 @@
 //! on drop) are already paid for.
 
 use anyhow::{Context, Result};
+use rodio::mixer::MixerSource;
+use rodio::source::LimitSettings;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use std::fs::File;
 use std::path::Path;
@@ -52,14 +54,16 @@ impl Engine {
 		);
 
 		// Two players on one mixer — rodio's own central example, and the reason no
-		// mixing code is written here (PLAN §2).
-		let players = [
-			Player::connect_new(sink.mixer()),
-			Player::connect_new(sink.mixer()),
-		];
+		// mixing code is written here (PLAN §2). A mixer of their own, whose sum reaches the
+		// device's through the limiter (PLAN Q73). The players join it first: a mixer with
+		// nothing in it ends at its first sample, and the device's would then drop it.
+		let config = sink.config();
+		let (mix, mixed) = rodio::mixer::mixer(config.channel_count(), config.sample_rate());
+		let players = [Player::connect_new(&mix), Player::connect_new(&mix)];
 		for player in &players {
 			player.pause();
 		}
+		sink.mixer().add(Self::limited(mixed));
 
 		Ok(Self {
 			_sink: sink,
@@ -67,6 +71,15 @@ impl Engine {
 			shared: [Arc::new(Shared::default()), Arc::new(Shared::default())],
 			description,
 		})
+	}
+
+	/// The two players' sum, on its way to the device (PLAN Q73): through rodio's own soft-knee
+	/// limiter, at its general-purpose settings. They leave everything under -3 dBFS alone,
+	/// which ordinary fader levels never reach, and bend what goes past it towards -1 dBFS —
+	/// two loud tracks summed at the crossfader's middle, or a lossy decode past full scale
+	/// with a fader up — rather than letting the device flatten it at 1.0.
+	fn limited(mix: MixerSource) -> impl Source + Send + 'static {
+		mix.limit(LimitSettings::default())
 	}
 
 	/// The device's format, for the status line. Worth showing: it is the first thing to
@@ -332,6 +345,70 @@ mod tests {
 		// And a file that is not there answers rather than failing, because "no length" is
 		// what the caller stores either way.
 		assert_eq!(duration(&std::env::temp_dir().join("clecta-nothing")), None);
+	}
+
+	/// A lossy decode goes past full scale wherever the music was mastered to it — 1.22 on an
+	/// MP3, 1.20 on an Opus WebM of the same song — and that is sound, not error: the faders
+	/// bring it down before anything clips, and the limiter on the mix handles the rest
+	/// (PLAN Q73). So nothing is flattened at 1.0. What a corrupt file can decode to is capped
+	/// at 1.5, past anything real, and a `NaN` is silence rather than a value that would
+	/// poison the limiter's envelope for the rest of the track.
+	#[test]
+	fn a_decode_keeps_what_is_past_full_scale_up_to_one_and_a_half() {
+		// Arrange: a float WAV, which holds whatever it is given.
+		let path = std::env::temp_dir().join("clecta-past-full-scale.wav");
+		std::fs::write(&path, float_wav(&[1.2, -1.2, 3.0, -3.0, f32::NAN, 0.5])).expect("writing");
+
+		// Act
+		let decoded: Vec<f32> = decoder(&path).expect("opening the fixture").collect();
+		let _ = std::fs::remove_file(&path);
+
+		// Assert
+		assert_eq!(decoded, [1.2, -1.2, 1.5, -1.5, 0.0, 0.5]);
+	}
+
+	/// The two players summed and limited, as the engine sends them to the device. A mix
+	/// that stays under the knee comes out exactly as it went in, so at ordinary fader levels
+	/// the limiter is not there at all; one past full scale, as two loud tracks summed at the
+	/// crossfader's middle are, is brought back under it once the limiter has caught up,
+	/// bent rather than flattened (PLAN Q73).
+	#[test]
+	fn the_mix_is_limited_only_when_it_is_loud() {
+		use rodio::source::SineWave;
+
+		// Arrange: a second of a 440 Hz tone at each level.
+		let mix = |level: f32| {
+			let (mixer, mixed) = rodio::mixer::mixer(
+				std::num::NonZero::new(1).expect("one"),
+				std::num::NonZero::new(48_000).expect("a rate"),
+			);
+			mixer.add(
+				SineWave::new(440.0)
+					.amplify(level)
+					.take_duration(Duration::from_secs(1)),
+			);
+			Engine::limited(mixed).collect::<Vec<f32>>()
+		};
+		let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()));
+
+		// Act
+		let quiet = mix(0.4);
+		let loud = mix(1.5);
+
+		// Assert: the quiet tone untouched; the loud one under full scale after 50 ms.
+		let tone: Vec<f32> = SineWave::new(440.0).amplify(0.4).take(48_000).collect();
+		assert!(
+			quiet
+				.iter()
+				.zip(&tone)
+				.all(|(out, sine)| (out - sine).abs() < 1e-6),
+			"the limiter touched a quiet mix"
+		);
+		assert!(
+			peak(&loud[2_400..]) <= 1.0,
+			"a loud mix still peaks at {}",
+			peak(&loud[2_400..])
+		);
 	}
 
 	/// The shape of almost every downloaded video: the picture is the first track and the
@@ -981,10 +1058,15 @@ mod tests {
 			let source = decoder(&path).expect("opening the file");
 			let (rate, channels) = (source.sample_rate().get(), source.channels().get());
 			let seconds = |samples: usize| samples as f64 / f64::from(rate * u32::from(channels));
-			let decoded = seconds(source.count());
+			// The peak too: past 1.0 on a lossy file shows its decoder no longer flattens at full
+			// scale (PLAN Q73), which no generated fixture can.
+			let (count, peak) = source.fold((0, 0.0f32), |(count, peak), sample| {
+				(count + 1, peak.max(sample.abs()))
+			});
+			let decoded = seconds(count);
 			let header = duration(&path);
 			eprintln!(
-				"{}: header {header:?}, decoded {decoded:.3} s, {rate} Hz × {channels}",
+				"{}: header {header:?}, decoded {decoded:.3} s, peak {peak:.3}, {rate} Hz × {channels}",
 				path.display(),
 			);
 			// No length is no claim: the footer shows a `+`, and there is nothing to disagree with.
@@ -1334,5 +1416,30 @@ mod tests {
 		}
 
 		out
+	}
+
+	/// The same at 8 kHz, in 32-bit floats, which can hold a sample past full scale.
+	fn float_wav(samples: &[f32]) -> Vec<u8> {
+		const RATE: u32 = 8_000;
+		let data_len = samples.len() as u32 * 4;
+		[
+			&b"RIFF"[..],
+			&(36 + data_len).to_le_bytes(),
+			b"WAVEfmt ",
+			&16u32.to_le_bytes(), // the size of the fmt chunk that follows
+			&3u16.to_le_bytes(),  // 3 = IEEE float
+			&1u16.to_le_bytes(),  // one channel
+			&RATE.to_le_bytes(),
+			&(RATE * 4).to_le_bytes(), // bytes per second
+			&4u16.to_le_bytes(),       // block align
+			&32u16.to_le_bytes(),      // bits per sample
+			b"data",
+			&data_len.to_le_bytes(),
+			&samples
+				.iter()
+				.flat_map(|s| s.to_le_bytes())
+				.collect::<Vec<u8>>(),
+		]
+		.concat()
 	}
 }
