@@ -76,8 +76,10 @@ impl TrackState {
 // to skip at the start, which is an AAC encoder's priming, and how many to play, which stops
 // short of the last frame's padding. Only a lone edit into the media at normal rate is read, the
 // shape AAC encoders write; anything else (an empty edit, several) plays the media whole, as
-// symphonia always did. A length past the media's end stops at it: the movie's clock is coarser
-// than the media's, and a muxer rounds the edit's length up to it.
+// symphonia always did. A length up to one movie tick past the media's end stops at it: the
+// movie's clock is coarser than the media's, and a muxer may round the edit's length up to it.
+// Further past is not rounding but a media header that undercounts, where stopping would cut
+// sound, or a wrong edit, and plays the media whole too.
 fn edit_of(trak: &TrakAtom, movie_scale: u32) -> Option<(u32, u64)> {
     use std::convert::TryFrom; // edition 2018: not in the prelude
 
@@ -93,9 +95,11 @@ fn edit_of(trak: &TrakAtom, movie_scale: u32) -> Option<(u32, u64)> {
     let frames = u64::try_from(
         u128::from(edit.segment_duration) * u128::from(media.timescale) / u128::from(movie_scale),
     )
-    .ok()?
-    .min(media.duration.checked_sub(u64::from(delay))?);
-    (frames > 0).then_some((delay, frames))
+    .ok()?;
+    let room = media.duration.checked_sub(u64::from(delay))?;
+    let movie_tick = u64::from(media.timescale).div_ceil(u64::from(movie_scale));
+    let kept = frames.min(room);
+    (kept > 0 && frames <= room.saturating_add(movie_tick)).then_some((delay, kept))
 }
 
 /// Information regarding the next sample.
@@ -337,6 +341,7 @@ impl IsoMp4Reader {
                         .rposition(|seg| seg.track_sample_range(track_num).contains(&early))
                         .map(|idx| (idx, early))
                 })
+                // The track's first sample has none before it: the seek starts there.
                 .unwrap_or((seek_loc.seg_idx, seek_loc.sample_num));
             let seg = &self.segs[seg_idx];
 

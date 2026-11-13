@@ -441,19 +441,20 @@ mod tests {
 		let _ = std::fs::remove_file(&path);
 	}
 
-	/// The same on a clock that does not divide the rate, as a 90 kHz video clock does not
-	/// divide 44.1 kHz: a packet of 100 frames is 112.5 ticks of 9 kHz, stored as 112, and
-	/// 112 ticks read back as 99.56 frames. Rounded down to 99, they no longer matched the
-	/// 100 the decoder gave, so the trims were taken as done and the priming played.
+	/// The same on a clock that does not divide the rate and is coarser than it: a packet of
+	/// 100 frames is 37.5 ticks of 3 kHz, stored as 37, which read back as 98.67 frames.
+	/// Rounded down to 98, or to the nearest, 99, they did not match the 100 the decoder gave,
+	/// so the trims were taken as done and the priming played; and a packet the edit skips
+	/// whole, 37 ticks, kept a frame of the 100 when its trim was read as 99 of them.
 	#[test]
 	fn an_mp4_edit_list_holds_when_the_clock_does_not_divide_the_rate() {
-		// Arrange: the edit skips two packets, 224 ticks.
+		// Arrange: the edit skips two packets, 74 ticks.
 		let path = std::env::temp_dir().join("clecta-edit-list-rounded.mp4");
 		std::fs::write(
 			&path,
 			video_first_mp4(Sound {
-				edit: Some((224, 800)),
-				scale: 9_000,
+				edit: Some((74, 800)),
+				scale: 3_000,
 				frames: 100,
 				..Sound::default()
 			}),
@@ -511,9 +512,9 @@ mod tests {
 	}
 
 	/// An edit a few ticks longer than the sound after its priming: the movie's clock counts
-	/// whole milliseconds, or QuickTime's 1/600 s, and a muxer rounds the edit's length up to
-	/// it. The edit was then refused as a whole, and the priming played (PLAN Q72). Here
-	/// 901 ms from frame 800 would end 8 frames past the 8 000 there are.
+	/// whole milliseconds, or QuickTime's 1/600 s, and a muxer may round the edit's length up
+	/// to it. The edit was then refused as a whole, and the priming played (PLAN Q72). Here
+	/// 901 ms from frame 800 would end 8 frames, one millisecond, past the 8 000 there are.
 	#[test]
 	fn an_mp4_edit_that_runs_past_its_sound_still_skips_the_priming() {
 		// Arrange
@@ -536,6 +537,36 @@ mod tests {
 		// Assert: from frame 800 to the last, 900 ms.
 		assert_eq!(first, Some(800), "the first sample heard");
 		assert_one_timeline(&path, Duration::from_millis(900));
+		let _ = std::fs::remove_file(&path);
+	}
+
+	/// An edit that runs further past the sound than the movie's clock can round is not
+	/// rounding: either the media's header undercounts its sound, and cutting at it would cut
+	/// sound, or the edit is wrong. The media then plays whole, priming and all, as a header
+	/// that undercounts always has (PLAN Q72). Here 1 000 ms from frame 800 would end 100 ms,
+	/// a hundred ticks, past the sound.
+	#[test]
+	fn an_mp4_edit_far_past_its_sound_plays_the_media_whole() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-edit-list-wrong.mp4");
+		std::fs::write(
+			&path,
+			video_first_mp4(Sound {
+				edit: Some((800, 1_000)),
+				..Sound::default()
+			}),
+		)
+		.expect("writing the fixture");
+
+		// Act
+		let first = decoder(&path)
+			.expect("opening the fixture")
+			.next()
+			.map(|sample| (sample * 32_768.0).round() as i32);
+
+		// Assert
+		assert_eq!(first, Some(0), "the first sample heard");
+		assert_one_timeline(&path, Duration::from_secs(1));
 		let _ = std::fs::remove_file(&path);
 	}
 
@@ -597,7 +628,7 @@ mod tests {
 	fn a_video_first_opus_webm_is_as_long_as_its_sound() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-video-first.webm");
-		std::fs::write(&path, video_first_webm(1_000, true, 0)).expect("writing the fixture");
+		std::fs::write(&path, video_first_webm(1_000, Some(0), 0)).expect("writing the fixture");
 
 		// Act and assert
 		assert_one_timeline(&path, Duration::from_secs(1));
@@ -612,7 +643,7 @@ mod tests {
 	fn a_webm_ends_where_its_header_says() {
 		// Arrange: fifty packets, and a header that claims 990 ms of them.
 		let path = std::env::temp_dir().join("clecta-short-header.webm");
-		std::fs::write(&path, video_first_webm(990, true, 0)).expect("writing the fixture");
+		std::fs::write(&path, video_first_webm(990, Some(0), 0)).expect("writing the fixture");
 
 		// Act and assert
 		assert_one_timeline(&path, Duration::from_millis(990));
@@ -627,7 +658,7 @@ mod tests {
 	fn a_webm_without_cues_seeks_at_most_one_packet_late() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-no-cues.webm");
-		std::fs::write(&path, video_first_webm(1_000, false, 0)).expect("writing the fixture");
+		std::fs::write(&path, video_first_webm(1_000, None, 0)).expect("writing the fixture");
 		let mut source = decoder(&path).expect("opening the fixture");
 
 		// Act: 495 ms is 5 ms into the packet that starts at 480.
@@ -640,6 +671,48 @@ mod tests {
 		assert_eq!(remaining, 25 * 960, "what the seek left");
 	}
 
+	/// The same file sought into its last packet but one: the seek lands on the last, and
+	/// stepping back from there finds the end of the stream, not a packet. That is no reason
+	/// to fail the seek; it keeps the late landing.
+	#[test]
+	fn a_webm_without_cues_seeks_near_its_end() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-no-cues-end.webm");
+		std::fs::write(&path, video_first_webm(1_000, None, 0)).expect("writing the fixture");
+		let mut source = decoder(&path).expect("opening the fixture");
+
+		// Act: 965 ms is 5 ms into the packet that starts at 960.
+		let sought = source.try_seek(Duration::from_millis(965));
+		let remaining = source.count();
+		let _ = std::fs::remove_file(&path);
+
+		// Assert: it lands on the last packet, at 980 ms.
+		assert!(sought.is_ok(), "the seek failed: {sought:?}");
+		assert_eq!(remaining, 960, "what the seek left");
+	}
+
+	/// A WebM whose one cue says its cluster starts 40 ms in, while its sound starts at 0, as
+	/// cues on a picture's keyframes can. A seek to 45 ms lands late, at 60, and stepping back
+	/// from there asks for 30, below every cue, which Matroska refuses before it moves. The
+	/// seek failed then, though the sound had already moved, and the app's playhead stayed
+	/// behind (PLAN Q72). It keeps the late landing, as upstream did.
+	#[test]
+	fn a_webm_whose_first_cue_is_late_still_seeks_near_its_start() {
+		// Arrange
+		let path = std::env::temp_dir().join("clecta-late-cue.webm");
+		std::fs::write(&path, video_first_webm(1_000, Some(40), 0)).expect("writing the fixture");
+		let mut source = decoder(&path).expect("opening the fixture");
+
+		// Act
+		let sought = source.try_seek(Duration::from_millis(45));
+		let remaining = source.count();
+		let _ = std::fs::remove_file(&path);
+
+		// Assert: from 60 ms, forty-seven packets.
+		assert!(sought.is_ok(), "the seek failed: {sought:?}");
+		assert_eq!(remaining, 47 * 960, "what the seek left");
+	}
+
 	/// A WebM whose sound starts 2 s into the container's clock, as a file cut from a longer
 	/// stream can keep its timestamps: the header's duration runs from zero, and every block is
 	/// 2 s on. The app's timeline starts at the first sound, so it is one second long and a
@@ -649,7 +722,8 @@ mod tests {
 	fn a_webm_that_starts_late_is_timed_from_its_first_sound() {
 		// Arrange
 		let path = std::env::temp_dir().join("clecta-late-start.webm");
-		std::fs::write(&path, video_first_webm(1_000, true, 2_000)).expect("writing the fixture");
+		std::fs::write(&path, video_first_webm(1_000, Some(0), 2_000))
+			.expect("writing the fixture");
 
 		// Act and assert
 		assert_one_timeline(&path, Duration::from_secs(1));
@@ -688,7 +762,7 @@ mod tests {
 	/// decode gives, and what a seek to the middle leaves. Each timing bug so far was two of
 	/// those disagreeing — a length read off the picture's track (PLAN Q69), a pre-skip
 	/// dropped from the start but not after a seek (Q71), padding played past the header's
-	/// end (Q72). The fixtures are mono with an even frame count, so half is exact.
+	/// end (Q72). The fixtures have an even frame count, so half is exact.
 	fn assert_one_timeline(path: &Path, length: Duration) {
 		assert_eq!(duration(path), Some(length), "the header's length");
 
@@ -745,12 +819,13 @@ mod tests {
 
 	/// A WebM with the video first: a VP9 track of opaque frames, then mono Opus — the fifty
 	/// packets of `opus_packets`, starting `start_ms` into the container's clock, under a header
-	/// that claims `length_ms` of sound after that, and with or without the cues that index
-	/// the cluster. No block carries a duration and the track no default
+	/// that claims `length_ms` of sound after that. Given `cue_ms`, one cue indexes the cluster
+	/// as starting that far into the sound, as cues on a picture's keyframes can say of a
+	/// cluster whose sound starts earlier. No block carries a duration and the track no default
 	/// one, so symphonia seeks to the first block at or after a target. Built by hand for the
 	/// same reason `video_first_mp4` is. Each element's size is written in the eight-byte
 	/// form, which EBML allows for any size and which keeps the arithmetic out.
-	fn video_first_webm(length_ms: u32, with_cues: bool, start_ms: u32) -> Vec<u8> {
+	fn video_first_webm(length_ms: u32, cue_ms: Option<u32>, start_ms: u32) -> Vec<u8> {
 		const PRE_SKIP: u16 = 312;
 
 		let uint = |n: u64| n.to_be_bytes();
@@ -809,7 +884,7 @@ mod tests {
 				),
 			],
 		);
-		let cues = |cluster: u64| {
+		let cues = |cluster: u64, time: u32| {
 			let position = webm_element(
 				&[0xb7],
 				&[
@@ -821,7 +896,7 @@ mod tests {
 				&[0x1c, 0x53, 0xbb, 0x6b],
 				&[&webm_element(
 					&[0xbb],
-					&[&webm_element(&[0xb3], &[&uint(start_ms.into())]), &position],
+					&[&webm_element(&[0xb3], &[&uint(time.into())]), &position],
 				)],
 			)
 		};
@@ -842,12 +917,13 @@ mod tests {
 
 		// The cue points at the cluster from the start of the segment's body, and the cues
 		// before the cluster are the same size whatever that number is.
-		let before = info.len() + tracks.len() + cues(0).len();
-		let cues = if with_cues {
-			cues(before as u64)
-		} else {
-			Vec::new()
-		};
+		let cues = cue_ms.map_or_else(Vec::new, |cue_ms| {
+			let time = start_ms + cue_ms;
+			cues(
+				(info.len() + tracks.len() + cues(0, time).len()) as u64,
+				time,
+			)
+		});
 		let segment = webm_element(
 			&[0x18, 0x53, 0x80, 0x67],
 			&[&info, &tracks, &cues, &cluster],
@@ -886,9 +962,10 @@ mod tests {
 		let paths = std::env::var_os("CLECTA_PROBE").expect("CLECTA_PROBE names no files");
 		let mut wrong = Vec::new();
 		for path in std::env::split_paths(&paths) {
-			// A file still being probed after five minutes is stuck — Q72's step-back loop once
-			// spun forever — and fails the probe rather than hanging it. `_probed` drops at the
-			// end of the file, and the watchdog then ends quietly.
+			// A file still being probed after five minutes is stuck — a seek that never returns
+			// — and fails the probe rather than hanging it. A healthy hour of stereo AAC probes
+			// in 26 s in a debug build, so five minutes is some eleven hours of sound. `_probed`
+			// drops at the end of the file, and the watchdog then ends quietly.
 			let (_probed, watched) = std::sync::mpsc::channel::<()>();
 			let name = path.display().to_string();
 			std::thread::spawn(move || {
@@ -937,15 +1014,23 @@ mod tests {
 			let mut reused = decoder(&path).expect("opening the file");
 			let _ = reused.try_seek(Duration::from_secs_f64(decoded));
 			let _ = reused.try_seek(quarter);
-			// 4 800 samples run past the packet a seek lands in, at any rate a file has. Equal
-			// to within -60 dB, not exactly: symphonia's AAC decoder keeps its noise generator
-			// across a reset, so the packet a seek decodes first comes out a hair different
-			// after another seek (1.7e-5 on a tone). A swap or a misplaced decode is off by the
-			// sound itself.
-			let fresh: Vec<f32> = fresh.take(4_800).collect();
-			let reused: Vec<f32> = reused.take(4_800).collect();
+			// A quarter second runs past the packet a seek lands in, the longest of which, Opus's
+			// 120 ms, is half of it. Equal to within -60 dB of the sound's own peak, not exactly:
+			// symphonia's AAC decoder keeps its noise generator across a reset, so after
+			// another seek its noise never matches a fresh decoder's again (1.7e-5 on a tone at
+			// full scale). A swap or a misplaced decode is off by the sound itself, however
+			// quiet it is there.
+			let quarter_second = (rate / 4) as usize * usize::from(channels);
+			let fresh: Vec<f32> = fresh.take(quarter_second).collect();
+			let reused: Vec<f32> = reused.take(quarter_second).collect();
+			let peak = fresh
+				.iter()
+				.fold(0.0f32, |peak, sample| peak.max(sample.abs()));
 			if fresh.len() != reused.len()
-				|| fresh.iter().zip(&reused).any(|(a, b)| (a - b).abs() > 1e-3)
+				|| fresh
+					.iter()
+					.zip(&reused)
+					.any(|(a, b)| (a - b).abs() > peak * 1e-3)
 			{
 				wrong.push(format!("{}: a seek after one to the end", path.display()));
 			}
@@ -962,7 +1047,7 @@ mod tests {
 	/// The rate of every MP4 fixture's sound.
 	const MP4_RATE: u32 = 8_000;
 
-	/// What `video_first_mp4`'s sound is. By default: one mono frame a packet, a clock that
+	/// What `video_first_mp4` builds. By default: one mono frame a packet, a clock that
 	/// ticks once a frame, and no edits.
 	#[derive(Clone, Copy)]
 	struct Sound {
@@ -972,7 +1057,7 @@ mod tests {
 		/// The same for the picture's track, whose clock is in milliseconds.
 		picture_edit: Option<(u32, u32)>,
 		/// The sound clock's ticks a second, which an MP4 need not make its rate. A packet's
-		/// length is rounded down to whole ticks, as a muxer must when the two do not divide.
+		/// length is rounded down to whole ticks, as a muxer may when the two do not divide.
 		scale: u32,
 		channels: u16,
 		/// Frames a packet: AAC's hold 1 024.
@@ -993,7 +1078,7 @@ mod tests {
 
 	/// One second of MP4 with the video first: a 1 kHz track of 25 opaque frames, then 8 kHz
 	/// PCM whose frame `n` is `n`, and `-n` on the right when there is a right. Built by hand
-	/// for the same reason `wav` is — it is eleven kinds of box, each a header and a few
+	/// for the same reason `wav` is — it is some twenty kinds of box, each a header and a few
 	/// numbers. `avc1` with no body is enough of a picture: symphonia decodes no video, so the
 	/// track only has to exist and be timed.
 	fn video_first_mp4(sound: Sound) -> Vec<u8> {
@@ -1146,10 +1231,10 @@ mod tests {
 				&72u32.to_be_bytes(),             // the size of the entry's fixed fields
 				&f64::from(MP4_RATE).to_be_bytes(),
 				&u32::from(channels).to_be_bytes(),
-				&0x7f00_0000u32.to_be_bytes(),            // reserved
-				&16u32.to_be_bytes(),                     // bits a sample
-				&4u32.to_be_bytes(),                      // signed integers, little-endian
-				&(u32::from(channels) * 2).to_be_bytes(), // bytes a frame
+				&0x7f00_0000u32.to_be_bytes(),                     // reserved
+				&16u32.to_be_bytes(),                              // bits a sample
+				&4u32.to_be_bytes(),                               // signed integers, little-endian
+				&(u32::from(channels) * 2 * frames).to_be_bytes(), // bytes a packet, which symphonia ignores
 				&frames.to_be_bytes(),
 			],
 		)

@@ -168,7 +168,10 @@ Each is a different cause.
    no frames (it only primes the overlap), and `next` silently moves on to the following
    packet. Every Vorbis seek therefore lands one block late: 1 024 frames, 21 ms. Counting
    the skip from the timestamp of the first packet that gives frames fixes it. When that
-   packet already starts past the target, seek earlier and decode again.
+   packet already starts past the target, seek earlier and decode again. A seek earlier that
+   fails must not fail the seek: Matroska refuses one below its first cue, and one past its
+   last packet when it has no cues. Land again where the first seek did, since Ogg's reader
+   can move before it fails, and keep that landing.
 3. **Matroska without block durations lands after the target.** symphonia-mkv's seek returns
    the first block with `timestamp + duration >= ts`. With no duration, that is the first
    block that starts at or after the target, and `required_ts.saturating_sub(actual_ts)` is then 0. The
@@ -193,8 +196,10 @@ delay and a length:
 - it reads sound tracks' edits only: a picture's edit, as a video cut without re-encoding
   keeps, read as a delay pushed a seek near the end past the picture's last frame, and the
   whole seek failed;
-- it stops an edit that runs a few ticks past the media at the media's end, as a muxer
-  rounding up to a coarser movie clock (QuickTime's 1/600 s) writes, rather than refusing it;
+- it stops an edit that runs up to one movie tick past the media at the media's end, as a
+  muxer rounding up to a coarser movie clock (QuickTime's 1/600 s) can write, rather than
+  refusing it; further past, the media's header undercounts or the edit is wrong, and the
+  media plays whole;
 - it sets them as the track's `delay` and `n_frames`;
 - it calls `formats::util::trim_packet` on each packet;
 - it adds the delay to seek timestamps going in, and takes it off `SeekedTo` coming out;
@@ -205,5 +210,6 @@ delay and a length:
 That is what the MP3 reader does with a LAME tag. One more part is needed:
 `symphonia-codec-aac`, like the PCM decoder, ignores `trim_start` and `trim_end`. rodio now
 applies them itself when a decoder returns the whole block. The trims are in ticks of the
-track's clock, which need not be the sample rate (HE-AAC's is twice the rate decoded), so they
-are converted to frames, to the nearest, before being compared with the decoded block.
+track's clock, which need not be the sample rate (HE-AAC's is twice the rate decoded) or
+divide it, so the decoded block is taken as whole when it is within one tick of the packet's
+length, and each trim is then its share of the decoded frames.

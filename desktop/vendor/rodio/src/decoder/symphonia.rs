@@ -214,12 +214,13 @@ impl SymphoniaDecoder {
     fn span(&mut self, ts: u64, frames: u64) {
         let start = self.frame.unwrap_or_else(|| self.frame_at(ts));
         let kept = match self.end {
-            Some(end) if start < end && end < start + frames => end - start,
+            // Saturating: `frame_at` gives `u64::MAX` for a corrupt file's timestamp.
+            Some(end) if start < end && end < start.saturating_add(frames) => end - start,
             _ => frames,
         };
         self.span_len = kept as usize * self.spec.channels.count();
         self.span_ts = ts;
-        self.frame = Some(start + frames);
+        self.frame = Some(start.saturating_add(frames));
     }
 
     // clecta patch: a timestamp, on the track's clock, as a frame at the decoded rate, counted
@@ -400,14 +401,28 @@ impl SymphoniaDecoder {
             match self.format.seek(SeekMode::Accurate, to) {
                 Ok(to) if to.actual_ts <= self.span_ts => {}
                 // A demuxer that only seeks forward (Matroska without cues) answers with the
-                // packet after the one in hand, or with the end of the stream after the last, and
-                // asking again would land a packet later each time: keep the late landing, as
-                // upstream did.
+                // packet after the one in hand, and asking again would land a packet later each
+                // time: keep the late landing, as upstream did.
                 Ok(_) => break,
-                Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                // Any other failure can leave the demuxer anywhere — Ogg's moves before it
-                // fails — and the buffer in hand no longer says where.
-                Err(e) => return Err(SeekError::Demuxer(Arc::new(e)).into()),
+                // One that cannot go back that far — Matroska below its first cue, or past its
+                // last packet without cues — keeps the late landing too, never failing a seek
+                // the first try made. Ogg's reader can move before it fails, so land again
+                // where that first try did; if even that fails, keep the packet in hand, as
+                // upstream did.
+                Err(_) => {
+                    let again = SeekTo::TimeStamp {
+                        ts: seek_res.required_ts,
+                        track_id: self.track_id,
+                    };
+                    if self.format.seek(SeekMode::Accurate, again).is_ok() {
+                        self.decoder.reset();
+                        self.frame = None;
+                        if self.fill().is_none() {
+                            return Ok(());
+                        }
+                    }
+                    break;
+                }
             }
             self.decoder.reset();
             self.frame = None;
@@ -484,30 +499,36 @@ impl SymphoniaDecoder {
 // the whole block, which is how to tell. The MP4 reader's trims come from the edit list
 // (PLAN Q72), and without these an AAC file's priming was played.
 // The trims and the block are in ticks of the track's clock, which an MP4 need not run at its
-// sample rate (HE-AAC's runs at twice the rate symphonia decodes at), so they are compared as
-// frames at the decoded rate, to the nearest: a clock that does not divide the rate stores a
-// block's length rounded to whole ticks. Rounded, the two trims can overrun the block by one.
+// sample rate (HE-AAC's runs at twice the rate symphonia decodes at), and a clock that does
+// not divide the rate stores each block's length rounded to a whole tick, either way. So the
+// decoder gave the whole block when its frames are within one tick of it, and each trim is
+// then its share of the frames the decoder gave, to the nearest: a block the trims cover
+// whole is dropped whole, however its ticks round.
 fn untrimmed(
     packet: &Packet,
     decoded: &AudioBufferRef,
     base: Option<units::TimeBase>,
 ) -> (usize, usize) {
-    let rate = u128::from(decoded.spec().rate);
-    let frames = |ticks: u64| match base {
-        Some(base) => {
-            let denom = u128::from(base.denom);
-            ((u128::from(ticks) * rate * u128::from(base.numer) + denom / 2) / denom) as usize
-        }
-        None => ticks as usize,
-    };
-    let block = frames(packet.block_dur());
-    let start = frames(packet.trim_start().into()).min(block);
-    let end = frames(packet.trim_end().into()).min(block - start);
-    if start + end > 0 && decoded.frames() == block {
-        (start, end)
-    } else {
-        (0, 0)
+    let (start, end) = (packet.trim_start(), packet.trim_end());
+    if start == 0 && end == 0 {
+        return (0, 0);
     }
+    // One tick is `tick / scale` frames.
+    let (tick, scale) = match base {
+        Some(base) => (
+            u128::from(decoded.spec().rate) * u128::from(base.numer),
+            u128::from(base.denom),
+        ),
+        None => (1, 1),
+    };
+    let frames = decoded.frames() as u128;
+    let block = u128::from(packet.block_dur()); // at least the two trims, so not zero
+    if (frames * scale).abs_diff(block * tick) >= tick {
+        return (0, 0);
+    }
+    let share = |ticks: u32| ((2 * u128::from(ticks) * frames + block) / (2 * block)) as usize;
+    let start = share(start).min(decoded.frames());
+    (start, share(end).min(decoded.frames() - start))
 }
 
 impl Iterator for SymphoniaDecoder {

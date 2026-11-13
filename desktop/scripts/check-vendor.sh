@@ -12,6 +12,20 @@ dir=$(mktemp -d)
 trap 'rm -rf "$dir"' EXIT
 : >"$dir/wrong"
 
+# compare OUT DIFF-ARGUMENT...: diff's 0 (the same) and 1 (different) are answers; anything
+# else, such as 2 for a file it cannot read, means nothing was compared, which an `|| true` or a
+# pipe into awk would pass.
+compare() {
+	out=$1
+	shift
+	status=0
+	diff "$@" >"$out" || status=$?
+	[ "$status" -le 1 ] || {
+		echo "diff could not compare $*" >&2
+		exit 1
+	}
+}
+
 # vendored NAME VERSION PATCHED-FILE...
 vendored() {
 	name=$1
@@ -26,9 +40,10 @@ vendored() {
 		exit 1
 	}
 
-	diff -rq --strip-trailing-cr "$published" "vendor/$name" >"$dir/differences" || true
+	compare "$dir/differences" -rq --strip-trailing-cr "$published" "vendor/$name"
 	for file in "$@"; do
-		grep -v -F "and vendor/$name/$file differ" "$dir/differences" >"$dir/rest" || true
+		# grep's 1 is "every line was the patched file's", an answer too.
+		grep -v -F "and vendor/$name/$file differ" "$dir/differences" >"$dir/rest" || [ $? -eq 1 ]
 		mv "$dir/rest" "$dir/differences"
 	done
 	sed "s|^|vendor/$name differs from $name $version: |" "$dir/differences" >>"$dir/wrong"
@@ -36,11 +51,12 @@ vendored() {
 	# In diff's normal format each change block starts with a line like `79,82c86,88`, and its
 	# added lines start with `> `.
 	for file in "$@"; do
-		diff --strip-trailing-cr "$published/$file" "vendor/$name/$file" | awk -v file="vendor/$name/$file" '
+		compare "$dir/patch" --strip-trailing-cr "$published/$file" "vendor/$name/$file"
+		awk -v file="vendor/$name/$file" '
 			/^[0-9]/ { if (block != "" && !marked) print file ": no clecta patch marker in the change at " block; block = $0; marked = 0 }
 			/^> .*clecta patch/ { marked = 1 }
 			END { if (block != "" && !marked) print file ": no clecta patch marker in the change at " block }
-		' >>"$dir/wrong"
+		' "$dir/patch" >>"$dir/wrong"
 	done
 }
 
