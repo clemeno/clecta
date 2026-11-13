@@ -488,6 +488,39 @@ mod tests {
 		assert_eq!(remaining, 400, "what the seek left");
 	}
 
+	/// A picture that ends before its sound, as a downloaded video's often does by a frame or
+	/// so (228.32 s of picture against 228.44 s of sound in the user's). symphonia's MP4
+	/// reader seeks every track along with the sound, and a seek past the picture's end failed
+	/// the sound's seek with it: the last fraction of a second of such a file could not be
+	/// sought to at all, and the app said it could not seek the stream (PLAN Q72).
+	#[test]
+	fn a_seek_past_the_end_of_a_shorter_picture_still_lands() {
+		// Arrange: 800 ms of picture over a second of sound.
+		let path = std::env::temp_dir().join("clecta-short-picture.mp4");
+		std::fs::write(
+			&path,
+			video_first_mp4(Sound {
+				picture_frames: 20,
+				..Sound::default()
+			}),
+		)
+		.expect("writing the fixture");
+		let mut source = decoder(&path).expect("opening the fixture");
+
+		// Act
+		let sought = source.try_seek(Duration::from_millis(900));
+		let landed = source
+			.next()
+			.map(|sample| (sample * 32_768.0).round() as i32);
+		let rest = source.count();
+		let _ = std::fs::remove_file(&path);
+
+		// Assert: 900 ms in is frame 7 200, and 799 more follow it.
+		assert!(sought.is_ok(), "the seek failed: {sought:?}");
+		assert_eq!(landed, Some(7_200), "the seek landed somewhere else");
+		assert_eq!(rest, 799, "what the seek left after that sample");
+	}
+
 	/// The same edit on a sound whose clock ticks twice a frame, as an MP4's can: its timescale
 	/// need not be its sample rate, and in HE-AAC it is twice the rate symphonia decodes at.
 	/// The trims arrive in ticks and the decoder's frames are frames, and comparing the two
@@ -1138,6 +1171,8 @@ mod tests {
 		edit: Option<(u32, u32)>,
 		/// The same for the picture's track, whose clock is in milliseconds.
 		picture_edit: Option<(u32, u32)>,
+		/// The picture's frames, 40 ms each: 25 is the second the sound lasts.
+		picture_frames: u32,
 		/// The sound clock's ticks a second, which an MP4 need not make its rate. A packet's
 		/// length is rounded down to whole ticks, as a muxer may when the two do not divide.
 		scale: u32,
@@ -1151,6 +1186,7 @@ mod tests {
 			Sound {
 				edit: None,
 				picture_edit: None,
+				picture_frames: 25,
 				scale: MP4_RATE,
 				channels: 1,
 				frames: 1,
@@ -1165,10 +1201,10 @@ mod tests {
 	/// track only has to exist and be timed.
 	fn video_first_mp4(sound: Sound) -> Vec<u8> {
 		const VIDEO_SCALE: u32 = 1_000;
-		const VIDEO_FRAMES: u32 = 25; // 40 ticks each: one second at 1 kHz
+		let video_frames = sound.picture_frames; // 40 ticks each, at 1 kHz
 		const VIDEO_FRAME_BYTES: u32 = 4;
 
-		let video_data = vec![0x7f; (VIDEO_FRAMES * VIDEO_FRAME_BYTES) as usize];
+		let video_data = vec![0x7f; (video_frames * VIDEO_FRAME_BYTES) as usize];
 		let audio_data: Vec<u8> = (0..MP4_RATE as i16)
 			.flat_map(|n| [n, -n].into_iter().take(sound.channels.into()))
 			.flat_map(i16::to_le_bytes)
@@ -1182,7 +1218,7 @@ mod tests {
 					b"vide",
 					VIDEO_SCALE,
 					mp4_atom(b"avc1", &[]),
-					VIDEO_FRAMES,
+					video_frames,
 					40,
 					VIDEO_FRAME_BYTES,
 					video_offset,

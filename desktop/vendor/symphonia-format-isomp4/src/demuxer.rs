@@ -275,6 +275,19 @@ impl IsoMp4Reader {
         end_of_stream_error()
     }
 
+    // clecta patch: every track but the selected one, to `time`, as the seek's comments say,
+    // discarding the result. One that cannot be sought there — a picture that ends before the
+    // sound — failed the selected track's seek with it; it is left with nothing more to give
+    // instead, as the next packet is whichever track's is earliest, and one left behind would
+    // hand over all it has left first (PLAN Q72).
+    fn seek_others(&mut self, selected_track_id: usize, time: Time) {
+        for t in 0..self.track_states.len() {
+            if t != selected_track_id && self.seek_track_by_time(t, time).is_err() {
+                self.track_states[t].cur_seg = self.segs.len();
+            }
+        }
+    }
+
     fn seek_track_by_time(&mut self, track_num: usize, time: Time) -> Result<SeekedTo> {
         // Convert time to timestamp for the track.
         if let Some(track) = self.tracks.get(track_num) {
@@ -649,11 +662,7 @@ impl FormatReader for IsoMp4Reader {
                     let time = selected_track.codec_params.time_base.unwrap().calc_time(ts);
 
                     // Seek all tracks excluding the primary track to the desired time.
-                    for t in 0..self.track_states.len() {
-                        if t != selected_track_id {
-                            self.seek_track_by_time(t, time)?;
-                        }
-                    }
+                    self.seek_others(selected_track_id, time); // clecta patch
 
                     // Seek the primary track and return the result.
                     self.seek_track_by_ts(selected_track_id, ts)
@@ -667,11 +676,7 @@ impl FormatReader for IsoMp4Reader {
                 let selected_track_id = track_id.unwrap_or(0) as usize;
 
                 // Seek all tracks excluding the selected track and discard the result.
-                for t in 0..self.track_states.len() {
-                    if t != selected_track_id {
-                        self.seek_track_by_time(t, time)?;
-                    }
-                }
+                self.seek_others(selected_track_id, time); // clecta patch
 
                 // Seek the primary track and return the result.
                 self.seek_track_by_time(selected_track_id, time)

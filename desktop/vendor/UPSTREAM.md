@@ -213,3 +213,10 @@ applies them itself when a decoder returns the whole block. The trims are in tic
 track's clock, which need not be the sample rate (HE-AAC's is twice the rate decoded) or
 divide it, so the decoded block is taken as whole when it is within one tick of the packet's
 length, and each trim is then its share of the decoded frames.
+
+And one older than the edit lists: `seek` seeks every other track with `?`, so a seek past
+the end of a shorter track — a picture that ends a few frames before the sound, as downloaded
+videos' often do — fails the selected track's seek. The fix discards those results, as the
+code's own comments say it does, and leaves a track that could not be sought with no more
+samples to give: `next_sample_info` hands over the earliest track's sample, and a track left
+behind would hand over everything it has left first.
