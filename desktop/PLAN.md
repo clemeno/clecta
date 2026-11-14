@@ -227,10 +227,11 @@ clecta/
         ├── audio.rs     rodio wiring: the device sink, its Mixer, one Player per deck; load / play / pause / stop / seek
         ├── opus.rs      the Opus decoder symphonia 0.5 lacks, behind its `Decoder` trait, for WebM (Q71)
         ├── deck.rs      one deck's model: transport state machine, loaded track, position, duration (§7)
-        ├── drag.rs      PURE: a drag start to release — what it carries, where a release lands,
+        ├── drag.rs      PURE: a drag, start to release — what it carries, where a release lands,
         │                the one indicator, the queue edge it scrolls (§10, §7a, Q75)
         ├── mixer.rs     PURE gain math: fader + crossfader + Curve → the two gains. No rodio, no iced (§8)
         ├── browser.rs   the files pane's model: one directory, its entries, media categories (§9)
+        ├── cache.rs     clecta-data/cache.redb: what a scan worked out, per file and stamp (§11a, Q44)
         ├── tree.rs      the folder tree's model: nodes, expansion, path arithmetic (§9)
         ├── focus.rs     PURE: which of the four lists ⌘A and Escape are talking to, and the
         │                rule that they touch that one and no other (§9a)
@@ -239,7 +240,7 @@ clecta/
         │                answers arrive through — the never-unlearn rule and the fan-out to
         │                the panes live here (§14c, Q59)
         ├── measure.rs   a file's numbers from the store, or from a decode stored on the way past —
-        │                the stamp rules every scan goes through (§11a, §14c, Q77)
+        │                the stamp rules every lookup-or-decode goes through (§11a, §14c, Q77)
         ├── paths.rs     clecta-data/ beside the app if writable, else the per-user dir; the .app walk-up (§11);
         │                on Windows, a GUI launch's stderr into clecta-data/clecta.log
         ├── plan.rs      tests only: PLAN §3's versions against Cargo.toml and Cargo.lock
@@ -250,8 +251,10 @@ clecta/
         ├── queues.rs    PURE, and about the **set** of three: `QueueId`, the queues themselves,
         │                where each is scrolled to, which files are out being measured, and the
         │                three questions only the set can answer — is this a duplicate, what
-        │                needs measuring, where does the next track come from (§7a, Q47) — and
-        │                the three edits the duplicate warning stands in front of (§9a, Q76)
+        │                needs measuring, where does the next track come from (§7a, Q47) — the
+        │                three edits the duplicate warning stands in front of (§9a, Q76), and
+        │                what a handover does (§7b, Q78)
+        ├── select.rs    PURE: what a press does to a selection, and the deferred collapse (§9a, Q58)
         ├── settings.rs  load/save clecta-data/settings.json; a corrupt file reads as defaults (§11)
         ├── stretch.rs   a player's rate slider, the file-timeline playhead the player cannot
         │                keep itself, and the key lock's WSOLA time-stretch: every source is
@@ -270,6 +273,7 @@ clecta/
             ├── mixer.rs     the two faders and the crossfader
             ├── queue.rs  one queue's panel: add, select, reorder, send to a neighbour, the two switches (§7a)
             ├── browser.rs   the files pane and its rows
+            ├── tempo.rs     the row menu, the tempo editor, and the one overlay they are drawn in (§14d)
             ├── tree.rs      the folder tree pane, its splitter and its fold button
             └── waveform.rs  the custom advanced::Widget: a bar per pixel column, the playhead, the scrub (§14a)
 ```
@@ -888,7 +892,7 @@ that exists to be planned against must not do that.
 
 ---
 
-## 7b. The handover, whole or trimmed (`queue.rs`, `app.rs`)
+## 7b. The handover, whole or trimmed (`queue.rs`, `queues.rs`, `app.rs`)
 
 A track ends twice. The file runs out, which is what §7a's handover waits for — and before
 that, somewhere earlier, the *music* stops. In between sits whatever the encoder padded, the
@@ -1605,7 +1609,7 @@ places it can land. The mechanism above did not change shape: `drag` still arms 
 disarms on the release `gestures` already takes, and the release still asks one question about
 where the pointer is. Two things grew:
 
-- **`drag` carries a `Drag`, not a `PathBuf`** — the item plus where it came from, which is
+- **`drag` carries a `Carried`, not a `PathBuf`** — the items plus where they came from, which is
   what tells a drop whether to copy (from the files pane) or move (from a queue).
 - **`hover` is a `DropTarget`, not a `DeckId`**, and the leave message carries a `Zone`
   instead. The old "only clear if it is still mine" guard was already the right idea for two
@@ -1726,7 +1730,7 @@ aesthetic: it is the requirement.
 
 ---
 
-## 11a. The cache (`cache.rs`)
+## 11a. The cache (`cache.rs`, `measure.rs`)
 
 `clecta-data/cache.redb`, beside `settings.json` and nothing like it: **what has already been
 worked out about other people's files**, so it is not worked out again. A waveform costs a
@@ -1872,7 +1876,7 @@ was chosen for.
 
 ---
 
-## 11b. Preparing a folder (`fsio.rs`, `app.rs`, `ui/browser.rs`)
+## 11b. Preparing a folder (`fsio.rs`, `prepare.rs`, `app.rs`, `ui/browser.rs`)
 
 The cache of §11a fills itself as the app is used: a track is loaded, it is scanned, the answer
 is kept. That is enough while the only thing waiting on it is a picture — a waveform arriving a
@@ -1916,18 +1920,20 @@ again, and it clears itself when the last thread reports. Nothing ticks, nothing
 scan that is not running costs exactly nothing — the same rule every subscription in §4 follows,
 reached without needing one.
 
-Three counters, and they are separate because the files go out ahead of the answers: `next` is
-what has been handed to a thread, `done` is what has come back — which is the number on screen,
-because a count that jumped four ahead of the work would be a lie — and `running` is how many
-are out, which is what the fan-out is capped against and what says when the scan is over.
+Two counters and a list, kept by `prepare::Preparing` (Q77), and separate because the files go
+out ahead of the answers: `next` is what has been handed to a thread, `done` is what has come
+back — which is the number on screen, because a count that jumped four ahead of the work would
+be a lie — and `busy` is which files are out, whose length is what the fan-out is capped against
+and what says when the scan is over.
 
 **Stop cuts the list down to what has already gone out** rather than dropping the scan where it
 stands. There is no way to interrupt a decode that does not mean checking a flag inside the
 sample loop, so the four files in flight are going to finish either way; the counters stay
 honest, their answers are kept, and the scan clears itself as the last of them lands. Dropping
 the state instead would leave four threads reporting into a scan that no longer exists — and
-starting another one before they landed would count their files twice and run `running` past
-zero, which is a panic in a debug build and a very long scan in a release one.
+starting another one before they landed would count their files twice. An answer for a file
+this scan does not have out now counts for nothing, so a stray one cannot run a count past zero
+either, which in the old three-counter shape was a panic in a debug build.
 
 ### Clearing it
 
@@ -2033,7 +2039,7 @@ Four frames rather than a braille spinner's eight, because that counter takes 1.
 eight frames of 150 ms read as a flicker where four of 300 ms read as turning.
 
 Which files are turning has to be **kept**, not derived. The four in the air are never
-`files[done..next]` — answers come back out of order — so `Scanning` carries the paths as well
+`files[done..next]` — answers come back out of order — so `Preparing` carries the paths as well
 as the counts, and a row keeps spinning until its own file reports rather than until the next
 one goes out.
 
@@ -2248,11 +2254,22 @@ otherwise pure; anything needing a device or a real folder is manual.
   is the **row** and not the track, by leaving a second copy elsewhere and checking it is still
   found. `duplicates` gets the batch form: positions into the batch, so a caller can filter rows
   and tracks by the same answer.
+
+  The three edits behind the warning (Q76) are tested with the warning answered by a fixed
+  `Admission`: a batch with no repeats queued without a question, **Cancel** leaving every
+  queue as it was whichever way in, **No** on `→` moving exactly the rows it admits, a drag
+  across queues taking out only what lands, and a reorder never asking. The handover (Q78)
+  gets four: the last track of the evening playing its run-out, the *supplying* queue's setting
+  deciding when, the top track taken and started as its own queue says, and nothing to hand over
+  taking nothing.
 - **`known.rs`** — the door a job's answer arrives through (Q59). One test walks a whole
   answer to its three homes — the trim the players read, the mark on the pane's row, the
   queued rows holding the file — and the other pins the rule that holds the door together:
   a job that could not say takes nothing away, so a queue measurement that found nothing
-  neither un-learns a trim nor takes a mark off a row the store is happy about (Q45).
+  neither un-learns a trim nor takes a mark off a row the store is happy about (Q45). Two more
+  go through `Facts::scanned`: a player's own scan settles a queued row measured before the
+  load exactly as it marks the pane, and a scan that failed prepares nothing but still settles
+  the length.
 
   `take_unmeasured` gets the two halves of "ask about each file once", and the rename is part of
   the test: a track sitting in two queues produces one entry rather than two, and **asking twice
@@ -2390,18 +2407,28 @@ otherwise pure; anything needing a device or a real folder is manual.
   the near-misses that must *not* fire — a bare `r` or `a` above all, since a plain letter
   that re-listed the folder or selected every row would go off on any stray key press. The
   table is written in `Modifiers::COMMAND` rather than in `LOGO` or `CTRL`, so the same test
-  asserts Cmd on macOS and Ctrl on Windows.
-
-  The folder scan's bookkeeping is the third (§11b), and it is three counters with no timer:
-  the `Task`s the driver returns need a window, but the arithmetic deciding how many there are
-  does not. One test runs a whole ten-file scan an answer at a time and asserts the fan-out is
-  never exceeded, every file goes out exactly once, and no thread is left unaccounted for. The
-  other is **Stop**: nothing more goes out, the scan is not over until the four already
-  decoding report, and each of them is counted once — the case that would otherwise underflow
-  `running` the moment a second scan was started on top of a cancelled one. That second test
-  now reports its four **out of order**, which is the case the busy list exists for (§11c): the
-  files in the air are never `files[done..next]`, so the assertion is that exactly one row stops
-  spinning per answer and none is left turning at the end.
+  asserts Cmd on macOS and Ctrl on Windows. And the row menu (Q79): a queue row of a file from
+  another folder carries its own detected tempo into the editor, a corrected row shows its
+  correction while the editor still says what was detected, and a row with no tempo opens none.
+- **`prepare.rs`** — the folder scan's bookkeeping (§11b, Q77), through the calls the app makes:
+  the `Task`s the driver returns need a window, but what decides how many there are does not.
+  One test runs a whole ten-file scan an answer at a time and asserts the fan-out is never
+  exceeded, every file goes out exactly once and in order, and none is left unaccounted for.
+  **Stop** gets one: nothing more goes out, the scan is not over until the four already decoding
+  report, and they report **out of order**, which is the case the busy list exists for (§11c) —
+  the files in the air are never `files[done..next]`, so exactly one row stops spinning per
+  answer. And a stray or repeated answer counts for nothing, where the old counter would have
+  run past zero.
+- **`measure.rs`** — the cache's contract with the files (§11a, Q77), against a real store in a
+  temporary folder and a generated WAV: a scan stored, and a second one read back from the store
+  rather than decoded again; a scan that fails storing nothing; "no length" remembered as an
+  answer; and a queue measurement reading a scan's numbers only once something has scanned the
+  file, never claiming to have prepared it.
+- **`drag.rs`** — a drag's bookkeeping (§10, Q75, Q80): exactly one indicator, a leave reported
+  after the next enter not wiping it, files from outside ringing the idle player and only the
+  first file of a drop counting, a release over nothing being a plain click that still disarms,
+  a release or a disarm stopping the edge scroll, and rows renumbered under the drag — a track
+  handed over mid-drag — no longer counting as what was carried.
 - **`audio.rs`** — one test, and the only one this module can have: everything else here
   needs an output device. A *scan* does not, so the decode path is checked for real, from a
   file on disk to the array the widget draws. The fixture is generated rather than
@@ -3308,7 +3335,7 @@ decided.
 | Q56 | Whether the Notice needs a module | **A door, not a module.** The one-line notice (GLOSSARY.md) is a field, and a field is a fine home — what was smeared was its *delivery*: four arms each re-wrote "a device's refusal replaces the line, silence means fine", and `accept_drop` was a forwarder with one caller that failed the deletion test. The rule is now one method (`noted`) and the forwarder is inlined into the OS-drop arm. `Deck` keeps returning `Option<String>` on purpose: that return is Q48's pairing speaking, and it is what lets every transport edge be checked with no device in the room | §7, §10, Q48 |
 | Q57 | Where the handover's two decisions live | **Both on `Handover`.** §7b derives the *when* and the *where* from the one whole-vs-trimmed choice (Q51), but the code had them in different homes: `hands_over_early` was a free function taking the setting as its first argument, and the where — seek to the music's first edge, or leave the load at the top — was an inline condition in `advance` that no test reached. Both are methods on the setting now, `hands_over_early` and `starts_at`, each tested; `advance` keeps only what must stay in `app.rs` — the take, the load, the verify — because those are IO, and the seam between decision and execution is the same one `Deck::moved` draws (Q48) | §7b, Q51, Q48 |
 | Q58 | Where the two-stage collapse lives | **On a type in `select.rs`, generic over what was pressed.** Q50 built the machine as two `Option` fields on the app, and both of its shipped bugs (Q50's stale index, Q53's missing cancel) were a clear-site an arm forgot or ordered wrongly — nine arms each remembered which of the two fields to clear and in what order, and none of it was testable, because the interface was two raw fields. `select::Collapse<T>` makes the ordering rules methods: `arm` and `disarm` abandon an older pending click synchronously (the row arms' own clear, Q53), `pressed_anywhere` touches pending only (the raw listener's side of the same rule), `release` promotes, `cancel` claims both stages, `due` spends. Generic because the panes remember a pressed row differently (§9a); `Pressed` itself stays in `app.rs`. Q53's ordering hazard is now an assertion — the armed stage survives an anywhere-press, the pending stage does not | §9a, Q50, Q53 |
-| Q59 | Who owns what a run has learned about files | **One module, `known.rs`, and one door in.** The answers from three jobs — a track's own scan, a folder scan, a queue measurement — landed in three places (the trims the players and the handover read, the pane's marks, the queues' rows), and the fan-out was a method on the app that only two of the three producers went through; the rule that holds it together, "a job that could not say says nothing" (Q45), was enforced by prose at every producer. `Known` owns the trims and the fan-out — `learned` takes the browser and the queues as arguments, so the app stays the owner of its panes and the module stays pure and testable — and `Facts` moves in with it, because it is the vocabulary of the door. The pane's own map stays on `Browser` deliberately: it is a copy of the store's answer about *one listing*, with a listing's lifetime, not the run's. The track's own scan still went round the door, by hand to the trims and the pane's mark and never to the queues, so a row queued before its file was loaded kept a blank tempo beside a ✓ (found 2026-11-14). It comes through `learned` now, carrying the length its load read, which is the same decoder call a queue measurement makes; the player's half of the answer, and the guard against a scan for a track replaced since, is `Deck::scanned`, with `Deck::loaded` beside it as Q48's pairing for the load | §14c, §11c, Q45, Q48 |
+| Q59 | Who owns what a run has learned about files | **One module, `known.rs`, and one door in.** The answers from three jobs — a track's own scan, a folder scan, a queue measurement — landed in three places (the trims the players and the handover read, the pane's marks, the queues' rows), and the fan-out was a method on the app that only two of the three producers went through; the rule that holds it together, "a job that could not say says nothing" (Q45), was enforced by prose at every producer. `Known` owns the trims and the fan-out — `learned` takes the browser and the queues as arguments, so the app stays the owner of its panes and the module stays pure and testable — and `Facts` moves in with it, because it is the vocabulary of the door. The pane's own map stays on `Browser` deliberately: it is a copy of the store's answer about *one listing*, with a listing's lifetime, not the run's. The track's own scan still went round the door, by hand to the trims and the pane's mark and never to the queues, so a row queued before its file was loaded kept a blank tempo beside a ✓ (found 2026-11-14). It comes through `learned` now, carrying the length its load read, which is the same decoder call a queue measurement makes; the player's half of the answer, and the guard against a scan for a track replaced since, is `Deck::scanned`, with `Deck::loaded` beside it, the model's half of a load the app has already asked the engine for | §14c, §11c, Q45, Q48 |
 | Q60 | What Unload does, and what it asks first | **Empty the player, and ask only while the sound is on.** The button sits beside **Load…** and puts the player back to `Empty` — track, playhead, waveform and the scanning flag all go; the fader stays, because it is a mixer setting rather than track state. The pairing is Q48's: `Deck::unloaded` moves the model and the audio together, with no `Option<String>` return because dropping a source is the one thing a device cannot refuse. The scanning flag must go *here*: `Deck::scanned` drops a result for a track no longer loaded, so nothing else would ever stop the animation. The confirmation is the same rfd modal the destructive buttons use, and only for a playing player — unloading a stopped track costs one Load to undo, while cutting audible playback is the mistake a modal exists for. Auto-load cannot refill the emptied player: `advance` runs only when a track *ends* (§7a), and an unloaded player has no track to end | §7, Q48, §7a |
 | Q61 | Which key detector, and where it lives | **Krumhansl–Schmuckler over a Goertzel chroma, as the fourth accumulator in `waveform.rs`.** The scan already decodes every sample (§14a), so the key rides the same pass — §14a's "a struct, a field, a `push` and a `finish`" promise, kept. The profiles are Krumhansl & Kessler's listener measurements, the standard baseline detector; Goertzel over an FFT because thirty-six named notes cost no dependency (§12); a boxcar decimation whose aliasing is accepted and marked, because the correlation is robust to it. A fifth cache table on the all-or-nothing rule (§11a), so an old store re-scans once instead of migrating. The column goes just before the tempo in both panes — a set is matched by key before it is matched by speed — and prints sharps only, `m` for minor, no Camelot numbers | §14e, §11a, §12 |
 | Q62 | Who keeps the playhead once a player has a rate | **The app, in a wrapper around every source — never `Player::get_pos`.** rodio's count is in the output's timeline (slow by the factor at 150%), its seeks are scaled by the speed stage, and the anchor a seek leaves behind goes wrong if the rate changes afterwards — a drift with no bound but the seek target. `stretch::Stretched` counts the interleaved source samples it hands the player, batched into one atomic; `Engine::seek` divides by the rate so the speed stage multiplies it back. The slider itself is a fader, not track state — it survives loads and unloads like the volume fader — and its 0% end is a pause gate on the `Deck` (`RATE_FLOOR`), because a transport rule belongs with the transport (Q48) and rodio must not be handed a speed of zero | §7c, Q48, §14b |
@@ -3326,7 +3353,7 @@ decided.
 | Q74 | What to do about the macOS build's future-incompatibility warning | **Vendor `block` 0.1.6 with its one static of an uninhabited type made an opaque one.** The macOS cross-check warned that `block`'s `extern static _NSConcreteStackBlock: Class`, `Class` an empty enum, will one day be an error (rust#74840, a warning since 2020). It reaches clecta only on macOS: iced 0.14 → wgpu 27 → wgpu-hal's Metal backend → `metal` 0.32 → `block`. No upgrade removes it: iced 0.14.0 is the latest iced, `block` has had no release since 0.1.6, and wgpu-hal still used `metal` and `block` in 28, moving to `objc2-metal` and `block2` only in 29. Waiting was weighed, since the pinned Rust (§3) means only a deliberate bump could turn it into an error and the macOS clippy would then fail on that bump; the user chose to vendor it now. `Class` becomes a `#[repr(C)]` struct of `[u8; 0]`, the usual opaque foreign type, which changes nothing that runs, as only `&` and `*const` of it are ever taken. A path dependency's warnings are not capped as a registry one's are, and this 2015 crate leaves its `extern` ABI implicit at every foreign item, 46 warnings of `missing_abi`, so the crate allows that lint. Both changes are marked `clecta patch` in `src/lib.rs`, held to that by `check-vendor.sh`. Proof: a fresh macOS clippy build of `block` no longer prints the future-incompatibility note. It can go the day iced moves to wgpu 29 or later; `cargo tree -i block --target all` then prints nothing | §3, §5, §12, Q69 |
 | Q75 | Where a drag's bookkeeping lives | **On one type, `drag::Drag`, the way the collapse moved in Q58.** It was four `Option` and `bool` fields on the app — what was carried, the hovered target, the OS hover, the scrolling edge — read and written by eleven arms and two view helpers, and the README listed its rules as the half of the app that has always broken: one indicator at a time, a late leave not wiping a newer enter, a release on an edge stopping the scroll. None of them had a test, because the interface was raw fields. `Drag` keeps them private behind `arm`, `disarm`, `over`, `out`, `edge`, `files_hovered`, `files_dropped`, `ring`, `caret`, `scrolling` and `release`, which hands back where the carried rows landed or `None` for a plain click; each rule is a test now. What a landing *does* — load a player, move rows, cancel the collapse — stays in the app, which owns the players and the queues. The divider's own drag (`decks_drag`) stays out: it is a resize, not something carried, and only shares the release | §10, §7a, Q58, Q50 |
 | Q76 | Where the edits behind the duplicate warning live | **On `Queues`, with the warning passed in.** Adding from the files pane, `←` / `→`, and a drop into a queue each wrote out the same four steps in the app — find the duplicates, ask, filter, then take and insert — because the dialog sat in the middle, and the dialog is the app's. So "both halves or neither" and "Cancel leaves every queue as it was" had no test, and Q47's move of the set's rules into `queues.rs` had stopped short of them. `Queues::add`, `shift` and `dropped` now hold the steps, and each takes the question as a function: the app passes `admits`, its rfd dialog, and the tests pass a fixed `Admission` — two adapters, so the seam is real. `Admission` moves with them, and so does "no repeats, no question", which was the dialog's first line. Still synchronous, so Q38's objection to a dialog with a continuation does not arise: a modal blocks, and the edit finishes in the same call | §9a, §7a, Q47, Q38, Q54 |
-| Q77 | Where the folder scan's bookkeeping and the cache-or-decode functions live | **Two modules of their own: `prepare.rs` and `measure.rs`.** The folder scan's state was a struct of public counters in `app.rs`, and its two tests did the driver's arithmetic themselves (`next += slots; running += slots`) rather than calling it, so a mistake in the driver would have passed them. `prepare::Preparing` keeps the counters private behind `new`, `hand_out`, `landed`, `stop`, `is_over`, `progress` and `busy`, the four calls the app makes; `running` is gone, since it was always the busy list's length, and an answer for a file not out now counts for nothing rather than running a counter below zero. The three cache-or-decode functions every scan goes through — a player's, a folder scan's, a queue measurement's — sat untested at the bottom of `app.rs`, though they hold the cache's whole contract with the files: no stamp, no caching; a failed scan is not stored; "no length" is. They are `measure::scan`, `facts` and `duration` now, tested against a real store in a temporary folder. Two modules rather than one because they are two things: a driver with no I/O, and the I/O it drives | §11a, §11b, §11c, Q29, Q36, Q44 |
+| Q77 | Where the folder scan's bookkeeping and the cache-or-decode functions live | **Two modules of their own: `prepare.rs` and `measure.rs`.** The folder scan's state was a struct of public counters in `app.rs`, and its two tests did the driver's arithmetic themselves (`next += slots; running += slots`) rather than calling it, so a mistake in the driver would have passed them. `prepare::Preparing` keeps the counters private behind `new`, `hand_out`, `landed`, `stop`, `is_over`, `progress` and `busy`, the seven calls the app makes; `running` is gone, since it was always the busy list's length, and an answer for a file not out now counts for nothing rather than running a counter below zero. The three cache-or-decode functions every scan goes through — a player's, a folder scan's, a queue measurement's — sat untested at the bottom of `app.rs`, though they hold the cache's whole contract with the files: no stamp, no caching; a failed scan is not stored; "no length" is. They are `measure::scan`, `facts` and `duration` now, tested against a real store in a temporary folder. Two modules rather than one because they are two things: a driver with no I/O, and the I/O it drives | §11a, §11b, §11c, Q29, Q36, Q44 |
 | Q78 | Where the handover is decided | **On `Queues`: `cuts_early` and `hand_over`.** Q57 put the setting's two halves on `Handover` and tested each, but how they combine — cut early only when some queue will supply a track, ask the *supplying* queue rather than the player's cue, take its top track, start it where that queue says, play it only if that queue says — was spread over `poll_players`, `cuts_early` and `advance` in the app, and README called the handover the one check worth waiting for. `cuts_early` moves to `Queues` as it was; `hand_over` takes the next track and returns a `NextTrack` (path, start, auto-play), and each combination is a test. This moves the take as well, which Q57's row counted with the IO: it is an edit to a queue, and the queue it comes from is the one whose switches answer. What stays in `advance` is the IO and what hangs on it: the load, the check that the file arrived, and the seek and Play that only follow if it did. No `Engine` trait, so Q48's seam is untouched | §7a, §7b, Q57, Q48, Q26 |
 | Q79 | How the row menu and the tempo editor are held | **As one `Overlay`, menu or editor, with the menu carrying what its row's pane detected.** They were two `Option` fields with "never both" in a doc comment, and the menu worked out its tempo by writing Q41's rule out inline, twice, once per pane. Worse, the editor read "detected" from the files pane whatever pane the menu had been opened in, so a queue row of a file from another folder opened an editor with no detected line — the files pane had never listed it. `RowMenu::new` now applies the correction through `ui::corrected_tempo`, the one function every row is drawn with (Q41, Q43), and keeps the `detected` its own pane knew; `correct` turns it into the editor. A `Corrections` type owning the map was weighed and left: the rule is already one function, and wrapping the map would reach into `settings.json` and every pane for no second behaviour | §14d, Q41, Q43 |
 | Q80 | What a drop does when its queue changed under the drag | **Nothing, and it says so.** A drag out of a queue remembers its rows by number at the press, and nothing stops a track ending mid-drag: the handover takes the source queue's top row, every row below it moves up one, and the release then took the rows by their old numbers — other tracks, so a carried track could land in two queues while its neighbour vanished, with no notice (found in review, 2026-11-14; older than Q75). `Carried::still_in` checks each row still holds the track that was carried, by path, the check the delayed click already makes (Q50); a release that fails it moves nothing and puts a line in the notice. Re-finding the rows by path was weighed and left: a queue may hold one file twice, and which copy was meant is exactly what the numbers were for. `Drag::disarm` clears everything as `release` does, because a disarmed drag has no edges left to report a leave | §7a, §10, Q50, Q75 |

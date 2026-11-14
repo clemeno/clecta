@@ -1,6 +1,7 @@
 //! Measuring a file: its numbers from the store when the store has them, from the file when it
-//! does not, and into the store on the way past (PLAN §11a, §14c). Every scan comes through
-//! here — a player's own, a folder scan's, a queue measurement — whoever asked for the decode.
+//! does not, and into the store on the way past (PLAN §11a, §14c). Every lookup-or-decode
+//! comes through here — a player's own scan, a folder scan's, a queue measurement's lookup —
+//! whoever asked.
 //!
 //! These were three free functions at the bottom of `app.rs` with no test, and the rules they
 //! hold are the cache's whole contract with the files: no stamp, no caching; a failed scan is
@@ -124,6 +125,11 @@ mod tests {
 		let path = tone(&dir);
 		let first = scan(&cache, &path).expect("a tone decodes");
 		let stamp = cache::stamp(&path).expect("stat of a file just written");
+		assert_eq!(
+			cache.scan(&path, stamp),
+			Some(first.clone()),
+			"the decode was stored"
+		);
 
 		// Act: the store's answer replaced by one no decode of this file could give.
 		let marked = Scan {

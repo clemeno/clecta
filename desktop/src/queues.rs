@@ -1,5 +1,6 @@
 //! The three queues as one thing (PLAN §7a, Q47): the queues, where each is scrolled to, and
-//! which files are out being measured.
+//! which files are out being measured — plus the edits that cross them behind the duplicate
+//! warning (Q76) and what a handover takes and how it starts (Q78).
 //!
 //! `queue.rs` is one queue — its rows, its selection, what every edit does to that selection.
 //! This is the *set* of three, and the difference is not bookkeeping: half the rules in §7a are

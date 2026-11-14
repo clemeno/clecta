@@ -58,9 +58,9 @@ const TABLES: [TableDefinition<&str, &[u8]>; 5] = [WAVEFORMS, DURATIONS, TRIMS, 
 /// The four a full scan is spread across, **in the order a `Scan`'s fields are written**.
 ///
 /// This array is the all-or-nothing rule, and having it in one place is the point: the rule used
-/// to be written twice, once in the app's `cached_scan` and once in `prepared` here, with a
-/// comment saying the two had to be kept in step by hand. Adding the tempo table meant editing
-/// both, which is how a comment like that gets found out.
+/// to be written twice, once in the app's `cached_scan` (now `measure::scan`) and once in
+/// `prepared` here, with a comment saying the two had to be kept in step by hand. Adding the
+/// tempo table meant editing both, which is how a comment like that gets found out.
 const FULL: [TableDefinition<&str, &[u8]>; 4] = [WAVEFORMS, TRIMS, TEMPOS, KEYS];
 
 /// The record layout's version, in the first byte of every value.

@@ -388,7 +388,7 @@ pub struct Clecta {
 	/// — is the type's business, not the arms'.
 	known: Known,
 	/// The folder scan, while one is running (PLAN §11b). `None` at rest, which is also what
-	/// the Cancel button leaves behind once the files already out have come back.
+	/// **Stop** leaves behind once the files already out have come back.
 	preparing: Option<Preparing>,
 	/// What is being held on the keyboard right now (PLAN §9a).
 	///

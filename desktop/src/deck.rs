@@ -340,9 +340,10 @@ impl Deck {
 		reload.or(self.moved(id, Event::Ended, engine))
 	}
 
-	/// Put a track the device has just accepted into the model: stopped at the top, its own
-	/// scan starting (PLAN §7, §14a). The engine is the caller's to ask first, because a file
-	/// it refuses must leave the loaded track alone, and only the caller has a notice to say so.
+	/// Put a track the device has just accepted into the model: stopped at the top, and marked
+	/// as scanning, since the caller starts its scan alongside (PLAN §7, §14a). The engine is
+	/// the caller's to ask first, because a file it refuses must leave the loaded track alone,
+	/// and only the caller has a notice to say so.
 	///
 	/// The peaks are cleared now rather than when the new scan lands, so the strip never shows
 	/// the outgoing track's shape under the incoming track's playhead. The tempo and the key

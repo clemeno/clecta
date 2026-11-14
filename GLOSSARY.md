@@ -163,8 +163,8 @@ many targets as it has rows.
 
 **Drag**:
 Rows carried from a press to its release — out of the files pane, which copies them, or out
-of a queue, which moves them — or files from outside hovering the window. A release over
-nothing is a plain click.
+of a queue, which moves them — or files from outside hovering the window. An in-app release
+over nothing is a plain click.
 
 **Drop target**:
 What a dragged thing would land on if released now — a deck, or one row of a queue.

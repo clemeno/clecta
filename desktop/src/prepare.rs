@@ -5,7 +5,7 @@
 //! and reports each answer back with `landed`. The counters were three public fields of a struct
 //! in `app.rs`, and its two tests did the driver's arithmetic themselves rather than calling it,
 //! so a mistake in the driver passed them (Q77). They are private now, and the tests go through
-//! the same four calls the app makes.
+//! the same calls the app makes.
 
 use std::path::{Path, PathBuf};
 
@@ -19,10 +19,10 @@ pub const SCAN_JOBS: usize = 4;
 
 /// A folder scan in flight.
 ///
-/// `next` and `done` are separate counters because the files go out ahead of the answers:
-/// `SCAN_JOBS` of them are always in the air, so the number on screen has to be the one that
-/// has come *back*, and the scan is over when the last thread reports rather than when the
-/// last file is handed out.
+/// `next` and `done` are separate counters because the files go out ahead of the answers: up
+/// to `SCAN_JOBS` of them are in the air at once, so the number on screen has to be the one
+/// that has come *back*, and the scan is over when the last thread reports rather than when
+/// the last file is handed out.
 #[derive(Debug)]
 pub struct Preparing {
 	files: Vec<PathBuf>,
