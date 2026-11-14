@@ -1390,22 +1390,9 @@ impl Clecta {
 				// *file*, whatever is loaded in the player by now (PLAN §14c). Through the one
 				// door the other two scans use (Q59), so a queued row of this file learns it
 				// as the files pane's mark does — loading a track prepares it (PLAN §11c).
-				let ready = result.as_ref().ok().map(|scan| Ready {
-					trim: scan.trim,
-					tempo: scan.tempo,
-					key: scan.key,
-				});
-				self.known.learned(
-					&Facts {
-						path: path.clone(),
-						duration,
-						ready,
-						// The same `ponytail:` as `scan_file`'s: worked is taken to be stored.
-						prepared: ready.is_some(),
-					},
-					&mut self.browser,
-					&mut self.queues,
-				);
+				let facts = Facts::scanned(path.clone(), duration, result.as_ref().ok());
+				self.known
+					.learned(&facts, &mut self.browser, &mut self.queues);
 				let notice = self.decks[id.index()].scanned(id, &path, result);
 				self.noted(notice);
 			}
@@ -2613,22 +2600,9 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 
 	off_thread(
 		move || {
-			let scan = measure::scan(&cache, &path);
-			Facts {
-				// `ponytail:` a scan that worked is taken to be a scan that was *stored*, which
-				// is one case out: a file that cannot be stat'd is deliberately never cached
-				// (`measure::scan`), so its row is marked prepared and is not. Self-correcting —
-				// the next listing asks the store and takes the mark straight back off — and the
-				// alternative is a second lookup per file to learn what the decode already knew.
-				prepared: scan.is_ok(),
-				ready: scan.ok().map(|scan| Ready {
-					trim: scan.trim,
-					tempo: scan.tempo,
-					key: scan.key,
-				}),
-				duration: measure::duration(&cache, &path),
-				path,
-			}
+			let scan = measure::scan(&cache, &path).ok();
+			let duration = measure::duration(&cache, &path);
+			Facts::scanned(path, duration, scan.as_ref())
 		},
 		move |facts| {
 			// A file that would not decode still counts as done, or the progress would stop on

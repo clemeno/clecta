@@ -16,7 +16,7 @@ use std::time::Duration;
 use crate::browser::Browser;
 use crate::cache::Ready;
 use crate::queues::Queues;
-use crate::waveform::Trim;
+use crate::waveform::{Scan, Trim};
 
 /// What a background job worked out about one file (PLAN §7a, §11a, §14c).
 ///
@@ -42,6 +42,34 @@ pub struct Facts {
 	/// it out*, never "and it is not prepared". A queue measurement only reads, so it says
 	/// `false` and takes no mark away — the listing's own question is what removes one.
 	pub prepared: bool,
+}
+
+impl Facts {
+	/// What a decode of the whole file says — a player's own scan or a folder scan's — given
+	/// its length and the scan, `None` when the decode failed (PLAN §11c, §14c).
+	///
+	/// A scan that worked prepares the file, whoever asked for it: loading a track gives its
+	/// row the mark the folder scan would have, one rule either way. A failed one says nothing
+	/// about the music and takes nothing away, but the length still stands.
+	///
+	/// `ponytail:` a scan that worked is taken to be a scan that was *stored*, which is one case
+	/// out: a file that cannot be stat'd is deliberately never cached (`measure::scan`), so its
+	/// row is marked prepared and is not. Self-correcting — the next listing asks the store and
+	/// takes the mark straight back off — and the alternative is a second lookup per file to
+	/// learn what the decode already knew (Q36).
+	pub fn scanned(path: PathBuf, duration: Option<Duration>, scan: Option<&Scan>) -> Self {
+		let ready = scan.map(|scan| Ready {
+			trim: scan.trim,
+			tempo: scan.tempo,
+			key: scan.key,
+		});
+		Self {
+			path,
+			duration,
+			ready,
+			prepared: ready.is_some(),
+		}
+	}
 }
 
 /// The answers themselves, plus the fan-out that keeps every pane agreeing about one file.
@@ -189,5 +217,51 @@ mod tests {
 			"no answer un-learns an older one"
 		);
 		assert!(!browser.is_prepared(&path()));
+	}
+
+	#[test]
+	fn a_players_own_scan_settles_a_queued_row_as_the_pane_does() {
+		// Arrange: the cue's row was measured before the track was loaded — a length, but no
+		// tempo, because nothing had scanned the file then.
+		let (mut browser, mut queues) = panes();
+		let mut known = Known::default();
+		let length = Some(Duration::from_secs(10));
+		queues.measured(&path(), length, None);
+		let scan = Scan {
+			peaks: vec![0.5],
+			trim: None,
+			tempo: Some(128.0),
+			key: None,
+		};
+
+		// Act: the player's scan of it lands.
+		known.learned(
+			&Facts::scanned(path(), length, Some(&scan)),
+			&mut browser,
+			&mut queues,
+		);
+
+		// Assert: the queued row learns the tempo the pane's mark shows (the b40091b fix).
+		let row = &queues.get(QueueId::Cue(DeckId::One)).items()[0];
+		assert_eq!(row.ready.and_then(|ready| ready.tempo), Some(128.0));
+		assert!(browser.is_prepared(&path()));
+	}
+
+	#[test]
+	fn a_scan_that_failed_prepares_nothing_but_still_settles_the_length() {
+		// Arrange: a row nothing has measured yet.
+		let (mut browser, mut queues) = panes();
+		let mut known = Known::default();
+
+		// Act
+		let facts = Facts::scanned(path(), Some(Duration::from_secs(10)), None);
+		known.learned(&facts, &mut browser, &mut queues);
+
+		// Assert
+		assert!(!facts.prepared);
+		assert!(!browser.is_prepared(&path()));
+		let row = &queues.get(QueueId::Cue(DeckId::One)).items()[0];
+		assert_eq!(row.duration, Some(Some(Duration::from_secs(10))));
+		assert_eq!(row.ready, None);
 	}
 }
