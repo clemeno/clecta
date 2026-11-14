@@ -417,12 +417,9 @@ pub struct Clecta {
 	/// what a menu needs to open under the pointer (PLAN §14d). `None` until the first right
 	/// press of the run, which is a menu centred as it used to be.
 	pointer: Option<Point>,
-	/// The row menu, while it is open. `None` is the ordinary state and is also what every way
-	/// of dismissing it leaves behind.
-	menu: Option<RowMenu>,
-	/// The tempo editor, while it is open. Never both this and `menu`: opening the editor is
-	/// what closes the menu, so the two are one overlay and one Escape.
-	correcting: Option<TempoCorrection>,
+	/// The row menu or the tempo editor, while one is open. `None` is the ordinary state and is
+	/// also what every way of dismissing either leaves behind.
+	overlay: Option<Overlay>,
 	/// The collapse a plain press on a selected row still owes (Q50, Q58): armed by a
 	/// deferring press (`Click::defers`), promoted to pending by its release, spent by the
 	/// timer — and cancelled by anything that acts on the selection in the meantime, so a
@@ -457,6 +454,10 @@ struct RowMenu {
 	name: String,
 	/// What the row is showing, corrections included, and `None` when nothing has scanned it.
 	tempo: Option<f32>,
+	/// What the detector said, as the pane the menu was opened in knows it — the files pane's
+	/// mark or the queue row's own. Carried into the editor, because a queue row of a file from
+	/// another folder is one the files pane has never heard of.
+	detected: Option<f32>,
 	/// Where the press that opened it was, so the panel appears under the pointer rather than
 	/// in the middle of the window (PLAN §14d). Copied at open like the two fields above: a
 	/// menu that moved because a later press landed somewhere else would be a menu that walks.
@@ -478,6 +479,49 @@ struct TempoCorrection {
 	/// Where the menu it grew out of was, so the editor opens in its place rather than jumping
 	/// to the middle of the window as the entry is clicked.
 	at: Option<Point>,
+}
+
+/// What is drawn over the window, if anything (PLAN §14d): the row menu, or the tempo editor it
+/// opens. One value because they are one panel in two states — never both at once, and one
+/// Escape closes whichever is there.
+#[derive(Debug, Clone)]
+enum Overlay {
+	Menu(RowMenu),
+	Editor(TempoCorrection),
+}
+
+impl RowMenu {
+	/// The menu over one row. `detected` is what that row's own pane knows about the file, and
+	/// the tempo shown is that with any correction applied — by the one function every row is
+	/// drawn with (Q41), so the menu cannot disagree with the row it was opened on.
+	fn new(
+		path: PathBuf,
+		name: String,
+		detected: Option<f32>,
+		tempos: &BTreeMap<PathBuf, f32>,
+		at: Option<Point>,
+	) -> Self {
+		Self {
+			tempo: ui::corrected_tempo(tempos, &path, Some(detected)).flatten(),
+			detected,
+			path,
+			name,
+			at,
+		}
+	}
+
+	/// **Correct tempo…**: the editor in the menu's place, starting from the number the row
+	/// shows and saying what the detector said. `None` for a row with no tempo at all, which has
+	/// nothing to correct.
+	fn correct(self) -> Option<TempoCorrection> {
+		Some(TempoCorrection {
+			value: self.tempo?,
+			detected: self.detected,
+			path: self.path,
+			name: self.name,
+			at: self.at,
+		})
+	}
 }
 
 impl Clecta {
@@ -540,8 +584,7 @@ impl Clecta {
 			tempos: settings.tempos,
 			focus: Focus::default(),
 			pointer: None,
-			menu: None,
-			correcting: None,
+			overlay: None,
 			collapse: Collapse::default(),
 		};
 		app.apply_gains();
@@ -830,7 +873,7 @@ impl Clecta {
 				// Escape is "never mind", and that includes the collapse a click still owes —
 				// at either stage, or a release after the Escape would revive it (Q50).
 				self.collapse.cancel();
-				if self.menu.take().is_none() && self.correcting.take().is_none() {
+				if self.overlay.take().is_none() {
 					self.focus.clear(&mut self.browser, &mut self.queues);
 				}
 			}
@@ -840,58 +883,42 @@ impl Clecta {
 			Message::PointerPressed(at) => self.pointer = Some(at),
 
 			Message::RowMenuOpened(path) => {
-				let name = fsio::name_of(&path);
 				let detected = self.browser.ready(&path).and_then(|ready| ready.tempo);
-				self.menu = Some(RowMenu {
-					tempo: self.tempos.get(&path).copied().or(detected),
-					path,
-					name,
-					at: self.pointer,
-				});
+				let name = fsio::name_of(&path);
+				let menu = RowMenu::new(path, name, detected, &self.tempos, self.pointer);
+				self.overlay = Some(Overlay::Menu(menu));
 			}
 
 			// A queue names its rows by position, so the path is read here rather than carried in
 			// the message: the row could have moved between the press and this arm.
 			Message::QueueMenuOpened(id, index) => {
 				if let Some(item) = self.queues.get(id).items().get(index) {
-					self.menu = Some(RowMenu {
-						tempo: self
-							.tempos
-							.get(&item.path)
-							.copied()
-							.or_else(|| item.ready.and_then(|ready| ready.tempo)),
-						path: item.path.clone(),
-						name: item.name.clone(),
-						at: self.pointer,
-					});
+					let menu = RowMenu::new(
+						item.path.clone(),
+						item.name.clone(),
+						item.ready.and_then(|ready| ready.tempo),
+						&self.tempos,
+						self.pointer,
+					);
+					self.overlay = Some(Overlay::Menu(menu));
 				}
 			}
 
-			Message::MenuDismissed => {
-				self.menu = None;
-				self.correcting = None;
-			}
+			Message::MenuDismissed => self.overlay = None,
 
 			// The menu closes as the editor opens: they are one panel in two states, and two
 			// panels over each other would be two ways to dismiss one thing.
 			Message::TempoCorrectionOpened => {
-				if let Some(menu) = self.menu.take()
-					&& let Some(value) = menu.tempo
-				{
-					self.correcting = Some(TempoCorrection {
-						detected: self.browser.ready(&menu.path).and_then(|ready| ready.tempo),
-						path: menu.path,
-						name: menu.name,
-						value,
-						at: menu.at,
-					});
-				}
+				self.overlay = match self.overlay.take() {
+					Some(Overlay::Menu(menu)) => menu.correct().map(Overlay::Editor),
+					other => other,
+				};
 			}
 
 			// Held in the editor and nowhere else until **Apply**, which is what makes Cancel
 			// free: nothing has been written, so there is nothing to put back.
 			Message::TempoScaled(factor) => {
-				if let Some(correction) = self.correcting.as_mut() {
+				if let Some(Overlay::Editor(correction)) = self.overlay.as_mut() {
 					let scaled = correction.value * factor;
 					// The guard is for the map and the column downstream, not for this button: a
 					// tempo halved out of every sensible range is the user's business, but one
@@ -903,8 +930,10 @@ impl Clecta {
 			}
 
 			Message::TempoApplied => {
-				if let Some(correction) = self.correcting.take() {
-					self.tempos.insert(correction.path, correction.value);
+				if let Some(Overlay::Editor(correction)) = &self.overlay {
+					self.tempos
+						.insert(correction.path.clone(), correction.value);
+					self.overlay = None;
 					// A correction is a setting, so it is saved the way every other setting is —
 					// on the throttle, not immediately (PLAN §11).
 					self.dirty = true;
@@ -2078,14 +2107,13 @@ impl Clecta {
 
 		// The one place anything is drawn over the window (PLAN §14d), and the window goes
 		// through it whether or not there is: see `over` for why it must.
-		let panel = match (&self.menu, &self.correcting) {
-			(Some(menu), _) => Some((ui::tempo::menu(&menu.name, menu.tempo), menu.at)),
-			(_, Some(correction)) => Some((
+		let panel = self.overlay.as_ref().map(|overlay| match overlay {
+			Overlay::Menu(menu) => (ui::tempo::menu(&menu.name, menu.tempo), menu.at),
+			Overlay::Editor(correction) => (
 				ui::tempo::editor(&correction.name, correction.value, correction.detected),
 				correction.at,
-			)),
-			_ => None,
-		};
+			),
+		});
 		ui::tempo::over(window, panel, self.window)
 	}
 
@@ -2669,5 +2697,53 @@ mod tests {
 				"{key:?} with {modifiers:?}"
 			);
 		}
+	}
+
+	/// The menu over a row, as either pane opens it: here with what the row's pane detected.
+	fn menu(detected: Option<f32>, tempos: &BTreeMap<PathBuf, f32>) -> RowMenu {
+		RowMenu::new(
+			PathBuf::from("/elsewhere/a.mp3"),
+			"a.mp3".to_string(),
+			detected,
+			tempos,
+			None,
+		)
+	}
+
+	#[test]
+	fn the_editor_says_what_the_rows_own_pane_detected() {
+		// Arrange: a queue row of a file from another folder, which the files pane has never
+		// listed, so only the row itself knows what the detector said.
+		let opened = menu(Some(87.0), &BTreeMap::new());
+
+		// Act
+		let editor = opened
+			.correct()
+			.expect("a row with a tempo has one to correct");
+
+		// Assert
+		assert_eq!(editor.value, 87.0);
+		assert_eq!(editor.detected, Some(87.0));
+	}
+
+	#[test]
+	fn a_corrected_row_shows_its_correction_and_the_editor_still_says_what_was_detected() {
+		// Arrange
+		let tempos = BTreeMap::from([(PathBuf::from("/elsewhere/a.mp3"), 174.0)]);
+
+		// Act
+		let opened = menu(Some(87.0), &tempos);
+		let shown = opened.tempo;
+		let editor = opened.correct().expect("a corrected row has a tempo");
+
+		// Assert: the number the row is drawn with, and the editor starting from it.
+		assert_eq!(shown, Some(174.0));
+		assert_eq!((editor.value, editor.detected), (174.0, Some(87.0)));
+	}
+
+	#[test]
+	fn a_row_with_no_tempo_opens_no_editor() {
+		// Arrange / Act / Assert
+		assert!(menu(None, &BTreeMap::new()).correct().is_none());
 	}
 }
