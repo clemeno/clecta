@@ -274,9 +274,9 @@ decode and where its seeks land, within 5 ms, and a seek made right after one to
 as a fresh one does (PLAN Q72). Real files given as arguments are probed too, and so is each
 line of `scripts/probe-files.local`, a gitignored list of your own; a file still being probed
 after five minutes fails it. The last step compares each
-vendored crate (rodio, and symphonia's MP4 reader, MP3 decoder and Vorbis decoder) with its
-crates.io tarball: any difference outside the files it patches fails, and so does a change in
-those files without a `clecta patch` marker (PLAN Q69, Q72, Q73).
+vendored crate (rodio, symphonia's MP4 reader, MP3 decoder and Vorbis decoder, and `block`) with
+its crates.io tarball: any difference outside the files it patches fails, and so does a change in
+those files without a `clecta patch` marker (PLAN Q69, Q72, Q73, Q74).
 
 Two more, run by hand. On Windows, `scripts/smoke-windows.ps1` launches an isolated copy of
 the debug build, through `scripts/launch-windows.ps1`, which starts one for any look at the
