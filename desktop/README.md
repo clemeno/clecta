@@ -389,7 +389,8 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   only one that matters on Windows (PLAN §9).
 - **The watcher across a folder change.** Watching itself *is* confirmed from a script — a
   file added, three added at once, one deleted, then an idle folder, all read back from the
-  running app. What a script cannot do is click a folder in the tree, and that is the case
+  running app — and by hand on `notify` 9.0.0-rc.8 (2026-11-14): a file added appeared and one
+  moved out went, at once. What a script cannot do is click a folder in the tree, and that is the case
   worth an eye: the watcher is keyed on the path, so choosing another folder has to tear the
   old one down and start one on the new place, with no watcher left behind (PLAN §9).
 - **The four queue drags, and the scroll edges.** *Not checked yet.* The arithmetic of a
