@@ -521,6 +521,45 @@ mod tests {
 		assert_eq!(rest, 799, "what the seek left after that sample");
 	}
 
+	/// The same seek, read where the picture is still in sight: the MP4 reader hands over the
+	/// earliest packet of any track, so a picture the seek could not move would hand over all
+	/// it has before the sound's next. rodio skips it either way; a reader of both does not.
+	#[test]
+	fn a_seek_past_the_end_of_a_shorter_picture_reads_the_sound_next() {
+		use symphonia::core::formats::{FormatReader, SeekMode, SeekTo};
+		use symphonia::core::io::MediaSourceStream;
+		use symphonia::core::units::Time;
+		use symphonia::default::formats::IsoMp4Reader;
+
+		// Arrange: 800 ms of picture, track 0, over a second of sound, track 1.
+		let bytes = video_first_mp4(Sound {
+			picture_frames: 20,
+			..Sound::default()
+		});
+		let stream =
+			MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), Default::default());
+		let mut reader =
+			IsoMp4Reader::try_new(stream, &Default::default()).expect("opening the fixture");
+
+		// Act
+		let sought = reader.seek(
+			SeekMode::Accurate,
+			SeekTo::Time {
+				time: Time::new(0, 0.9),
+				track_id: Some(1),
+			},
+		);
+		let next = reader.next_packet().map(|packet| packet.track_id());
+
+		// Assert
+		assert!(sought.is_ok(), "the seek failed: {sought:?}");
+		assert_eq!(
+			next.ok(),
+			Some(1),
+			"the packet after the seek is not the sound's"
+		);
+	}
+
 	/// The same edit on a sound whose clock ticks twice a frame, as an MP4's can: its timescale
 	/// need not be its sample rate, and in HE-AAC it is twice the rate symphonia decodes at.
 	/// The trims arrive in ticks and the decoder's frames are frames, and comparing the two
