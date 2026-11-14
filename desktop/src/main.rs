@@ -11,6 +11,7 @@ mod audio;
 mod browser;
 mod cache;
 mod deck;
+mod drag; // a drag, start to release: what it carries, where it lands, the one indicator
 mod focus; // which list ⌘A and Escape are talking to
 mod fsio;
 mod known; // what this run has learned about files, and the door answers arrive through

@@ -30,6 +30,7 @@ use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome};
+use crate::drag::{Carried, Drag, DropTarget, Zone};
 use crate::focus::Focus;
 use crate::known::{Facts, Known};
 use crate::mixer::{self, Curve};
@@ -167,53 +168,6 @@ pub fn run() -> iced::Result {
 pub enum Section {
 	Files,
 	Tree,
-}
-
-/// Where a release would put what is being dragged (PLAN §10, §7a).
-///
-/// One type for both kinds of destination, so `hover` is one field and the rules about what
-/// beats what live in one `match` rather than in two flags that can both be set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DropTarget {
-	/// Load it into this player, now.
-	Player(DeckId),
-	/// Put it in this queue, **above** this row. `index == len` is past the last row, which is
-	/// the one index that names no row — the caret sits between rows, not on them.
-	Row(QueueId, usize),
-}
-
-/// The panel a pointer can leave, which is coarser than what it can land on: a queue has as
-/// many targets as it has rows, but leaving it is one event.
-///
-/// Leaving is separate from entering because the two arrive in an order nothing guarantees.
-/// A leave that only clears *its own* zone cannot wipe an enter that has already landed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Zone {
-	Player(DeckId),
-	Queue(QueueId),
-}
-
-impl DropTarget {
-	/// The panel this target sits in, which is what a pointer leaves.
-	fn zone(self) -> Zone {
-		match self {
-			DropTarget::Player(id) => Zone::Player(id),
-			DropTarget::Row(queue, _) => Zone::Queue(queue),
-		}
-	}
-}
-
-/// What an in-app drag is carrying, and where it came from.
-///
-/// A whole selection rather than one row (PLAN §9a), in the order the rows are on screen — so a
-/// drop puts them down in the order they were looked at. `from` is one queue and the rows inside
-/// it, because a drag starts with a press and a press is in one panel — and it is the whole
-/// difference between a copy and a move: a drag out of the files pane leaves the file where it
-/// is, and a drag out of a queue takes the rows with it.
-#[derive(Debug, Clone)]
-pub struct Drag {
-	items: Vec<queue::Item>,
-	from: Option<(QueueId, Vec<usize>)>,
 }
 
 /// What the duplicate warning answered (PLAN §9a).
@@ -495,16 +449,9 @@ pub struct Clecta {
 	tree_ratio: f32,
 	/// The window's current size, tracked so it can be restored next run (PLAN §11).
 	window: (f32, f32),
-	/// What an in-app drag is carrying. Armed by a press on a media row — in the files pane
-	/// or in a queue — and disarmed by the release, so a plain click is a drag that landed on
-	/// nothing (PLAN §10, §7a).
-	drag: Option<Drag>,
-	/// Where the pointer is, of the places a release could land. Only ever set while a drag
-	/// is in flight, because
-	/// that is the only time the panels are drop targets at all.
-	hover: Option<DropTarget>,
-	/// Whether files from outside are hovering the window right now.
-	os_hover: bool,
+	/// A drag in flight, in-app or from outside: what it carries, where a release would land,
+	/// and the queue edge it is scrolling (PLAN §10, §7a).
+	drag: Drag,
 	/// The one line of feedback the app gives: what loaded, what would not decode, what
 	/// the audio device is (PLAN §7).
 	notice: String,
@@ -519,14 +466,6 @@ pub struct Clecta {
 	/// The three queues, indexed by `QueueId::index` (PLAN §7a): one in front of each player,
 	/// and the shared one between them.
 	queues: Queues,
-	/// How far down each of them is scrolled, in the same order. Not persisted, for the same
-	/// reason the files pane's offset is not: where a queue is scrolled to is not a setting.
-	/// The queue whose edge a drag is resting on, and which way it is scrolling. `None` at
-	/// rest, which is what gates the timer that does the scrolling.
-	autoscroll: Option<(QueueId, bool)>,
-	/// The tracks whose length is being looked up right now. A row stays *unmeasured* until
-	/// its answer lands, so without this a second edit arriving mid-lookup would send the same
-	/// file off to be opened and parsed all over again (PLAN §7a).
 	/// What has already been worked out about a file (PLAN §11a). Shared with every job that
 	/// reads or writes it: an `Arc` because those jobs are threads, and the whole point is
 	/// that the cache is touched *there* rather than on the GUI thread, where a commit is an
@@ -672,15 +611,12 @@ impl Clecta {
 			tree_split: Some(tree_split),
 			tree_ratio: TREE_RATIO,
 			window: settings.window,
-			drag: None,
-			hover: None,
-			os_hover: false,
+			drag: Drag::default(),
 			notice,
 			dirty: false,
 			stale: false,
 			// The zip between the file's two orderings is the file's own business (Q55).
 			queues: Queues::restored(settings.queues()),
-			autoscroll: None,
 			// Opened here rather than lazily, for the same reason `Settings::load` is read
 			// before the window exists: it is one small file, once, and everything after it
 			// wants to know whether there is a cache to ask (PLAN §11a).
@@ -826,7 +762,7 @@ impl Clecta {
 
 		// The queue scroll a drag is holding an edge down for. Same rule again: it exists
 		// only while a pointer is actually resting on an edge.
-		let scrolling = if self.autoscroll.is_some() {
+		let scrolling = if self.drag.scrolling().is_some() {
 			time::every(AUTOSCROLL).map(|_| Message::ScrollStep)
 		} else {
 			Subscription::none()
@@ -963,7 +899,7 @@ impl Clecta {
 					.into_iter()
 					.map(queue::Item::new)
 					.collect();
-				self.drag = (!items.is_empty()).then_some(Drag { items, from: None });
+				self.drag.arm(items, None);
 			}
 
 			Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
@@ -1137,12 +1073,11 @@ impl Clecta {
 				}
 
 				let queue = self.queues.get(id);
-				let rows: Vec<usize> = queue.selection().collect();
 				// From a queue, so a drop *moves*: the rows leave here when they land.
-				self.drag = (!rows.is_empty()).then(|| Drag {
-					items: queue.selected_items(),
-					from: Some((id, rows)),
-				});
+				self.drag.arm(
+					queue.selected_items(),
+					Some((id, queue.selection().collect())),
+				);
 			}
 
 			// A double click plays queued rows now, out of turn — the one way from a queue to
@@ -1180,7 +1115,7 @@ impl Clecta {
 				// The press that opened this double click armed a drag, and the rows it was
 				// carrying have just left the queue. Disarmed here rather than left to the
 				// release, which would otherwise drop rows that no longer exist.
-				self.drag = None;
+				self.drag.disarm();
 
 				let paths = taken.into_iter().map(|item| item.path).collect();
 				return Task::batch([self.queued(), self.load_batch(id, paths)]);
@@ -1190,19 +1125,10 @@ impl Clecta {
 			// offset: where a queue is scrolled to is not a setting.
 			Message::QueueScrolled(id, offset) => self.queues.scrolled(id, offset),
 
-			Message::ScrollEdge(id, up, entering) => {
-				// The same shape as `DragOut`, and for the same reason: entering one edge and
-				// leaving another arrive in an order nothing guarantees, so a leave clears only
-				// the edge it is actually about.
-				if entering {
-					self.autoscroll = Some((id, up));
-				} else if self.autoscroll == Some((id, up)) {
-					self.autoscroll = None;
-				}
-			}
+			Message::ScrollEdge(id, up, entering) => self.drag.edge(id, up, entering),
 
 			Message::ScrollStep => {
-				if let Some((id, up)) = self.autoscroll {
+				if let Some((id, up)) = self.drag.scrolling() {
 					// `scroll_by` rather than a computed offset: it clamps against the pane's
 					// real bounds, which the app does not know and would have to guess at. The
 					// stored offset catches up on the next frame — the `scrollable` republishes
@@ -1428,18 +1354,12 @@ impl Clecta {
 				self.dirty = false;
 			}
 
-			Message::FilesHovered(hovering) => self.os_hover = hovering,
+			Message::FilesHovered(hovering) => self.drag.files_hovered(hovering),
 
 			Message::FileDropped(path) => {
-				// Taking the flag is what makes the *first* file of the drop the one that
-				// counts: every later event in the same burst sees `false` (PLAN §10).
-				//
-				// `ponytail:` this leans on the hover arriving before the drop, which is
-				// the only burst boundary the event stream has. True on macOS and Windows
-				// (checked in winit's `performDragOperation:` and `IDropTarget::Drop`,
-				// neither of which cancels the hover first). A platform that skipped the
-				// hover would decline the drop with a notice, not swallow it.
-				let first = std::mem::take(&mut self.os_hover);
+				// Only the *first* file of the drop counts (PLAN §10); `files_dropped` says
+				// which one that is.
+				let first = self.drag.files_dropped();
 				let target = deck::idle_target(&self.decks[0], &self.decks[1]);
 				// The policy itself is deck.rs's (`drop_outcome`, PLAN §10); this arm only
 				// carries its answer, which is why it no longer goes through a forwarder.
@@ -1452,64 +1372,44 @@ impl Clecta {
 				};
 			}
 
-			Message::DragOver(target) => self.hover = Some(target),
+			Message::DragOver(target) => self.drag.over(target),
 
-			Message::DragOut(zone) => {
-				// Compared rather than merely cleared: every panel sees the same cursor move,
-				// and the one being left is not always the one updated first. A leave that
-				// only clears *its own* zone cannot wipe an enter that has already landed.
-				if self.hover.is_some_and(|target| target.zone() == zone) {
-					self.hover = None;
-				}
-			}
+			Message::DragOut(zone) => self.drag.out(zone),
 
 			Message::DragReleased => {
 				// One release ends both drags, because a release is a release: the divider
 				// needs no listener of its own, and `gestures` already takes every one.
 				self.decks_drag = false;
-				// Cleared here rather than left to a leave: the edges are only `mouse_area`s
-				// while a drag is in flight, so releasing *on* one destroys the widget that
-				// would have reported the pointer leaving it, and the queue would scroll for
-				// ever (PLAN §7a).
-				self.autoscroll = None;
-				let target = self.hover.take();
-				// Disarmed on every release, whatever it was over, so nothing is left
-				// armed behind a drag the user thought better of.
-				let Some(drag) = self.drag.take() else {
-					// A press on an already-selected row that is not media arms no drag — and
-					// its release is still a plain click that promotes the deferral (Q50).
-					self.collapse.release();
-					return Task::none();
-				};
 
-				match target {
+				match self.drag.release() {
 					// Onto a player: the first plays now, jumping whatever queue it came from,
 					// and the rest go to the top of that player's cue (PLAN §9a) — so rows
 					// dragged out of a queue leave the queue, exactly as they would have if the
 					// queue had handed them over itself (PLAN §7a).
-					Some(DropTarget::Player(id)) => {
+					Some((DropTarget::Player(id), carried)) => {
 						// A drag that lands takes the collapse with it: releasing a carried
 						// selection must not also narrow it (Q50).
 						self.collapse.cancel();
 						let mut tasks = Vec::new();
-						if let Some((queue, rows)) = &drag.from {
+						if let Some((queue, rows)) = &carried.from {
 							self.queues.get_mut(*queue).take_rows(rows);
 							tasks.push(self.queued());
 						}
-						let paths = drag.items.into_iter().map(|item| item.path).collect();
+						let paths = carried.items.into_iter().map(|item| item.path).collect();
 						tasks.push(self.load_batch(id, paths));
 						return Task::batch(tasks);
 					}
-					Some(DropTarget::Row(queue, index)) => {
+					Some((DropTarget::Row(queue, index), carried)) => {
 						self.collapse.cancel();
-						self.drop_into(queue, index, drag);
+						self.drop_into(queue, index, carried);
 						return self.queued();
 					}
-					// A drag that landed on nothing is a plain click. The press selected the
-					// row — unless it deferred (PLAN §9a), in which case the collapse now
-					// waits out the double-click window rather than firing here: the load a
-					// double click sends acts on the whole selection, and its message only
-					// arrives with the second press (Q50).
+					// A drag that landed on nothing is a plain click, and so is the release of
+					// a press that armed none — on an already-selected row that is not media,
+					// say. The press selected the row — unless it deferred (PLAN §9a), in which
+					// case the collapse now waits out the double-click window rather than
+					// firing here: the load a double click sends acts on the whole selection,
+					// and its message only arrives with the second press (Q50).
 					None => self.collapse.release(),
 				}
 			}
@@ -2096,7 +1996,7 @@ impl Clecta {
 	/// queue** are a reorder, not a remove followed by an insert. Doing it as two steps would
 	/// need the caret index adjusting for the holes the rows left behind, which is what
 	/// `relocate` exists to get right — so it is called rather than reimplemented here.
-	fn drop_into(&mut self, queue: QueueId, index: usize, drag: Drag) {
+	fn drop_into(&mut self, queue: QueueId, index: usize, drag: Carried) {
 		// A reorder is the one drop that cannot produce a duplicate: the rows are already
 		// somewhere in this queue and are only moving inside it. Asked before anything is
 		// touched, because a cancelled drop must leave every queue exactly as it was.
@@ -2224,37 +2124,6 @@ impl Clecta {
 				self.notice = format!("{}: {error:#}", id.label());
 				Task::none()
 			}
-		}
-	}
-
-	/// The player a release would land on right now, or `None` when nothing is being
-	/// dragged. Exactly one, or the ring would promise aiming the app cannot do.
-	fn drop_ring(&self) -> Option<DeckId> {
-		if self.os_hover {
-			// An OS drag carries no position, so the target is derived — and shown
-			// before the release rather than discovered after it (PLAN §10).
-			Some(deck::idle_target(&self.decks[0], &self.decks[1]))
-		} else if self.drag.is_some() {
-			// An in-app drag is truly aimed: the pointer is ours the whole way. A drag headed
-			// for a *queue* lights no player — the caret in that queue is showing where it goes,
-			// and two indicators at once would each be half a lie.
-			match self.hover {
-				Some(DropTarget::Player(id)) => Some(id),
-				_ => None,
-			}
-		} else {
-			None
-		}
-	}
-
-	/// Where a release would put the dragged row in this queue, if that is where it is headed.
-	///
-	/// `None` at rest and for the two queues the pointer is not over, so exactly one caret is
-	/// ever drawn — the same "one indicator, and it tells the truth" rule as the drop ring.
-	fn insertion(&self, queue: QueueId) -> Option<usize> {
-		match self.hover {
-			Some(DropTarget::Row(id, index)) if id == queue && self.drag.is_some() => Some(index),
-			_ => None,
 		}
 	}
 
@@ -2467,7 +2336,9 @@ impl Clecta {
 	/// is what makes dragging the divider grow the queues rather than pad the players with
 	/// empty space.
 	fn decks_view(&self) -> Element<'_, Message> {
-		let ring = self.drop_ring();
+		let ring = self
+			.drag
+			.ring(deck::idle_target(&self.decks[0], &self.decks[1]));
 		// Asked once for all three queues: they each draw the same two add buttons, and the
 		// answer is a property of the files pane rather than of any queue.
 		let addable = self.browser.has_media_selection();
@@ -2482,10 +2353,11 @@ impl Clecta {
 				&self.tempos,
 				// One value rather than three arguments, and `None` at rest: everything a
 				// queue does differently during a drag arrives together.
-				self.drag.is_some().then(|| ui::queue::Dragging {
-					insertion: self.insertion(id),
+				self.drag.is_armed().then(|| ui::queue::Dragging {
+					insertion: self.drag.caret(id),
 					edge: self
-						.autoscroll
+						.drag
+						.scrolling()
 						.and_then(|(queue, up)| (queue == id).then_some(up)),
 				}),
 			)
@@ -2561,7 +2433,7 @@ impl Clecta {
 			sweep,
 		);
 
-		if self.drag.is_none() {
+		if !self.drag.is_armed() {
 			return panel;
 		}
 

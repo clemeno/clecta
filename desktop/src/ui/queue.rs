@@ -13,8 +13,9 @@ use iced::widget::{
 };
 use iced::{Center, Element, Fill, Theme};
 
-use crate::app::{DropTarget, Message, Zone};
+use crate::app::Message;
 use crate::cache::Ready;
+use crate::drag::{DropTarget, Zone};
 use crate::queue::{Handover, Queue};
 use crate::queues::QueueId;
 use crate::ui;
