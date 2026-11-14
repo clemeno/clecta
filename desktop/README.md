@@ -506,11 +506,13 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   five to a queue does **not** narrow them, that double-clicking one still loads all five, and
   that ⌘A or Escape inside the beat wins over the pending collapse — as does any press, even
   one held on a deck button across the beat and released late (PLAN §9a, Q50, Q53).
-- **A loud mix.** *Not checked yet*, and it is a listening test. That with both faders at
-  their usual place a loud master plays as it did before, only without the MP3 and Vorbis
-  decoders flattening its peaks; and that with both faders up and the crossfader in the
-  middle, two loud tracks together sound pressed down rather than crackling — the limiter on
-  the mix, at settings nobody has listened to yet (PLAN Q73).
+- **A loud mix.** *Confirmed* by ear on Windows (2026-11-14), and it is a listening test.
+  That with both faders at their usual place a loud master plays as it did before, only
+  without the MP3 and Vorbis decoders flattening its peaks; and that with both faders up and
+  the crossfader in the middle, two loud tracks together sound pressed down rather than
+  crackling or pumping, one fader pulled down brings the other back at once, and one loud
+  track alone sounds like itself — the limiter on the mix, at rodio's default settings
+  (PLAN Q73).
 
 None of that says anything about **Windows**, which is the shipped target no one has ever
 run. CI type-checks it on every push, and type-checking is not running.
