@@ -255,28 +255,33 @@ run it first):
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+sh scripts/probe-formats.sh
 cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings
 cargo deny check bans licenses sources
 cargo audit
 sh scripts/check-vendor.sh
 ```
 
-The script needs `rustup target add x86_64-apple-darwin` and
-`cargo install --locked cargo-deny cargo-audit` once per machine. The last step compares each
+All on the Rust `rust-toolchain.toml` pins, which rustup installs, with the macOS target, the
+first time; CI installs the same one, so a newer stable cannot pass here and fail there. The
+script needs `cargo install --locked cargo-deny cargo-audit` once per machine, and ffmpeg on
+the PATH for the format probe, which it skips, and says so, without it.
+
+The format probe makes, with ffmpeg, a stereo tone in each container and codec the app offers,
+four more whose timestamps start late, a fragmented AAC one, and an MP4 and a WebM whose
+picture ends before their sound, and fails unless each agrees with itself on its length, its
+decode and where its seeks land, within 5 ms, and a seek made right after one to the end lands
+as a fresh one does (PLAN Q72). Real files given as arguments are probed too, and so is each
+line of `scripts/probe-files.local`, a gitignored list of your own; a file still being probed
+after five minutes fails it. The last step compares each
 vendored crate (rodio, and symphonia's MP4 reader, MP3 decoder and Vorbis decoder) with its
 crates.io tarball: any difference outside the files it patches fails, and so does a change in
 those files without a `clecta patch` marker (PLAN Q69, Q72, Q73).
 
-Three more, run by hand. On Windows, `scripts/smoke-windows.ps1` launches an isolated copy of
-the debug build, presses **Clear cache** and asks Windows whether the confirmation box is
-visible — the one defect class no test here can reach (PLAN Q70). After touching the decode
-path or `vendor/`, `scripts/probe-formats.sh` (needs ffmpeg) makes a stereo tone in each
-container and codec the app offers, four more whose timestamps start late and a fragmented
-AAC one, and fails unless
-each agrees with itself on its length, its decode and where its seeks land, within 5 ms, and
-a seek made right after one to the end lands as a fresh one does (PLAN Q72); real files given
-as arguments are probed too, and a file still being probed after five minutes fails it. And
-for a real file on its own,
+Two more, run by hand. On Windows, `scripts/smoke-windows.ps1` launches an isolated copy of
+the debug build, through `scripts/launch-windows.ps1`, which starts one for any look at the
+real app, presses **Clear cache** and asks Windows whether the confirmation box is visible —
+the one defect class no test here can reach (PLAN Q70). And for a real file on its own,
 `CLECTA_PROBE="a.mp3;a.mp4" cargo test probe_files -- --ignored --nocapture` prints what the
 app learns about each: both lengths, four seeks, and the scan.
 

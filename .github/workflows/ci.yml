@@ -25,6 +25,10 @@ permissions:
 # The crate is `desktop/`, not the repo root (PLAN §5) — the root is reserved for a
 # second front end. This covers every `run:` step; the two actions that need the path
 # instead (rust-cache, cargo-deny) are told separately, below.
+#
+# Every job's Rust is the one `desktop/rust-toolchain.toml` pins, installed by
+# `rustup toolchain install` from that file (PLAN §3): the same Rust as every local build
+# and the pre-push hook, so a newer stable cannot fail here what passed there.
 defaults:
   run:
     working-directory: desktop
@@ -38,9 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - run: rustup toolchain install
       - run: cargo fmt --all --check
 
   # ── Windows (the primary target) ────────────────────────────────────────────
@@ -52,9 +54,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - run: rustup toolchain install
       # Cache the registry and target dir keyed on the lockfile, so a run that does
       # not touch dependencies re-uses the previous compile. Worth more here than in
       # most projects: iced and wgpu are the bulk of a cold build.
@@ -63,6 +63,12 @@ jobs:
           workspaces: desktop
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # The format probe (PLAN Q72): ffmpeg makes a file of each container and codec the app
+      # plays, and of the shapes that have broken it, and each must agree with itself on its
+      # length, its decode and where its seeks land. Here because the tests just built it.
+      - run: choco install ffmpeg --no-progress -y
+      - run: sh scripts/probe-formats.sh
+        shell: bash
 
   # ── macOS (the second target) ───────────────────────────────────────────────
   # GitHub's macOS runners are Apple Silicon, but clecta ships for Intel
@@ -75,10 +81,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: x86_64-apple-darwin
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop
@@ -101,6 +104,7 @@ jobs:
         with:
           manifest-path: desktop/Cargo.toml
           command: check bans licenses sources
+      - run: rustup toolchain install
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
@@ -114,7 +118,7 @@ jobs:
       # `--deny warnings` for the same reason in reverse: it would fail every build over
       # a dependency we do not control.
       - run: cargo audit
-      # The vendored crates (PLAN Q69, Q71, Q72) are their published releases plus patched
+      # The vendored crates (PLAN Q69, Q71, Q72, Q73) are their published releases plus patched
       # files whose every change is marked `clecta patch`; the script says how it checks.
       - name: vendored crates are their published releases plus marked patches
         run: sh scripts/check-vendor.sh

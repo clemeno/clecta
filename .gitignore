@@ -5,3 +5,6 @@
 /desktop/target
 
 # Note: Cargo.lock IS committed (binary crate) for reproducible builds.
+
+# Real files probed by scripts/probe-formats.sh: gitignored, one path a line.
+/desktop/scripts/probe-files.local

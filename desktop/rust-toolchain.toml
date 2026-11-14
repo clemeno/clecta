@@ -1,0 +1,8 @@
+# The one Rust every build uses, here, in the pre-push hook and on every CI job (PLAN §3):
+# CI installs exactly this, so a newer stable cannot pass here and fail there, as rustfmt
+# 1.100's new comment alignment once did. Bumped by hand, which is also when new lints land.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-apple-darwin"]

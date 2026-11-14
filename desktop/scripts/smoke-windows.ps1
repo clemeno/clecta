@@ -121,14 +121,9 @@ function Measure-Cpu([System.Diagnostics.Process] $inProcess) {
 
 [void][SmokeNative]::SetProcessDPIAware()	# physical pixels throughout
 
-$vDir = Join-Path $env:TEMP ('clecta-smoke-' + [guid]::NewGuid().ToString('N'))	# the isolated copy
-New-Item -ItemType Directory -Path (Join-Path $vDir 'clecta-data') | Out-Null
-Copy-Item -LiteralPath $inExe -Destination $vDir
-@{ window = @(1180.0, 960.0); decks_height = 480.0; folder = $vDir } |
-	ConvertTo-Json -Compress |
-	Set-Content -Encoding ascii -LiteralPath (Join-Path $vDir 'clecta-data\settings.json')
-
-$vProcess = Start-Process -FilePath (Join-Path $vDir 'clecta.exe') -WorkingDirectory $vDir -PassThru	# the app under test
+$vLaunch = & (Join-Path $PSScriptRoot 'launch-windows.ps1') -inExe $inExe	# the isolated copy, running
+$vDir = $vLaunch.Folder						# its folder, deleted at the end
+$vProcess = Get-Process -Id $vLaunch.Pid	# the app under test
 $vVerdict = 1	# the exit code, red until proven otherwise
 try {
 	$vMain = [IntPtr]::Zero	# the app's window, once it exists

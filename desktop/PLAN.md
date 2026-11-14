@@ -44,7 +44,7 @@ before a v0.1 tag is the manual smoke test (§12), end to end, on Windows. §15 
 
 | Area | Decision |
 |---|---|
-| Language | Rust, stable channel (verified: 1.98.0 on `x86_64-apple-darwin`, 1.99.1 on `x86_64-pc-windows-msvc`) |
+| Language | Rust 1.100.0, pinned in `desktop/rust-toolchain.toml` for every build, the pre-push hook and every CI job alike, and bumped by hand: a newer stable once passed the hook and failed CI's rustfmt (verified before the pin: 1.98.0 on `x86_64-apple-darwin`, 1.99.1 on `x86_64-pc-windows-msvc`) |
 | Edition | 2024 (same as cmote) |
 | Crate root | **`desktop/`** — this folder is the whole Rust project, so a later `mobile/` or `web/` sibling does not have to move it |
 | Crate shape | **One binary crate**, not a workspace. Small cohesive modules (<800 lines each) |
@@ -206,14 +206,16 @@ Three places code runs. Only two of them are ours.
 clecta/
 ├── LICENSE
 ├── .gitignore
+├── CODING_STANDARDS.md          what a reviewer checks that no linter can
 └── desktop/                     ← the Rust project root
     ├── Cargo.toml
     ├── Cargo.lock               (committed — reproducible, auditable builds)
     ├── check.sh                 every gate CI runs, in CI's order (§12)
     ├── PLAN.md                  this file
     ├── README.md
+    ├── rust-toolchain.toml      the one Rust, for every build here and on CI (§3)
     ├── rustfmt.toml             edition 2024 + hard_tabs
-    ├── scripts/                 the checks run by hand, and the vendored-crates check CI and check.sh share
+    ├── scripts/                 the format probe and the vendored-crates check CI and check.sh share, and the Windows launcher and smoke check
     ├── vendor/rodio/            rodio 0.23.0 plus one patched file, every change marked `clecta patch` (Q69, Q71, Q72)
     ├── vendor/symphonia-format-isomp4/  symphonia's MP4 reader 0.5.5, patched to read edit lists (Q72)
     ├── vendor/symphonia-bundle-mp3/     symphonia's MP3 decoder 0.5.5, its full-scale clamp taken out (Q73)
@@ -2442,8 +2444,11 @@ otherwise pure; anything needing a device or a real folder is manual.
   that accepts them is not a machine that has run them.
 
 **CI** mirrors cmote's `.github/workflows/ci.yml` — four jobs: `rustfmt` on Linux,
-clippy + test on Windows natively, clippy against **`x86_64-apple-darwin`** plus a native
+clippy + test on Windows natively, then the format probe there (ffmpeg from Chocolatey,
+`scripts/probe-formats.sh`, Q72), clippy against **`x86_64-apple-darwin`** plus a native
 test run on the Apple Silicon macOS runner, and `cargo deny` + `cargo audit` on Linux.
+Every job installs the Rust `desktop/rust-toolchain.toml` pins (§3), with
+`rustup toolchain install`.
 `defaults.run.working-directory: desktop` covers the `run:` steps; the two actions that
 do not use a shell — `rust-cache` and `cargo-deny-action` — are given the path
 explicitly, which is the one thing that does not carry over from a repo whose crate is at
