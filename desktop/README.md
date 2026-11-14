@@ -413,6 +413,8 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   running out really does load the next one, that it lands *stopped* rather than playing, that
   the title and the waveform follow it, and that the shared queue is reached only when that
   player's own cue is empty. It needs two short tracks and a minute of listening (PLAN §7a).
+  And with a renamed-to-`.mp3` text file queued between them: the handover skips it, the next
+  track loads at once, and the notice names what was skipped (Q82).
 
   The two switches are checked in the same minute, and they are the half a pure test cannot
   reach: that **Auto-load** off really leaves the player stopped with a full queue under it,

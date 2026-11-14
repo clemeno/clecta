@@ -1569,16 +1569,45 @@ impl Clecta {
 	/// What the handover does is the queues' answer (`Queues::hand_over`); this carries it out,
 	/// because the load is IO and what follows it depends on whether the file arrived.
 	fn advance(&mut self, id: DeckId) -> Task<Message> {
-		let Some(next) = self.queues.hand_over(id, |path| self.known.trim(path)) else {
+		// Without a device every load is refused, and the skipping below would empty the
+		// queues one refusal at a time. `poll_players` already stops short of here then; this
+		// says so where it matters.
+		if self.engine.is_none() {
 			return Task::none();
+		}
+
+		// A file the player refuses is skipped for the next one at once (Q82), so one broken
+		// track does not leave the player stopped with a full queue behind it. Each refusal
+		// took its track out of the queue, so this ends when one loads or the queues run dry.
+		let mut skipped: Vec<String> = Vec::new();
+		let (next, loading) = loop {
+			let Some(next) = self.queues.hand_over(id, |path| self.known.trim(path)) else {
+				if skipped.is_empty() {
+					return Task::none();
+				}
+				self.notice = format!(
+					"{}: nothing queued would load — skipped {}",
+					id.label(),
+					skipped.join(", ")
+				);
+				return self.queued();
+			};
+			let name = fsio::name_of(&next.path);
+			// Only if the file actually arrived. A load that failed leaves the *previous* track
+			// in the player (PLAN §7), and pressing Play on that would be the app restarting a
+			// track nobody queued — the one way an automatic start could play the wrong thing.
+			match self.try_load(id, next.path.clone()) {
+				Some(loading) => break (next, loading),
+				None => skipped.push(name),
+			}
 		};
-		// Only if the file actually arrived. A load that failed leaves the *previous* track in
-		// the player and says so in the notice (PLAN §7), and pressing Play on that would be
-		// the app restarting a track nobody queued — the one way an automatic start could
-		// play the wrong thing.
-		let Some(loading) = self.try_load(id, next.path) else {
-			return self.queued();
-		};
+		if !skipped.is_empty() {
+			self.notice = format!(
+				"{} — skipped {}, which would not load",
+				self.notice,
+				skipped.join(", ")
+			);
+		}
 		let loading = Task::batch([self.queued(), loading]);
 
 		// The other half of the handover setting (PLAN §7b): silently 0:00 for a track nobody
