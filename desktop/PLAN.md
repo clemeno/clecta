@@ -919,7 +919,7 @@ no new machinery at all — only a comparison next to the one already there:
 
 ```rust
 if engine.finished(id) { /* the file ran out (§7) */ }
-else if self.cuts_early(id, position) { /* the music stopped */ }
+else if self.queues.cuts_early(id, position, trim) { /* the music stopped */ }
 ```
 
 Both push the player onto the same `ended` list, so `advance` is reached by two roads and
@@ -939,9 +939,10 @@ Three conditions, and each of them is a reason not to cut:
    the evening plays its run-out: stopping a player early with nothing to follow is worse than
    the silence it saves.
 
-The third is why `cuts_early` lives in `app.rs` and `hands_over_early` — the pure part, and the
-tested one — lives on `Handover` itself, beside `starts_at`, the same setting's other half
-(Q57). The rule is arithmetic; knowing whether a queue has anything left is the app's business.
+The third is why `cuts_early` lives on `Queues` and `hands_over_early` lives on `Handover`
+itself, beside `starts_at`, the same setting's other half (Q57): the rule is arithmetic about one
+setting, and knowing whether a queue has anything left is a question only the set can answer.
+Both are tested, and so is how they combine (Q78).
 
 The 50 ms tick puts the cut up to a tick late, which is a twentieth of a second of run-out that
 still plays. Nobody has ever heard that. Making it exact would mean a callback rodio does not
@@ -950,7 +951,8 @@ offer, which is the same wall §7 hits at the other end of the track.
 ### The other half of the same setting
 
 A queue that skips the blanks at the end of one track also skips them at the start of the next:
-`advance` seeks the freshly loaded track to where *its* music starts before pressing Play. Same
+`Queues::hand_over` says where *its* music starts, and `advance` seeks the freshly loaded track
+there before pressing Play. Same
 setting, same queue, both ends — a handover that trimmed one end and not the other would leave
 the gap it just removed.
 
@@ -3325,6 +3327,7 @@ decided.
 | Q75 | Where a drag's bookkeeping lives | **On one type, `drag::Drag`, the way the collapse moved in Q58.** It was four `Option` and `bool` fields on the app — what was carried, the hovered target, the OS hover, the scrolling edge — read and written by eleven arms and two view helpers, and the README listed its rules as the half of the app that has always broken: one indicator at a time, a late leave not wiping a newer enter, a release on an edge stopping the scroll. None of them had a test, because the interface was raw fields. `Drag` keeps them private behind `arm`, `disarm`, `over`, `out`, `edge`, `files_hovered`, `files_dropped`, `ring`, `caret`, `scrolling` and `release`, which hands back where the carried rows landed or `None` for a plain click; each rule is a test now. What a landing *does* — load a player, move rows, cancel the collapse — stays in the app, which owns the players and the queues. The divider's own drag (`decks_drag`) stays out: it is a resize, not something carried, and only shares the release | §10, §7a, Q58, Q50 |
 | Q76 | Where the edits behind the duplicate warning live | **On `Queues`, with the warning passed in.** Adding from the files pane, `←` / `→`, and a drop into a queue each wrote out the same four steps in the app — find the duplicates, ask, filter, then take and insert — because the dialog sat in the middle, and the dialog is the app's. So "both halves or neither" and "Cancel leaves every queue as it was" had no test, and Q47's move of the set's rules into `queues.rs` had stopped short of them. `Queues::add`, `shift` and `dropped` now hold the steps, and each takes the question as a function: the app passes `admits`, its rfd dialog, and the tests pass a fixed `Admission` — two adapters, so the seam is real. `Admission` moves with them, and so does "no repeats, no question", which was the dialog's first line. Still synchronous, so Q38's objection to a dialog with a continuation does not arise: a modal blocks, and the edit finishes in the same call | §9a, §7a, Q47, Q38, Q54 |
 | Q77 | Where the folder scan's bookkeeping and the cache-or-decode functions live | **Two modules of their own: `prepare.rs` and `measure.rs`.** The folder scan's state was a struct of public counters in `app.rs`, and its two tests did the driver's arithmetic themselves (`next += slots; running += slots`) rather than calling it, so a mistake in the driver would have passed them. `prepare::Preparing` keeps the counters private behind `new`, `hand_out`, `landed`, `stop`, `is_over`, `progress` and `busy`, the four calls the app makes; `running` is gone, since it was always the busy list's length, and an answer for a file not out now counts for nothing rather than running a counter below zero. The three cache-or-decode functions every scan goes through — a player's, a folder scan's, a queue measurement's — sat untested at the bottom of `app.rs`, though they hold the cache's whole contract with the files: no stamp, no caching; a failed scan is not stored; "no length" is. They are `measure::scan`, `facts` and `duration` now, tested against a real store in a temporary folder. Two modules rather than one because they are two things: a driver with no I/O, and the I/O it drives | §11a, §11b, §11c, Q29, Q36, Q44 |
+| Q78 | Where the handover is decided | **On `Queues`: `cuts_early` and `hand_over`.** Q57 put the setting's two halves on `Handover` and tested each, but how they combine — cut early only when some queue will supply a track, ask the *supplying* queue rather than the player's cue, take its top track, start it where that queue says, play it only if that queue says — was spread over `poll_players`, `cuts_early` and `advance` in the app, and README called the handover the one check worth waiting for. `cuts_early` moves to `Queues` as it was; `hand_over` takes the next track and returns a `NextTrack` (path, start, auto-play), and each combination is a test. This moves the take as well, which Q57's row counted with the IO: it is an edit to a queue, and the queue it comes from is the one whose switches answer. What stays in `advance` is the IO and what hangs on it: the load, the check that the file arrived, and the seek and Play that only follow if it did. No `Engine` trait, so Q48's seam is untouched | §7a, §7b, Q57, Q48, Q26 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved

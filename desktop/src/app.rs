@@ -1497,7 +1497,11 @@ impl Clecta {
 
 				// The *other* end of a track (PLAN §7b): the music has stopped, and the queue
 				// waiting behind this player asked not to sit through the run-out.
-				if self.cuts_early(id, position) {
+				let trim = self.decks[id.index()]
+					.track
+					.as_ref()
+					.and_then(|track| self.known.trim(&track.path));
+				if self.queues.cuts_early(id, position, trim) {
 					// **Stop**, not `Ended`, and that is the whole difference from the branch
 					// above: nothing has been consumed here — the file is still in the player
 					// and still playing — so it is the same rewind the button does, and the
@@ -1515,28 +1519,6 @@ impl Clecta {
 		Task::batch(ended.into_iter().map(|id| self.advance(id)))
 	}
 
-	/// Whether the track playing on this player should give way now rather than at the end of
-	/// its file (PLAN §7b).
-	///
-	/// Asked of the queue that would *supply* the next track, which is the same rule the two
-	/// switches follow (PLAN §7a): the queue waiting behind a player is what says how it wants
-	/// to take over. And it is asked at all only when there is something to take over — the
-	/// last track of the evening plays its run-out, because cutting it short would leave a
-	/// player stopped early for nothing.
-	fn cuts_early(&self, id: DeckId, position: Duration) -> bool {
-		let Some(track) = &self.decks[id.index()].track else {
-			return false;
-		};
-		let Some(source) = self.queues.next_source(id) else {
-			return false;
-		};
-
-		self.queues
-			.get(source)
-			.handover
-			.hands_over_early(position, self.known.trim(&track.path))
-	}
-
 	/// Give a player that has just finished the next track from a queue (PLAN §7a).
 	///
 	/// **Only from here**, which is the whole dispatch rule: a track ending is the one event
@@ -1544,29 +1526,13 @@ impl Clecta {
 	/// files to a queue never loads anything by itself and every automatic load can be traced
 	/// back to a track the user heard end.
 	///
-	/// The track is *taken* rather than marked played: a queue is what is still to come, so
-	/// the row leaving the queue as it reaches the player is what makes the queue mean that.
-	///
-	/// Both switches belong to the **source queue**, not to the player: the queue that gave the
-	/// track is the queue that says whether it plays, so Cue 1 can run the evening by itself
-	/// while the shared pool stays a shelf someone takes from by hand (PLAN §7a).
+	/// What the handover does is the queues' answer (`Queues::hand_over`); this carries it out,
+	/// because the load is IO and what follows it depends on whether the file arrived.
 	fn advance(&mut self, id: DeckId) -> Task<Message> {
-		// A queue with **Auto-load** off offers nothing however full it is, so this is also
-		// where switching every queue off leaves the player simply stopped.
-		let Some(source) = self.queues.next_source(id) else {
+		let Some(next) = self.queues.hand_over(id, |path| self.known.trim(path)) else {
 			return Task::none();
 		};
-		let Some(item) = self.queues.get_mut(source).take_next() else {
-			return Task::none();
-		};
-
-		// Lands on `Stopped`, like every other load (PLAN §7): the next track is ready at
-		// 0:00 and audible only when someone presses Play — unless this queue was told to
-		// start it. On a mixer an unrequested fade-in is a mistake that cannot be taken back,
-		// which is why that is a switch and not the default.
-		let queue = self.queues.get(source);
-		let (auto_play, handover) = (queue.auto_play, queue.handover);
-		let path = item.path;
+		let path = next.path;
 		let loading = Task::batch([self.queued(), self.load(id, path.clone())]);
 
 		// Only if the file actually arrived. A load that failed leaves the *previous* track in
@@ -1581,14 +1547,14 @@ impl Clecta {
 			return loading;
 		}
 
-		// The other half of the handover setting (PLAN §7b), answered by the setting itself:
-		// silently 0:00 for a track nobody has scanned — the folder scan is what makes this
-		// exact, and until then the app plays the file it was given from the top.
-		if let Some(start) = handover.starts_at(self.known.trim(&path)) {
+		// The other half of the handover setting (PLAN §7b): silently 0:00 for a track nobody
+		// has scanned — the folder scan is what makes this exact, and until then the app plays
+		// the file it was given from the top.
+		if let Some(start) = next.start {
 			self.seek_to(id, start);
 		}
 
-		if auto_play {
+		if next.auto_play {
 			self.transport(id, deck::Event::Play);
 		}
 

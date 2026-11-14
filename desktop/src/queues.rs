@@ -24,6 +24,7 @@ use std::time::Duration;
 use crate::cache::Ready;
 use crate::deck::DeckId;
 use crate::queue::{Item, Queue};
+use crate::waveform::Trim;
 
 /// What the duplicate warning answered (PLAN §9a).
 ///
@@ -67,6 +68,20 @@ impl Admission {
 			.map(|(_, kept)| kept)
 			.collect()
 	}
+}
+
+/// What a handover does, worked out before anything is loaded (PLAN §7a, §7b): the track, where
+/// it starts, and whether it plays. The app carries it out — the load is IO, and the seek and
+/// the Play only happen if the file actually arrived.
+#[derive(Debug, PartialEq)]
+pub struct NextTrack {
+	pub path: PathBuf,
+	/// `None` leaves the playhead where the load put it, at the top of the file.
+	pub start: Option<Duration>,
+	/// Lands on `Stopped` otherwise, like every other load (PLAN §7): on a mixer an unrequested
+	/// fade-in is a mistake that cannot be taken back, which is why this is a switch and not
+	/// the default.
+	pub auto_play: bool,
 }
 
 /// Which of the three queues. The player-owned ones are `Cue`, the shared one is `Shared`.
@@ -217,6 +232,44 @@ impl Queues {
 					.map(|id| (index, id))
 			})
 			.collect()
+	}
+
+	/// Whether the track playing on this player should give way now rather than at the end of
+	/// its file (PLAN §7b), given where it is and its music's edges.
+	///
+	/// Asked of the queue that would *supply* the next track, which is the same rule the two
+	/// switches follow (PLAN §7a): the queue waiting behind a player is what says how it wants
+	/// to take over. And it is asked at all only when there is something to take over — the
+	/// last track of the evening plays its run-out, because cutting it short would leave a
+	/// player stopped early for nothing.
+	pub fn cuts_early(&self, id: DeckId, position: Duration, trim: Option<Trim>) -> bool {
+		self.next_source(id)
+			.is_some_and(|source| self.get(source).handover.hands_over_early(position, trim))
+	}
+
+	/// Take the next track for a player that has just finished, and say how it is to start
+	/// (PLAN §7a, §7b): `None`, taking nothing, when no queue offers one — which is also where
+	/// switching every queue off leaves the player simply stopped.
+	///
+	/// Taken rather than marked played: a queue is what is still to come, so the row leaving the
+	/// queue as it reaches the player is what makes the queue mean that. And all three answers
+	/// come from the **source queue**, not the player: the queue that gave the track is the queue
+	/// that says whether it plays and where from, so Cue 1 can run the evening by itself while
+	/// the shared pool stays a shelf someone takes from by hand. `trim` is what is known about
+	/// a file's music, for where a queue that skips the blanks starts it.
+	pub fn hand_over(
+		&mut self,
+		id: DeckId,
+		trim: impl FnOnce(&Path) -> Option<Trim>,
+	) -> Option<NextTrack> {
+		let source = self.next_source(id)?;
+		let queue = self.get_mut(source);
+		let item = queue.take_next()?;
+		Some(NextTrack {
+			start: queue.handover.starts_at(trim(&item.path)),
+			auto_play: queue.auto_play,
+			path: item.path,
+		})
 	}
 
 	/// Ask about a batch's repeats, if it has any (PLAN §9a): `All` without a word when none of
@@ -417,6 +470,7 @@ impl Queues {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::queue::Handover;
 	use crate::select::Click;
 
 	fn queue(names: &[&str]) -> Queue {
@@ -749,5 +803,94 @@ mod tests {
 		assert!(reordered && copied);
 		assert_eq!(names(&queues)[0], ["b.mp3", "a.mp3"]);
 		assert_eq!(names(&queues)[1], ["c.mp3"]);
+	}
+
+	/// Music from 2 s to 3:00 in every file — what a scan of each would have found.
+	fn edges(_: &Path) -> Option<Trim> {
+		Some(TRIM)
+	}
+
+	const TRIM: Trim = Trim {
+		start: Duration::from_secs(2),
+		end: Duration::from_secs(180),
+	};
+
+	/// Past the music's end: the run-out is playing.
+	const RUN_OUT: Duration = Duration::from_secs(181);
+
+	#[test]
+	fn the_last_track_of_the_evening_plays_its_run_out() {
+		// Arrange: Cue 1 skips the blanks but has nothing left to give.
+		let mut queues = three(&[], &[], &[]);
+		queues.get_mut(ONE).handover = Handover::Trimmed;
+
+		// Act / Assert: nothing would take over, so nothing is cut.
+		assert!(!queues.cuts_early(DeckId::One, RUN_OUT, Some(TRIM)));
+
+		// The moment there is a next track, the run-out goes.
+		queues.add(ONE, items(&["b.mp3"]), false, never);
+		assert!(queues.cuts_early(DeckId::One, RUN_OUT, Some(TRIM)));
+		assert!(
+			!queues.cuts_early(DeckId::One, RUN_OUT, None),
+			"a track nobody scanned plays whole"
+		);
+	}
+
+	#[test]
+	fn the_queue_that_would_supply_the_track_decides_when_it_takes_over() {
+		// Arrange: Cue 1 skips the blanks but is switched off; the shared queue plays whole.
+		let mut queues = three(&["a.mp3"], &["b.mp3"], &[]);
+		queues.get_mut(ONE).handover = Handover::Trimmed;
+		queues.get_mut(ONE).auto_load = false;
+
+		// Act / Assert: the shared queue is the supplier, and it waits for the end of the file.
+		assert!(!queues.cuts_early(DeckId::One, RUN_OUT, Some(TRIM)));
+
+		// Its own setting changed, it cuts.
+		queues.get_mut(QueueId::Shared).handover = Handover::Trimmed;
+		assert!(queues.cuts_early(DeckId::One, RUN_OUT, Some(TRIM)));
+	}
+
+	#[test]
+	fn a_handover_takes_the_top_track_and_starts_it_as_its_own_queue_says() {
+		// Arrange: Cue 1 plays whole and waits; the shared queue skips the blanks and plays.
+		let mut queues = three(&["a.mp3", "b.mp3"], &["c.mp3"], &[]);
+		let shared = queues.get_mut(QueueId::Shared);
+		shared.handover = Handover::Trimmed;
+		shared.auto_play = true;
+
+		// Act: Player 1 runs out twice with its cue, then a third time.
+		let first = queues.hand_over(DeckId::One, edges);
+		let second = queues.hand_over(DeckId::One, edges);
+		let third = queues.hand_over(DeckId::One, edges);
+
+		// Assert: the cue's tracks at the top and stopped, then the shared queue's at the music.
+		let next = |name: &str, start, auto_play| NextTrack {
+			path: path(name),
+			start,
+			auto_play,
+		};
+		assert_eq!(first, Some(next("a.mp3", None, false)));
+		assert_eq!(second, Some(next("b.mp3", None, false)));
+		assert_eq!(third, Some(next("c.mp3", Some(TRIM.start), true)));
+		assert_eq!(
+			names(&queues),
+			[Vec::<String>::new(), vec![], vec![]],
+			"each taken"
+		);
+	}
+
+	#[test]
+	fn nothing_to_hand_over_takes_nothing() {
+		// Arrange: a full cue with Auto-load off, and nothing shared.
+		let mut queues = three(&["a.mp3"], &[], &[]);
+		queues.get_mut(ONE).auto_load = false;
+
+		// Act
+		let next = queues.hand_over(DeckId::One, edges);
+
+		// Assert: the player simply stops, and the shelf keeps its track.
+		assert_eq!(next, None);
+		assert_eq!(names(&queues)[0], ["a.mp3"]);
 	}
 }

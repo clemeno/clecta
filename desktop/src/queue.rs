@@ -49,8 +49,8 @@ impl Handover {
 	/// has scanned plays whole — silently, because the alternative is a notice line every four
 	/// minutes about a setting the user already knows they turned on.
 	///
-	/// The caller has already asked `next_source` whether there *is* a next track. That is the
-	/// fourth condition and it is deliberately not here: cutting the run-out off the last track of
+	/// `Queues::cuts_early` has already asked `next_source` whether there *is* a next track. That
+	/// is the fourth condition and it is deliberately not here: cutting the run-out off the last track of
 	/// the evening would leave a player stopped early for no benefit at all.
 	pub fn hands_over_early(self, position: Duration, trim: Option<Trim>) -> bool {
 		self == Handover::Trimmed && trim.is_some_and(|trim| position >= trim.end)
