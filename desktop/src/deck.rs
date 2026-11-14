@@ -18,11 +18,11 @@
 //! `Player`. The *user's* word for the two halves is still "Player 1" / "Player 2", which
 //! is what `DeckId::label` returns (PLAN §5).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::audio::Engine;
-use crate::waveform::Key;
+use crate::waveform::{Key, Scan};
 
 /// Which of the two players.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -340,13 +340,62 @@ impl Deck {
 		reload.or(self.moved(id, Event::Ended, engine))
 	}
 
+	/// Put a track the device has just accepted into the model: stopped at the top, its own
+	/// scan starting (PLAN §7, §14a). The engine is the caller's to ask first, because a file
+	/// it refuses must leave the loaded track alone, and only the caller has a notice to say so.
+	///
+	/// The peaks are cleared now rather than when the new scan lands, so the strip never shows
+	/// the outgoing track's shape under the incoming track's playhead. The tempo and the key
+	/// are unknown until the same moment: the rate slider's readout shows its percentage alone.
+	pub fn loaded(&mut self, path: PathBuf, duration: Option<Duration>) {
+		self.transport = transition(self.transport, Event::Loaded);
+		self.position = Duration::ZERO;
+		self.peaks = Vec::new();
+		self.scanning = true;
+		self.track = Some(Track {
+			name: crate::fsio::name_of(&path),
+			path,
+			duration,
+			tempo: None,
+			key: None,
+		});
+	}
+
+	/// Take what a track's own scan found (PLAN §14a, §14e): the strip's shape, and the tempo
+	/// and key the rate slider's readout wants — the loaded track's own, where the panes want a
+	/// row's. Returns the notice for a scan that failed.
+	///
+	/// A scan takes a moment, and a player can be given a second track inside it. A result for
+	/// any track but the loaded one is dropped, or it would draw the previous track under this
+	/// one's playhead — and `scanning` is left alone then, because the *newer* scan is still
+	/// running. A failure is odd but reachable: playback opened the file and the scan did not,
+	/// because it was replaced or unmounted between the two reads.
+	pub fn scanned(
+		&mut self,
+		id: DeckId,
+		path: &Path,
+		result: Result<Scan, String>,
+	) -> Option<String> {
+		let track = self.track.as_mut().filter(|track| track.path == path)?;
+		self.scanning = false;
+		match result {
+			Ok(scan) => {
+				self.peaks = scan.peaks;
+				track.tempo = scan.tempo;
+				track.key = scan.key;
+				None
+			}
+			Err(error) => Some(format!("{}: {error}", id.label())),
+		}
+	}
+
 	/// Take the track out of the player: back to `Empty`, as if nothing had ever been
 	/// loaded — except the fader and the rate slider, which are settings rather than track
 	/// state, and survive the way they survive a load.
 	///
-	/// `scanning` goes too, deliberately: the `Scanned` guard in `update` drops a result
-	/// for a track that is no longer loaded, so a scan still running for the unloaded
-	/// track would otherwise leave the strip animating forever.
+	/// `scanning` goes too, deliberately: `scanned` drops a result for a track that is no
+	/// longer loaded, so a scan still running for the unloaded track would otherwise leave
+	/// the strip animating forever.
 	///
 	/// No return, unlike `moved`: dropping a source is the one thing a device cannot
 	/// refuse.
@@ -605,6 +654,94 @@ mod tests {
 				"loading over {state:?}"
 			);
 		}
+	}
+
+	/// What a scan of `/music/next.mp3` finds: a shape, a tempo, no key.
+	fn found() -> Result<Scan, String> {
+		Ok(Scan {
+			peaks: vec![0.25, 0.75],
+			trim: None,
+			tempo: Some(128.0),
+			key: None,
+		})
+	}
+
+	#[test]
+	fn a_load_clears_the_outgoing_shape_and_starts_a_scan() {
+		// Arrange: a playing player, mid-track, its strip drawn.
+		let mut player = deck(Transport::Playing);
+		player.position = Duration::from_secs(90);
+		player.peaks = vec![0.5];
+
+		// Act
+		player.loaded(
+			PathBuf::from("/music/next.mp3"),
+			Some(Duration::from_secs(200)),
+		);
+
+		// Assert: stopped at the top, no shape until its own scan lands, and that scan running.
+		assert_eq!(player.transport, Transport::Stopped);
+		assert_eq!(player.position, Duration::ZERO);
+		assert!(player.peaks.is_empty());
+		assert!(player.scanning);
+		let track = player.track.expect("a track after a load");
+		assert_eq!(track.name, "next.mp3");
+		assert_eq!(track.duration, Some(Duration::from_secs(200)));
+	}
+
+	#[test]
+	fn a_scan_for_the_loaded_track_fills_the_strip_and_the_readout() {
+		// Arrange
+		let mut player = Deck::default();
+		player.loaded(PathBuf::from("/music/next.mp3"), None);
+
+		// Act
+		let notice = player.scanned(DeckId::One, Path::new("/music/next.mp3"), found());
+
+		// Assert
+		assert_eq!(notice, None);
+		assert!(!player.scanning);
+		assert_eq!(player.peaks, vec![0.25, 0.75]);
+		assert_eq!(player.track.and_then(|track| track.tempo), Some(128.0));
+	}
+
+	#[test]
+	fn a_scan_for_a_replaced_track_is_dropped_and_the_newer_one_keeps_running() {
+		// Arrange: the first track's scan is still out when a second track is loaded.
+		let mut player = Deck::default();
+		player.loaded(PathBuf::from("/music/first.mp3"), None);
+		player.loaded(PathBuf::from("/music/next.mp3"), None);
+
+		// Act: the first track's scan lands, and fails, which says nothing either.
+		let shape = player.scanned(DeckId::One, Path::new("/music/first.mp3"), found());
+		let failure = player.scanned(
+			DeckId::One,
+			Path::new("/music/first.mp3"),
+			Err("gone".into()),
+		);
+
+		// Assert: no shape, no notice, and the strip still animating for the second scan.
+		assert_eq!((shape, failure), (None, None));
+		assert!(player.peaks.is_empty());
+		assert!(player.scanning);
+	}
+
+	#[test]
+	fn a_failed_scan_of_the_loaded_track_stops_the_sweep_and_says_so() {
+		// Arrange
+		let mut player = Deck::default();
+		player.loaded(PathBuf::from("/music/next.mp3"), None);
+
+		// Act
+		let notice = player.scanned(
+			DeckId::Two,
+			Path::new("/music/next.mp3"),
+			Err("gone".into()),
+		);
+
+		// Assert
+		assert_eq!(notice, Some("Player 2: gone".to_string()));
+		assert!(!player.scanning);
 	}
 
 	#[test]

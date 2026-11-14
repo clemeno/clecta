@@ -29,7 +29,7 @@ use notify::{RecursiveMode, Watcher};
 use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
-use crate::deck::{self, Deck, DeckId, DropOutcome, Track};
+use crate::deck::{self, Deck, DeckId, DropOutcome};
 use crate::focus::Focus;
 use crate::known::{Facts, Known};
 use crate::mixer::{self, Curve};
@@ -417,8 +417,9 @@ pub enum Message {
 	Prepared(PathBuf, HashMap<PathBuf, Ready>),
 	FoldersListed(PathBuf, Result<Vec<PathBuf>, String>),
 	/// A track's scan finished. Carries the path it was started for, because a player can
-	/// be given another track while the scan runs (PLAN §14a).
-	Scanned(DeckId, PathBuf, Result<Scan, String>),
+	/// be given another track while the scan runs (PLAN §14a), and the length its load read,
+	/// because that is the same answer a queue's measuring would have looked up (Q59).
+	Scanned(DeckId, PathBuf, Option<Duration>, Result<Scan, String>),
 	/// Advance the scanning animation one step. Sent only while a scan is running.
 	Sweep,
 	/// The waveform was clicked, at this fraction of the track. Moves the playhead and
@@ -1549,54 +1550,29 @@ impl Clecta {
 				Err(error) => self.notice = error,
 			},
 
-			Message::Scanned(id, path, result) => {
-				// Recorded before anything is checked: where a file's music sits is true about
-				// the *file*, whatever is loaded in the player by now (PLAN §14c).
-				let trim = result.as_ref().ok().and_then(|scan| scan.trim);
-				let tempo = result.as_ref().ok().and_then(|scan| scan.tempo);
-				let musical = result.as_ref().ok().and_then(|scan| scan.key);
-				self.known.remember(&path, trim);
-				if result.is_ok() {
-					// Loading a track prepares it, so its row gets the same mark the folder scan
-					// would have given it (PLAN §11c) — one rule, whoever asked for the decode.
-					self.browser.mark_prepared(
-						&path,
-						Ready {
-							tempo,
-							trim,
-							key: musical,
-						},
-					);
-				}
-
-				// A scan takes a moment, and a player can be given a second track inside it.
-				// An array that no longer belongs to what is loaded is dropped, or it would
-				// draw the previous track under this one's playhead. `scanning` is left
-				// alone in that case, because the *newer* scan is still running.
-				if self.decks[id.index()]
-					.track
-					.as_ref()
-					.map(|track| &track.path)
-					!= Some(&path)
-				{
-					return Task::none();
-				}
-				self.decks[id.index()].scanning = false;
-				match result {
-					Ok(scan) => {
-						let deck = &mut self.decks[id.index()];
-						deck.peaks = scan.peaks;
-						// For the rate slider's readout (PLAN §7c, §14e), which wants the loaded
-						// track's own tempo and key where the panes want a row's.
-						if let Some(track) = deck.track.as_mut() {
-							track.tempo = scan.tempo;
-							track.key = scan.key;
-						}
-					}
-					// Odd but reachable: playback opened the file and the scan did not,
-					// because it was replaced or unmounted between the two reads.
-					Err(error) => self.notice = format!("{}: {error}", id.label()),
-				}
+			Message::Scanned(id, path, duration, result) => {
+				// Recorded before the player is asked: what a scan found is true about the
+				// *file*, whatever is loaded in the player by now (PLAN §14c). Through the one
+				// door the other two scans use (Q59), so a queued row of this file learns it
+				// as the files pane's mark does — loading a track prepares it (PLAN §11c).
+				let ready = result.as_ref().ok().map(|scan| Ready {
+					trim: scan.trim,
+					tempo: scan.tempo,
+					key: scan.key,
+				});
+				self.known.learned(
+					&Facts {
+						path: path.clone(),
+						duration,
+						ready,
+						// The same `ponytail:` as `scan_file`'s: worked is taken to be stored.
+						prepared: ready.is_some(),
+					},
+					&mut self.browser,
+					&mut self.queues,
+				);
+				let notice = self.decks[id.index()].scanned(id, &path, result);
+				self.noted(notice);
 			}
 
 			// Wrapping, because this counter is only ever read modulo `SWEEP_STEPS`, and an
@@ -2238,27 +2214,9 @@ impl Clecta {
 
 		match engine.load(id, &path) {
 			Ok(duration) => {
-				let name = fsio::name_of(&path);
-				self.notice = format!("{}: {name}", id.label());
-
-				let deck = &mut self.decks[id.index()];
-				deck.transport = deck::transition(deck.transport, deck::Event::Loaded);
-				deck.position = Duration::ZERO;
-				// Cleared now rather than when the new scan lands, so the strip is never
-				// showing the outgoing track's shape under the incoming track's playhead.
-				deck.peaks = Vec::new();
-				deck.scanning = true;
-				deck.track = Some(Track {
-					path: path.clone(),
-					name,
-					duration,
-					// The scan is only starting: the slider's readout shows the percentage
-					// alone until the tempo and the key land with the strip.
-					tempo: None,
-					key: None,
-				});
-
-				scan_track(id, path, self.cache.clone())
+				self.notice = format!("{}: {}", id.label(), fsio::name_of(&path));
+				self.decks[id.index()].loaded(path.clone(), duration);
+				scan_track(id, path, duration, self.cache.clone())
 			}
 			// `{error:#}` prints the anyhow chain on one line, which is what turns
 			// "cannot decode x.mp4" into "cannot decode x.mp4: unsupported codec".
@@ -2904,7 +2862,12 @@ fn list_folders(folder: PathBuf) -> Task<Message> {
 /// its answer arrives as a `fsync`-shaped write, so it belongs on the same side of the thread
 /// boundary as the decode it is replacing — and the app above is unchanged either way, because
 /// a hit and a scan produce the same message.
-fn scan_track(id: DeckId, path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
+fn scan_track(
+	id: DeckId,
+	path: PathBuf,
+	duration: Option<Duration>,
+	cache: Arc<Cache>,
+) -> Task<Message> {
 	let scanned = path.clone();
 
 	off_thread(
@@ -2914,7 +2877,7 @@ fn scan_track(id: DeckId, path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 			// in the status bar is the one outcome worse than a slow scan.
 			let result =
 				result.unwrap_or_else(|| Err("the waveform scan stopped unexpectedly".to_string()));
-			Message::Scanned(id, path.clone(), result)
+			Message::Scanned(id, path.clone(), duration, result)
 		},
 	)
 }
