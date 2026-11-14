@@ -437,7 +437,10 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   five and drops them where the caret is; that **▲** with a block moves the block; and the
   duplicate dialog's three answers, which is the one to try deliberately — Yes queueing all,
   No queueing only the fresh ones, Cancel leaving every queue exactly as it was, with the
-  buttons reading sensibly on the platform's own dialog (PLAN §9a).
+  buttons reading sensibly on the platform's own dialog (PLAN §9a). And one that only the app
+  can show, since the order of load and take lives in `update`: a batch whose first file the
+  player refuses — drag a renamed-to-`.mp3` text file out of a queue onto a player — leaves
+  every queue exactly as it was, with the reason in the notice (Q81).
 - **A handover that skips the blanks.** *Not checked yet*, and it is the one this whole
   feature is judged by, because everything about it is a matter of taste rather than of
   arithmetic: that the cut lands where the music actually stopped rather than a beat early,

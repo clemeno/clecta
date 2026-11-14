@@ -801,7 +801,9 @@ impl Clecta {
 				self.notice = format!("{}: unloaded", id.label());
 			}
 
-			Message::LoadSelected(id) => return self.load_batch(id, self.browser.selected_media()),
+			Message::LoadSelected(id) => {
+				return self.load_batch(id, self.browser.selected_media(), |_| false);
+			}
 
 			// The double click acts on the **selection** when the row it landed on is part of
 			// one, and on that row alone when it is not (PLAN §9a). Both cases are reachable:
@@ -819,7 +821,7 @@ impl Clecta {
 				} else {
 					vec![path]
 				};
-				return self.load_batch(id, batch);
+				return self.load_batch(id, batch, |_| false);
 			}
 
 			Message::RowSelected(path) => {
@@ -1040,26 +1042,40 @@ impl Clecta {
 
 				// The selection when the double-clicked row is part of it, that row alone when
 				// it is not — the same rule the files pane's double click follows (PLAN §9a).
-				let taken = if self.queues.get(queue).is_selected(index) {
-					self.queues.get_mut(queue).take_selected()
+				let selected = self.queues.get(queue).is_selected(index);
+				let paths: Vec<PathBuf> = if selected {
+					self.queues.get(queue).selected_items()
 				} else {
 					self.queues
-						.get_mut(queue)
-						.remove(index)
+						.get(queue)
+						.items()
+						.get(index)
+						.cloned()
 						.into_iter()
 						.collect()
-				};
-				if taken.is_empty() {
+				}
+				.into_iter()
+				.map(|item| item.path)
+				.collect();
+				if paths.is_empty() {
 					return Task::none();
 				}
 
-				// The press that opened this double click armed a drag, and the rows it was
-				// carrying have just left the queue. Disarmed here rather than left to the
-				// release, which would otherwise drop rows that no longer exist.
+				// The press that opened this double click armed a drag, and the double click has
+				// claimed it. Disarmed here rather than left to the release, which would
+				// otherwise drop the rows a second time — gone from the queue if the player took
+				// them, or reordered under the pointer if it refused.
 				self.drag.disarm();
 
-				let paths = taken.into_iter().map(|item| item.path).collect();
-				return Task::batch([self.queued(), self.load_batch(id, paths)]);
+				return self.load_batch(id, paths, |queues| {
+					let rows = queues.get_mut(queue);
+					if selected {
+						rows.take_selected();
+					} else {
+						rows.remove(index);
+					}
+					true
+				});
 			}
 
 			// Not persisted and deliberately not `dirty`, exactly like the files pane's own
@@ -1302,14 +1318,14 @@ impl Clecta {
 						// A drag that lands takes the collapse with it: releasing a carried
 						// selection must not also narrow it (Q50).
 						self.collapse.cancel();
-						let mut tasks = Vec::new();
-						if let Some((queue, rows)) = &carried.from {
-							self.queues.get_mut(*queue).take_rows(rows);
-							tasks.push(self.queued());
-						}
 						let paths = carried.items.into_iter().map(|item| item.path).collect();
-						tasks.push(self.load_batch(id, paths));
-						return Task::batch(tasks);
+						return self.load_batch(id, paths, |queues| match carried.from {
+							Some((queue, rows)) => {
+								queues.get_mut(queue).take_rows(&rows);
+								true
+							}
+							None => false,
+						});
 					}
 					Some((DropTarget::Row(queue, index), carried)) => {
 						self.collapse.cancel();
@@ -1569,20 +1585,14 @@ impl Clecta {
 		let Some(next) = self.queues.hand_over(id, |path| self.known.trim(path)) else {
 			return Task::none();
 		};
-		let path = next.path;
-		let loading = Task::batch([self.queued(), self.load(id, path.clone())]);
-
 		// Only if the file actually arrived. A load that failed leaves the *previous* track in
 		// the player and says so in the notice (PLAN §7), and pressing Play on that would be
 		// the app restarting a track nobody queued — the one way an automatic start could
 		// play the wrong thing.
-		if !self.decks[id.index()]
-			.track
-			.as_ref()
-			.is_some_and(|track| track.path == path)
-		{
-			return loading;
-		}
+		let Some(loading) = self.try_load(id, next.path) else {
+			return self.queued();
+		};
+		let loading = Task::batch([self.queued(), loading]);
 
 		// The other half of the handover setting (PLAN §7b): silently 0:00 for a track nobody
 		// has scanned — the folder scan is what makes this exact, and until then the app plays
@@ -1614,19 +1624,38 @@ impl Clecta {
 	/// No duplicate warning, deliberately — the same silence a single drag onto a player has
 	/// always kept (PLAN §7a). This gesture means *now*, and a modal that appeared after the
 	/// first track had already started would be asking about something that has happened.
-	fn load_batch(&mut self, id: DeckId, paths: Vec<PathBuf>) -> Task<Message> {
+	///
+	/// **Loaded before anything moves** (Q81). `take` is what the door takes out of a queue —
+	/// the dragged rows, the double-clicked ones, nothing from the files pane — and it runs only
+	/// once the player has the first file, before the rest go in so a cue's own rows are taken
+	/// by the numbers they had. A player that refuses the file leaves every queue as it was, and
+	/// the notice says why: both halves or neither, as Cancel does (Q76).
+	fn load_batch(
+		&mut self,
+		id: DeckId,
+		paths: Vec<PathBuf>,
+		take: impl FnOnce(&mut Queues) -> bool,
+	) -> Task<Message> {
 		let mut paths = paths.into_iter();
 		let Some(first) = paths.next() else {
 			return Task::none();
 		};
+		let Some(loading) = self.try_load(id, first) else {
+			return Task::none();
+		};
 
+		let took = take(&mut self.queues);
 		let rest: Vec<queue::Item> = paths.map(queue::Item::new).collect();
-		if !rest.is_empty() {
+		let queued = !rest.is_empty();
+		if queued {
 			self.queues.get_mut(QueueId::Cue(id)).insert_many(0, rest);
-			return Task::batch([self.load(id, first), self.queued()]);
 		}
 
-		self.load(id, first)
+		if took || queued {
+			Task::batch([loading, self.queued()])
+		} else {
+			loading
+		}
 	}
 
 	/// Hand files to threads until the fan-out is full, and notice when the last one lands
@@ -1915,27 +1944,35 @@ impl Clecta {
 	/// the previous track alone and says so — it must never wipe a loaded track to show an
 	/// error (PLAN §7).
 	fn load(&mut self, id: DeckId, path: PathBuf) -> Task<Message> {
+		self.try_load(id, path).unwrap_or_else(Task::none)
+	}
+
+	/// The same, saying whether the player took the file: `None` when it refused, with the
+	/// notice already saying why. For the callers whose next step depends on it — a batch
+	/// takes rows out of a queue only once the first file has arrived, and a handover plays
+	/// only what arrived.
+	fn try_load(&mut self, id: DeckId, path: PathBuf) -> Option<Task<Message>> {
 		if !browser::kind_of(&path).is_media() {
 			self.notice = format!("{} is not a media file", fsio::name_of(&path));
-			return Task::none();
+			return None;
 		}
 
 		let Some(engine) = self.engine.as_ref() else {
 			self.notice = "no audio device — press Reconnect audio".to_string();
-			return Task::none();
+			return None;
 		};
 
 		match engine.load(id, &path) {
 			Ok(duration) => {
 				self.notice = format!("{}: {}", id.label(), fsio::name_of(&path));
 				self.decks[id.index()].loaded(path.clone(), duration);
-				scan_track(id, path, duration, self.cache.clone())
+				Some(scan_track(id, path, duration, self.cache.clone()))
 			}
 			// `{error:#}` prints the anyhow chain on one line, which is what turns
 			// "cannot decode x.mp4" into "cannot decode x.mp4: unsupported codec".
 			Err(error) => {
 				self.notice = format!("{}: {error:#}", id.label());
-				Task::none()
+				None
 			}
 		}
 	}
