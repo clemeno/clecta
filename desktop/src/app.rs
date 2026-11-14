@@ -26,14 +26,16 @@ use iced::{
 };
 use notify::{RecursiveMode, Watcher};
 
-use crate::audio::{self, Engine};
+use crate::audio::Engine;
 use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome};
 use crate::drag::{Drag, DropTarget, Zone};
 use crate::focus::Focus;
 use crate::known::{Facts, Known};
+use crate::measure;
 use crate::mixer::{self, Curve};
+use crate::prepare::Preparing;
 use crate::queue::{self, Handover};
 use crate::queues::{Admission, QueueId, Queues};
 use crate::select::{Click, Collapse};
@@ -116,14 +118,6 @@ const CHROME: f32 = 2.0 * WINDOW_PADDING + STATUS_GAP + STATUS_HEIGHT;
 /// are given as the window resizes; the mixer's controls do not grow usefully.
 const MIXER_WIDTH: f32 = 240.0;
 
-/// How many files a folder scan decodes at once (PLAN §11b).
-///
-/// Four, and the number is the whole trade: a scan is a decode of an entire file, so one
-/// thread at a time leaves a folder of two thousand tracks running for ten minutes, and one
-/// thread per core leaves nothing for the audio callback while somebody is playing a set.
-/// Four is fast enough to be worth pressing and still short of every machine's core count.
-const SCAN_JOBS: usize = 4;
-
 /// The cache's name inside `clecta-data/` (PLAN §11a). Beside `settings.json` rather than in a
 /// per-user cache folder, so a portable install carries what it has already worked out with
 /// it — and the extension says what it is to anyone looking at the folder.
@@ -168,44 +162,6 @@ pub fn run() -> iced::Result {
 pub enum Section {
 	Files,
 	Tree,
-}
-
-/// A folder scan in flight (PLAN §11b).
-///
-/// `next` and `done` are separate counters because the files go out ahead of the answers:
-/// `SCAN_JOBS` of them are always in the air, so the number on screen has to be the one that
-/// has come *back*, and the scan is over when the last thread reports rather than when the
-/// last file is handed out.
-struct Scanning {
-	files: Vec<PathBuf>,
-	next: usize,
-	done: usize,
-	/// How many threads are out right now, which is what the fan-out is capped against.
-	running: usize,
-	/// *Which* files those threads are on, so the pane can put a spinner on their rows
-	/// (PLAN §11c).
-	///
-	/// A list rather than a range of `files`, because the answers come back out of order: the
-	/// four in the air are never the four between `done` and `next`. At most `SCAN_JOBS` long,
-	/// which is why a `Vec` and a linear scan are the whole of it.
-	busy: Vec<PathBuf>,
-}
-
-impl Scanning {
-	/// How many more files may go out this moment: whatever the fan-out has free, or whatever
-	/// is left of the list, whichever is smaller.
-	fn slots(&self) -> usize {
-		SCAN_JOBS
-			.saturating_sub(self.running)
-			.min(self.files.len() - self.next)
-	}
-
-	/// Whether the scan is over — when the last *thread* has reported, not when the last file
-	/// went out. That is also what makes **Stop** work without a flag: it cuts the list down to
-	/// what has already gone out, and this then becomes true as those last answers land.
-	fn is_over(&self) -> bool {
-		self.next == self.files.len() && self.running == 0
-	}
 }
 
 #[derive(Debug, Clone)]
@@ -432,8 +388,8 @@ pub struct Clecta {
 	/// — is the type's business, not the arms'.
 	known: Known,
 	/// The folder scan, while one is running (PLAN §11b). `None` at rest, which is also what
-	/// the Cancel button leaves behind.
-	scanning: Option<Scanning>,
+	/// the Cancel button leaves behind once the files already out have come back.
+	preparing: Option<Preparing>,
 	/// What is being held on the keyboard right now (PLAN §9a).
 	///
 	/// Kept because a press on a row arrives through a `mouse_area`, which does not carry the
@@ -578,7 +534,7 @@ impl Clecta {
 			// wants to know whether there is a cache to ask (PLAN §11a).
 			cache: Arc::new(Cache::open(&paths::data_dir().join(CACHE_FILE))),
 			known: Known::default(),
-			scanning: None,
+			preparing: None,
 			modifiers: Modifiers::empty(),
 			sweep: 0,
 			tempos: settings.tempos,
@@ -684,7 +640,7 @@ impl Clecta {
 		// It drives two things now — the band crossing a player's strip and the spinner on
 		// every files-pane row a thread is decoding (PLAN §11c) — off one counter, so the whole
 		// window turns at the same rate rather than at two rates that beat against each other.
-		let sweep = if self.decks.iter().any(|deck| deck.scanning) || self.scanning.is_some() {
+		let sweep = if self.decks.iter().any(|deck| deck.scanning) || self.preparing.is_some() {
 			time::every(SWEEP).map(|_| Message::Sweep)
 		} else {
 			Subscription::none()
@@ -1442,13 +1398,7 @@ impl Clecta {
 						"nothing to prepare — no media files under that folder".to_string();
 				}
 				Ok(files) => {
-					self.scanning = Some(Scanning {
-						files,
-						next: 0,
-						done: 0,
-						running: 0,
-						busy: Vec::new(),
-					});
+					self.preparing = Some(Preparing::new(files));
 					return self.scan_step();
 				}
 				Err(error) => self.notice = error,
@@ -1460,30 +1410,17 @@ impl Clecta {
 				// its answer away.
 				self.known
 					.learned(&facts, &mut self.browser, &mut self.queues);
-				if let Some(scanning) = self.scanning.as_mut() {
-					scanning.done += 1;
-					scanning.running -= 1;
-					// The row stops spinning here rather than when the next file goes out, so a
-					// file that is slow to decode is the one still turning.
-					scanning.busy.retain(|path| path != &facts.path);
+				if let Some(preparing) = self.preparing.as_mut() {
+					preparing.landed(&facts.path);
 				}
 				return self.scan_step();
 			}
 
-			// The threads already out are left to finish — they are decoding a file each, and
-			// there is no way to interrupt a decode that does not also mean checking a flag in
-			// the sample loop. What stops is the *handing out*, which is the part that would
-			// otherwise run for another nine minutes.
-			//
-			// Cutting the list down to what has already gone out, rather than dropping the scan
-			// where it stands, is what keeps the counters honest: the four answers still coming
-			// belong to this scan and are counted by it, and the state clears itself when the
-			// last of them lands. Dropping it here would leave four jobs reporting into a scan
-			// that no longer exists — and starting another one before they landed would count
-			// their files twice and run `running` past zero.
+			// What stops is the *handing out*, which is the part that would otherwise run for
+			// another nine minutes; the files already out are waited for (`Preparing::stop`).
 			Message::ScanFolderCancelled => {
-				if let Some(scanning) = self.scanning.as_mut() {
-					scanning.files.truncate(scanning.next);
+				if let Some(preparing) = self.preparing.as_mut() {
+					preparing.stop();
 				}
 			}
 
@@ -1696,27 +1633,23 @@ impl Clecta {
 	/// back, and every time a file reports. There is no timer and no subscription — a scan is a
 	/// chain of messages that refills itself, so it stops costing anything the moment it ends.
 	fn scan_step(&mut self) -> Task<Message> {
-		let Some(scanning) = self.scanning.as_mut() else {
+		let Some(preparing) = self.preparing.as_mut() else {
 			return Task::none();
 		};
 
-		if scanning.is_over() {
-			let total = scanning.files.len();
-			self.scanning = None;
+		if preparing.is_over() {
+			let (_, total) = preparing.progress();
+			self.preparing = None;
 			self.notice = format!("prepared {total} files");
 			return Task::none();
 		}
 
-		let mut tasks = Vec::new();
-		for _ in 0..scanning.slots() {
-			let path = scanning.files[scanning.next].clone();
-			scanning.next += 1;
-			scanning.running += 1;
-			scanning.busy.push(path.clone());
-			tasks.push(scan_file(path, self.cache.clone()));
-		}
-
-		Task::batch(tasks)
+		Task::batch(
+			preparing
+				.hand_out()
+				.into_iter()
+				.map(|path| scan_file(path, self.cache.clone())),
+		)
 	}
 
 	/// Ask the store which of the listed files it already answers for in full (PLAN §11c).
@@ -1760,9 +1693,9 @@ impl Clecta {
 	/// players — which is what makes a linear search per built row the whole of the lookup.
 	fn working(&self) -> Vec<&Path> {
 		let preparing = self
-			.scanning
+			.preparing
 			.iter()
-			.flat_map(|scanning| scanning.busy.iter());
+			.flat_map(|preparing| preparing.busy().iter());
 		let loading = self
 			.decks
 			.iter()
@@ -1886,7 +1819,7 @@ impl Clecta {
 			move || {
 				paths
 					.into_iter()
-					.map(|path| cached_facts(&cache, &path))
+					.map(|path| measure::facts(&cache, &path))
 					.collect::<Vec<_>>()
 			},
 			// A job can only fail to answer by panicking. Its batch is then reported as
@@ -2130,9 +2063,7 @@ impl Clecta {
 				// (PLAN §11b).
 				Section::Files => ui::browser::view(
 					&self.browser,
-					self.scanning
-						.as_ref()
-						.map(|scanning| (scanning.done, scanning.files.len())),
+					self.preparing.as_ref().map(Preparing::progress),
 					&self.working(),
 					self.phase(),
 					&self.tempos,
@@ -2620,7 +2551,7 @@ fn scan_track(
 	let scanned = path.clone();
 
 	off_thread(
-		move || cached_scan(&cache, &scanned).map_err(|error| format!("{error:#}")),
+		move || measure::scan(&cache, &scanned).map_err(|error| format!("{error:#}")),
 		move |result| {
 			// Reported rather than swallowed: a strip that stays flat for ever with no line
 			// in the status bar is the one outcome worse than a slow scan.
@@ -2643,11 +2574,11 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 
 	off_thread(
 		move || {
-			let scan = cached_scan(&cache, &path);
+			let scan = measure::scan(&cache, &path);
 			Facts {
 				// `ponytail:` a scan that worked is taken to be a scan that was *stored*, which
 				// is one case out: a file that cannot be stat'd is deliberately never cached
-				// (`cached_scan`), so its row is marked prepared and is not. Self-correcting —
+				// (`measure::scan`), so its row is marked prepared and is not. Self-correcting —
 				// the next listing asks the store and takes the mark straight back off — and the
 				// alternative is a second lookup per file to learn what the decode already knew.
 				prepared: scan.is_ok(),
@@ -2656,7 +2587,7 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 					tempo: scan.tempo,
 					key: scan.key,
 				}),
-				duration: cached_duration(&cache, &path),
+				duration: measure::duration(&cache, &path),
 				path,
 			}
 		},
@@ -2671,79 +2602,6 @@ fn scan_file(path: PathBuf, cache: Arc<Cache>) -> Task<Message> {
 			}))
 		},
 	)
-}
-
-/// A track's waveform and the edges of its music: from the cache if they are there, from the
-/// file if they are not, and into the cache on the way past (PLAN §11a, §14c).
-///
-/// The two halves of the stamp rule live here and nowhere else. **No stamp, no caching** — a
-/// file that cannot be stat'd is scanned every time, which is the behaviour there was before
-/// the cache and is right for a path that is behaving strangely. And a scan that *fails* is
-/// not stored: the cache holds answers about files, not the fact that one of them would not
-/// open, which is a condition that can change under it.
-///
-/// What *counts* as a hit is no longer decided here (Q44). This function used to chain three
-/// lookups and know that all three had to answer, which is a rule the store was also enforcing
-/// on its own for the files pane's marks — two copies with a comment between them saying they
-/// had to be kept in step by hand. Now it asks the store whether the file has been scanned, and
-/// the store knows what that means.
-fn cached_scan(cache: &Cache, path: &Path) -> anyhow::Result<Scan> {
-	let stamp = cache::stamp(path);
-
-	if let Some(stamp) = stamp
-		&& let Some(scan) = cache.scan(path, stamp)
-	{
-		return Ok(scan);
-	}
-
-	let scan = audio::scan(path)?;
-	if let Some(stamp) = stamp {
-		cache.store_scan(path, stamp, &scan);
-	}
-	Ok(scan)
-}
-
-/// What is already known about a queued track, without decoding it (PLAN §7a, §14c).
-///
-/// The trim and the tempo are **read, never worked out**: finding either means decoding the whole
-/// file, and a queue edit that decoded fifty tracks would freeze four threads for half a minute
-/// for a setting the user may not even have switched on. So a queue learns where a track's music
-/// starts and how fast it beats only if something has already scanned it — the folder scan, or the
-/// track's own turn in a player — and shows neither until then.
-///
-/// It asks the same question the files pane's marks ask, through the same function, so the two
-/// panes now agree about one file (Q44). They did not quite before: this read the trim and the
-/// tempo table by table, so a track scanned by a build that knew nothing about tempi showed a
-/// playing time in a queue while its row in the pane showed no `✓` at all.
-fn cached_facts(cache: &Cache, path: &Path) -> Facts {
-	Facts {
-		duration: cached_duration(cache, path),
-		ready: cache::stamp(path).and_then(|stamp| cache.ready(path, stamp)),
-		// This job never *prepares* anything — it reads what is there. Saying so here is what
-		// stops a queue edit taking marks off rows the store is perfectly happy about.
-		prepared: false,
-		path: path.to_path_buf(),
-	}
-}
-
-/// The same, for a track's length (PLAN §7a, §11a).
-///
-/// The one difference from the waveform is what happens to a failure, and it is not an
-/// inconsistency: `audio::duration` has no error to report, only the *absence* of a length,
-/// and "this file has no length" is an answer worth remembering — it is exactly what stops the
-/// queues re-opening an unreadable file on every edit for the rest of the run.
-fn cached_duration(cache: &Cache, path: &Path) -> Option<Duration> {
-	let Some(stamp) = cache::stamp(path) else {
-		return audio::duration(path);
-	};
-
-	if let Some(length) = cache.duration(path, stamp) {
-		return length;
-	}
-
-	let length = audio::duration(path);
-	cache.store_duration(path, stamp, length);
-	length
 }
 
 /// The two testable things in this module: what a divider drag is allowed to store
@@ -2805,78 +2663,6 @@ mod tests {
 				"window {window} stored a height of {stored}"
 			);
 		}
-	}
-
-	/// The folder scan's bookkeeping, walked through a whole run (PLAN §11b). It is three
-	/// counters and no timer, and the only way to see that they add up is to run one — the
-	/// `Task`s the driver returns need a window, but the arithmetic that decides how many
-	/// there are does not.
-	#[test]
-	fn a_folder_scan_hands_out_exactly_what_it_finishes() {
-		// Arrange: ten files and a fan-out of four.
-		let mut scanning = Scanning {
-			files: (0..10).map(|n| PathBuf::from(format!("{n}.mp3"))).collect(),
-			next: 0,
-			done: 0,
-			running: 0,
-			busy: Vec::new(),
-		};
-
-		// Act / Assert: it fills the fan-out, and never more than the fan-out.
-		assert!(!scanning.is_over(), "nothing has been done yet");
-		assert_eq!(scanning.slots(), SCAN_JOBS);
-
-		// The whole run, one answer at a time: hand out what there is room for, take one back.
-		let mut handed = 0;
-		while !scanning.is_over() {
-			let slots = scanning.slots();
-			assert!(scanning.running + slots <= SCAN_JOBS, "over the fan-out");
-			scanning.next += slots;
-			scanning.running += slots;
-			handed += slots;
-
-			scanning.running -= 1;
-			scanning.done += 1;
-		}
-
-		// Assert: every file went out exactly once, and every one came back.
-		assert_eq!(handed, 10, "every file, once");
-		assert_eq!(scanning.done, 10);
-		assert_eq!(scanning.running, 0, "no thread left unaccounted for");
-	}
-
-	#[test]
-	fn stopping_a_scan_still_waits_for_the_files_already_out() {
-		// Arrange: four files out on threads, six still to come.
-		let mut scanning = Scanning {
-			files: (0..10).map(|n| PathBuf::from(format!("{n}.mp3"))).collect(),
-			next: 4,
-			done: 0,
-			running: 4,
-			busy: (0..4).map(|n| PathBuf::from(format!("{n}.mp3"))).collect(),
-		};
-
-		// Act: Stop, which cuts the list down to what has gone out rather than dropping the
-		// scan — the four answers still coming belong to it and have to be counted by it.
-		scanning.files.truncate(scanning.next);
-
-		// Assert: nothing more goes out, and it is not over until the four report.
-		assert_eq!(scanning.slots(), 0, "nothing more goes out");
-		assert!(!scanning.is_over(), "four are still decoding");
-
-		// Out of order, which is the case the busy list exists for: the four in the air are
-		// never `files[done..next]`, so a row keeps spinning until *its own* file reports
-		// (PLAN §11c).
-		for n in [2, 0, 3, 1] {
-			let reported = PathBuf::from(format!("{n}.mp3"));
-			scanning.running -= 1;
-			scanning.done += 1;
-			scanning.busy.retain(|path| path != &reported);
-			assert_eq!(scanning.busy.len(), scanning.running, "one row each");
-		}
-		assert!(scanning.is_over(), "the last one landed");
-		assert_eq!(scanning.done, scanning.files.len(), "counted once each");
-		assert!(scanning.busy.is_empty(), "nothing still spinning");
 	}
 
 	#[test]

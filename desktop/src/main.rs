@@ -15,11 +15,13 @@ mod drag; // a drag, start to release: what it carries, where it lands, the one 
 mod focus; // which list ⌘A and Escape are talking to
 mod fsio;
 mod known; // what this run has learned about files, and the door answers arrive through
+mod measure; // a file's numbers: from the store when it has them, from the file when not
 mod mixer;
 mod opus; // the Opus decoder symphonia 0.5 lacks, for WebM
 mod paths;
 #[cfg(test)]
 mod plan; // the facts PLAN.md states that the build can check
+mod prepare; // a folder scan in flight: what goes out next, what is out, what came back
 mod queue; // one queue: its rows, its selection, its handover rules
 mod queues; // the set of three: what is only true of them together
 mod select;

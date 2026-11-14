@@ -107,7 +107,7 @@ pub struct Item {
 	/// — and this is the same value the files pane holds per row, so both panes now answer the
 	/// question with the same expression. **One layer** because a length is a header parse that
 	/// every queue edit pays for, so *not measured* and *no length* are worth telling apart,
-	/// while a scan is only ever **read** here (`cached_facts`) — so `None` means nothing more
+	/// while a scan is only ever **read** here (`measure::facts`) — so `None` means nothing more
 	/// than nobody has scanned this file yet.
 	pub ready: Option<Ready>,
 }

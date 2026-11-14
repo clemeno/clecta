@@ -273,7 +273,7 @@ pub fn scan(path: &Path) -> Result<Scan> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 	use super::*;
 
 	/// The one test in this module, and the only one that can be: everything else here
@@ -1471,7 +1471,7 @@ mod tests {
 	}
 
 	/// A mono sixteen-bit PCM file: the forty-four byte canonical header, then the samples.
-	fn wav(samples: &[i16], rate: u32) -> Vec<u8> {
+	pub(crate) fn wav(samples: &[i16], rate: u32) -> Vec<u8> {
 		let data_len = samples.len() as u32 * 2;
 		let mut out = Vec::with_capacity(44 + data_len as usize);
 

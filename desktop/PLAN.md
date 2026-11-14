@@ -238,9 +238,13 @@ clecta/
         ├── known.rs     PURE: what this run has learned about files, and the one door those
         │                answers arrive through — the never-unlearn rule and the fan-out to
         │                the panes live here (§14c, Q59)
+        ├── measure.rs   a file's numbers from the store, or from a decode stored on the way past —
+        │                the stamp rules every scan goes through (§11a, §14c, Q77)
         ├── paths.rs     clecta-data/ beside the app if writable, else the per-user dir; the .app walk-up (§11);
         │                on Windows, a GUI launch's stderr into clecta-data/clecta.log
         ├── plan.rs      tests only: PLAN §3's versions against Cargo.toml and Cargo.lock
+        ├── prepare.rs   PURE: a folder scan in flight — what goes out next, what is out, what
+        │                came back, and Stop (§11b, §11c, Q77)
         ├── queue.rs  PURE arithmetic for **one** queue: its rows, its selection, and what
         │                every edit does to that selection (§7a)
         ├── queues.rs    PURE, and about the **set** of three: `QueueId`, the queues themselves,
@@ -1830,12 +1834,12 @@ get back — a real cost whose only symptom is a track that re-scans.
 ### Where it is asked, and where it is not
 
 **Inside the jobs, never on the GUI thread.** A commit is an `fsync`, which is §4's rule
-verbatim: if it blocks, it gets a thread. So `cached_scan` and `cached_duration` sit on the
+verbatim: if it blocks, it gets a thread. So `measure::scan` and `measure::duration` sit on the
 far side of `off_thread`, replacing the decode they wrap, and the app above them is unchanged —
 a hit and a scan produce the same message. That is what kept this feature from touching the
 transport, the widget or the queues at all.
 
-`cached_facts` — what a queue edit learns about a track without decoding it — now asks the same
+`measure::facts` — what a queue edit learns about a track without decoding it — now asks the same
 `ready` the files pane's marks are built from, which fixed a disagreement nobody had noticed
 (Q44). It used to read the trims table and the tempos table one at a time, so a track scanned by
 a build that knew nothing about tempi showed a playing time in a queue while its row in the pane
@@ -1958,7 +1962,7 @@ folder readable without reading any of it.
 
 ### "Prepared" is every table or none of them
 
-The mark tests exactly what `cached_scan` tests when it decides it has a hit: the waveform, the
+The mark tests exactly what `measure::scan` tests when it decides it has a hit: the waveform, the
 music's edges *and* the tempo, for this exact stamp (§11a). Not "there is an entry for this
 file" — a track the queues merely measured the length of has a row in `durations` and is still a
 third of a second of decoding away. A mark that included it would be true about the database and
@@ -2957,7 +2961,7 @@ It appears in the two places files are chosen and ordered:
 
 **It costs no extra work anywhere.** The pane's answer rides along with the query §11c already
 makes once per listing — the edges were being read to decide the mark, and the playing time is
-arithmetic on what came back. A queue row's rides along with `cached_facts`, which was already
+arithmetic on what came back. A queue row's rides along with `measure::facts`, which was already
 reading the trim so the handover could skip the blanks.
 
 The two panes need different rules for *not knowing*, and both are in `format_lengths`. A
@@ -3320,6 +3324,7 @@ decided.
 | Q74 | What to do about the macOS build's future-incompatibility warning | **Vendor `block` 0.1.6 with its one static of an uninhabited type made an opaque one.** The macOS cross-check warned that `block`'s `extern static _NSConcreteStackBlock: Class`, `Class` an empty enum, will one day be an error (rust#74840, a warning since 2020). It reaches clecta only on macOS: iced 0.14 → wgpu 27 → wgpu-hal's Metal backend → `metal` 0.32 → `block`. No upgrade removes it: iced 0.14.0 is the latest iced, `block` has had no release since 0.1.6, and wgpu-hal still used `metal` and `block` in 28, moving to `objc2-metal` and `block2` only in 29. Waiting was weighed, since the pinned Rust (§3) means only a deliberate bump could turn it into an error and the macOS clippy would then fail on that bump; the user chose to vendor it now. `Class` becomes a `#[repr(C)]` struct of `[u8; 0]`, the usual opaque foreign type, which changes nothing that runs, as only `&` and `*const` of it are ever taken. A path dependency's warnings are not capped as a registry one's are, and this 2015 crate leaves its `extern` ABI implicit at every foreign item, 46 warnings of `missing_abi`, so the crate allows that lint. Both changes are marked `clecta patch` in `src/lib.rs`, held to that by `check-vendor.sh`. Proof: a fresh macOS clippy build of `block` no longer prints the future-incompatibility note. It can go the day iced moves to wgpu 29 or later; `cargo tree -i block --target all` then prints nothing | §3, §5, §12, Q69 |
 | Q75 | Where a drag's bookkeeping lives | **On one type, `drag::Drag`, the way the collapse moved in Q58.** It was four `Option` and `bool` fields on the app — what was carried, the hovered target, the OS hover, the scrolling edge — read and written by eleven arms and two view helpers, and the README listed its rules as the half of the app that has always broken: one indicator at a time, a late leave not wiping a newer enter, a release on an edge stopping the scroll. None of them had a test, because the interface was raw fields. `Drag` keeps them private behind `arm`, `disarm`, `over`, `out`, `edge`, `files_hovered`, `files_dropped`, `ring`, `caret`, `scrolling` and `release`, which hands back where the carried rows landed or `None` for a plain click; each rule is a test now. What a landing *does* — load a player, move rows, cancel the collapse — stays in the app, which owns the players and the queues. The divider's own drag (`decks_drag`) stays out: it is a resize, not something carried, and only shares the release | §10, §7a, Q58, Q50 |
 | Q76 | Where the edits behind the duplicate warning live | **On `Queues`, with the warning passed in.** Adding from the files pane, `←` / `→`, and a drop into a queue each wrote out the same four steps in the app — find the duplicates, ask, filter, then take and insert — because the dialog sat in the middle, and the dialog is the app's. So "both halves or neither" and "Cancel leaves every queue as it was" had no test, and Q47's move of the set's rules into `queues.rs` had stopped short of them. `Queues::add`, `shift` and `dropped` now hold the steps, and each takes the question as a function: the app passes `admits`, its rfd dialog, and the tests pass a fixed `Admission` — two adapters, so the seam is real. `Admission` moves with them, and so does "no repeats, no question", which was the dialog's first line. Still synchronous, so Q38's objection to a dialog with a continuation does not arise: a modal blocks, and the edit finishes in the same call | §9a, §7a, Q47, Q38, Q54 |
+| Q77 | Where the folder scan's bookkeeping and the cache-or-decode functions live | **Two modules of their own: `prepare.rs` and `measure.rs`.** The folder scan's state was a struct of public counters in `app.rs`, and its two tests did the driver's arithmetic themselves (`next += slots; running += slots`) rather than calling it, so a mistake in the driver would have passed them. `prepare::Preparing` keeps the counters private behind `new`, `hand_out`, `landed`, `stop`, `is_over`, `progress` and `busy`, the four calls the app makes; `running` is gone, since it was always the busy list's length, and an answer for a file not out now counts for nothing rather than running a counter below zero. The three cache-or-decode functions every scan goes through — a player's, a folder scan's, a queue measurement's — sat untested at the bottom of `app.rs`, though they hold the cache's whole contract with the files: no stamp, no caching; a failed scan is not stored; "no length" is. They are `measure::scan`, `facts` and `duration` now, tested against a real store in a temporary folder. Two modules rather than one because they are two things: a driver with no I/O, and the I/O it drives | §11a, §11b, §11c, Q29, Q36, Q44 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
