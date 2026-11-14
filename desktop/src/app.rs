@@ -30,12 +30,12 @@ use crate::audio::{self, Engine};
 use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome};
-use crate::drag::{Carried, Drag, DropTarget, Zone};
+use crate::drag::{Drag, DropTarget, Zone};
 use crate::focus::Focus;
 use crate::known::{Facts, Known};
 use crate::mixer::{self, Curve};
 use crate::queue::{self, Handover};
-use crate::queues::{QueueId, Queues};
+use crate::queues::{Admission, QueueId, Queues};
 use crate::select::{Click, Collapse};
 use crate::settings::Settings;
 use crate::tree::Tree;
@@ -168,50 +168,6 @@ pub fn run() -> iced::Result {
 pub enum Section {
 	Files,
 	Tree,
-}
-
-/// What the duplicate warning answered (PLAN §9a).
-///
-/// Three, because a batch is what made two too few: a set of twenty where one is already
-/// queued has an answer that is neither "all of them" nor "none of them", and it is the one
-/// most people mean.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Admission {
-	/// Queue everything, repeats included.
-	All,
-	/// Queue only the tracks that are not already somewhere.
-	Fresh,
-	/// Queue nothing — the action did not happen.
-	Nothing,
-}
-
-impl Admission {
-	/// Whether the track at this position in the batch survives the answer.
-	///
-	/// A position rather than a path, so a caller can filter rows and tracks together with the
-	/// same test — which is what the `←` / `→` buttons need, since what leaves one queue has to
-	/// be exactly what arrives in the other.
-	fn keeps(self, index: usize, duplicates: &[(usize, QueueId)]) -> bool {
-		match self {
-			Admission::All => true,
-			Admission::Fresh => !duplicates.iter().any(|(duplicate, _)| *duplicate == index),
-			Admission::Nothing => false,
-		}
-	}
-
-	/// The batch that survives the answer, in its own order.
-	///
-	/// One place for the enumerate–filter–map all three doors were writing out by hand — and
-	/// generic for the sake of the `←` / `→` buttons, which zip rows and tracks and filter the
-	/// pairs, so what leaves one queue is exactly what arrives in the other.
-	fn admitted<T>(self, batch: Vec<T>, duplicates: &[(usize, QueueId)]) -> Vec<T> {
-		batch
-			.into_iter()
-			.enumerate()
-			.filter(|(position, _)| self.keeps(*position, duplicates))
-			.map(|(_, kept)| kept)
-			.collect()
-	}
 }
 
 /// A folder scan in flight (PLAN §11b).
@@ -1165,20 +1121,9 @@ impl Clecta {
 					.into_iter()
 					.map(queue::Item::new)
 					.collect();
-
-				let duplicates = self.queues.duplicates(&items, &[]);
-				let admission = self.admits(&items, &duplicates);
-				let items = admission.admitted(items, &duplicates);
-				if items.is_empty() {
-					return Task::none();
+				if self.queues.add(id, items, prepend, Self::admits) {
+					return self.queued();
 				}
-
-				let queue = self.queues.get_mut(id);
-				// Top or end, and either way in the pane's order — top to bottom, so a batch
-				// plays in the order it was looked at.
-				let at = if prepend { 0 } else { queue.items().len() };
-				queue.insert_many(at, items);
-				return self.queued();
 			}
 
 			Message::QueueRemove(id) => {
@@ -1195,35 +1140,9 @@ impl Clecta {
 			}
 
 			Message::QueueShift(id, right) => {
-				// Both halves or neither: tracks taken out of one queue and not put into
-				// another are tracks the user just lost. Which is also why the rows are *looked
-				// at* before they are taken — a warning the user cancels must leave them where
-				// they were, and putting them back afterwards would have to rebuild the
-				// selection too.
-				let Some(target) = id.neighbour(right) else {
-					return Task::none();
-				};
-
-				let rows: Vec<usize> = self.queues.get(id).selection().collect();
-				let items = self.queues.get(id).selected_items();
-				let moving: Vec<(QueueId, usize)> = rows.iter().map(|&index| (id, index)).collect();
-
-				// The warning can leave *some* of them standing, so the rows and the tracks are
-				// filtered together — what leaves the queue is exactly what arrives in the other.
-				let duplicates = self.queues.duplicates(&items, &moving);
-				let admission = self.admits(&items, &duplicates);
-				let (rows, items): (Vec<usize>, Vec<queue::Item>) = admission
-					.admitted(rows.into_iter().zip(items).collect(), &duplicates)
-					.into_iter()
-					.unzip();
-				if items.is_empty() {
-					return Task::none();
+				if self.queues.shift(id, right, Self::admits) {
+					return self.queued();
 				}
-
-				self.queues.get_mut(id).take_rows(&rows);
-				let at = self.queues.get(target).items().len();
-				self.queues.get_mut(target).insert_many(at, items);
-				return self.queued();
 			}
 
 			// The two switches, which are settings rather than edits: `dirty` alone, without
@@ -1401,8 +1320,15 @@ impl Clecta {
 					}
 					Some((DropTarget::Row(queue, index), carried)) => {
 						self.collapse.cancel();
-						self.drop_into(queue, index, carried);
-						return self.queued();
+						if self.queues.dropped(
+							queue,
+							index,
+							carried.items,
+							carried.from,
+							Self::admits,
+						) {
+							return self.queued();
+						}
 					}
 					// A drag that landed on nothing is a plain click, and so is the release of
 					// a press that armed none — on an already-selected row that is not media,
@@ -1846,14 +1772,13 @@ impl Clecta {
 		preparing.chain(loading).map(PathBuf::as_path).collect()
 	}
 
-	/// May these tracks go into a queue — asking first about any that are already in one
-	/// (PLAN §7a, §9a).
+	/// The duplicate warning: what `Queues` asks when a batch it is adding has tracks already
+	/// queued somewhere (PLAN §7a, §9a). Passed to its edits rather than called by them, so the
+	/// queues stay pure and their tests answer with a fixed `Admission` instead of a dialog.
 	///
-	/// `All` without a word when none of them is queued anywhere, which is the ordinary case
-	/// and costs a scan of three short queues. Otherwise the app **asks**, because queueing a
-	/// track twice is sometimes exactly what someone means and sometimes a mistake, and nothing
-	/// in the app can tell those apart. A silent refusal would be the app deciding; a silent
-	/// accept is what left the mistake possible.
+	/// The app **asks** because queueing a track twice is sometimes exactly what someone means
+	/// and sometimes a mistake, and nothing in the app can tell those apart. A silent refusal
+	/// would be the app deciding; a silent accept is what left the mistake possible.
 	///
 	/// **One dialog for a batch, and three answers**, which is what a batch made necessary: the
 	/// old two — do it, or do not — could not say the thing most people want when nineteen
@@ -1870,11 +1795,7 @@ impl Clecta {
 	/// A modal, which blocks the GUI thread while it is open — the playhead stops with it,
 	/// exactly as it does for the **Load…** dialog. Parentless, like every dialog in the app,
 	/// which is what puts `CFUserNotificationDisplayAlert` in the macOS log (PLAN §7a).
-	fn admits(&self, items: &[queue::Item], duplicates: &[(usize, QueueId)]) -> Admission {
-		if duplicates.is_empty() {
-			return Admission::All;
-		}
-
+	fn admits(items: &[queue::Item], duplicates: &[(usize, QueueId)]) -> Admission {
 		// Named rather than counted, up to a point: a queue of forty names is not a question
 		// anyone reads, and the count is the part that decides the answer.
 		const NAMED: usize = 6;
@@ -1988,50 +1909,6 @@ impl Clecta {
 				}))
 			},
 		)
-	}
-
-	/// Put what a drag was carrying into a queue, above row `index` (PLAN §7a, §9a).
-	///
-	/// Three cases, and the first is the one worth separating: rows dragged **within their own
-	/// queue** are a reorder, not a remove followed by an insert. Doing it as two steps would
-	/// need the caret index adjusting for the holes the rows left behind, which is what
-	/// `relocate` exists to get right — so it is called rather than reimplemented here.
-	fn drop_into(&mut self, queue: QueueId, index: usize, drag: Carried) {
-		// A reorder is the one drop that cannot produce a duplicate: the rows are already
-		// somewhere in this queue and are only moving inside it. Asked before anything is
-		// touched, because a cancelled drop must leave every queue exactly as it was.
-		if let Some((source, rows)) = &drag.from
-			&& *source == queue
-		{
-			self.queues.get_mut(queue).relocate(rows, index);
-			return;
-		}
-
-		// The rows on their way out, so a track dragged from one queue to another does not warn
-		// about colliding with itself.
-		let moving: Vec<(QueueId, usize)> = match &drag.from {
-			Some((source, rows)) => rows.iter().map(|&row| (*source, row)).collect(),
-			None => Vec::new(),
-		};
-
-		let duplicates = self.queues.duplicates(&drag.items, &moving);
-		let admission = self.admits(&drag.items, &duplicates);
-		let items = admission.admitted(drag.items, &duplicates);
-		if items.is_empty() {
-			return;
-		}
-
-		// Across two queues: taken out of one and put into the other, in that order. The index
-		// is the caret in the *destination*, which the removal cannot have moved. From the
-		// files pane there is nothing to take out — a drop from there is a copy, so the folder
-		// keeps its files.
-		if let Some((source, rows)) = &drag.from {
-			// Only what the warning left standing, by position, so what leaves is what lands.
-			let rows = admission.admitted(rows.clone(), &duplicates);
-			self.queues.get_mut(*source).take_rows(&rows);
-		}
-
-		self.queues.get_mut(queue).insert_many(index, items);
 	}
 
 	/// The one door a device's refusal comes through (Q56).
@@ -3000,29 +2877,6 @@ mod tests {
 		assert!(scanning.is_over(), "the last one landed");
 		assert_eq!(scanning.done, scanning.files.len(), "counted once each");
 		assert!(scanning.busy.is_empty(), "nothing still spinning");
-	}
-
-	#[test]
-	fn the_warnings_answer_filters_a_batch_by_position() {
-		// Arrange: a batch of four, of which the second and the fourth are already queued.
-		let duplicates = vec![(1, QueueId::Shared), (3, QueueId::Shared)];
-		let batch = || vec!["a", "b", "c", "d"];
-
-		// Act / Assert: Yes queues repeats too, No takes only the fresh ones, Cancel nothing.
-		assert_eq!(
-			Admission::All.admitted(batch(), &duplicates),
-			["a", "b", "c", "d"]
-		);
-		assert_eq!(Admission::Fresh.admitted(batch(), &duplicates), ["a", "c"]);
-		assert!(Admission::Nothing.admitted(batch(), &duplicates).is_empty());
-
-		// The `←` / `→` buttons zip rows and tracks and filter the pairs, so what leaves one
-		// queue is exactly what arrives in the other.
-		let paired = vec![(4, "a"), (7, "b")];
-		assert_eq!(
-			Admission::Fresh.admitted(paired, &[(1, QueueId::Shared)]),
-			[(4, "a")]
-		);
 	}
 
 	#[test]

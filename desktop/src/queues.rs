@@ -25,6 +25,50 @@ use crate::cache::Ready;
 use crate::deck::DeckId;
 use crate::queue::{Item, Queue};
 
+/// What the duplicate warning answered (PLAN §9a).
+///
+/// Three, because a batch is what made two too few: a set of twenty where one is already
+/// queued has an answer that is neither "all of them" nor "none of them", and it is the one
+/// most people mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+	/// Queue everything, repeats included.
+	All,
+	/// Queue only the tracks that are not already somewhere.
+	Fresh,
+	/// Queue nothing — the action did not happen.
+	Nothing,
+}
+
+impl Admission {
+	/// Whether the track at this position in the batch survives the answer.
+	///
+	/// A position rather than a path, so a caller can filter rows and tracks together with the
+	/// same test — which is what the `←` / `→` buttons need, since what leaves one queue has to
+	/// be exactly what arrives in the other.
+	fn keeps(self, index: usize, duplicates: &[(usize, QueueId)]) -> bool {
+		match self {
+			Admission::All => true,
+			Admission::Fresh => !duplicates.iter().any(|(duplicate, _)| *duplicate == index),
+			Admission::Nothing => false,
+		}
+	}
+
+	/// The batch that survives the answer, in its own order.
+	///
+	/// One place for the enumerate–filter–map all three doors were writing out by hand — and
+	/// generic for the sake of the `←` / `→` buttons, which zip rows and tracks and filter the
+	/// pairs, so what leaves one queue is exactly what arrives in the other.
+	fn admitted<T>(self, batch: Vec<T>, duplicates: &[(usize, QueueId)]) -> Vec<T> {
+		batch
+			.into_iter()
+			.enumerate()
+			.filter(|(position, _)| self.keeps(*position, duplicates))
+			.map(|(_, kept)| kept)
+			.collect()
+	}
+}
+
 /// Which of the three queues. The player-owned ones are `Cue`, the shared one is `Shared`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QueueId {
@@ -175,6 +219,138 @@ impl Queues {
 			.collect()
 	}
 
+	/// Ask about a batch's repeats, if it has any (PLAN §9a): `All` without a word when none of
+	/// them is queued anywhere, which is the ordinary case and costs a scan of three short
+	/// queues. Otherwise `ask` decides — the app's dialog, because queueing a track twice is
+	/// sometimes exactly what someone means and nothing in the queues can tell.
+	fn admission(
+		&self,
+		items: &[Item],
+		moving: &[(QueueId, usize)],
+		ask: impl FnOnce(&[Item], &[(usize, QueueId)]) -> Admission,
+	) -> (Admission, Vec<(usize, QueueId)>) {
+		let duplicates = self.duplicates(items, moving);
+		let admission = if duplicates.is_empty() {
+			Admission::All
+		} else {
+			ask(items, &duplicates)
+		};
+		(admission, duplicates)
+	}
+
+	/// Queue a batch at the top or the end of one queue, past the duplicate warning (PLAN §7a,
+	/// §9a). Whether anything was queued.
+	///
+	/// In the batch's own order either way — the pane's, top to bottom — so a batch plays in the
+	/// order it was looked at.
+	pub fn add(
+		&mut self,
+		id: QueueId,
+		items: Vec<Item>,
+		prepend: bool,
+		ask: impl FnOnce(&[Item], &[(usize, QueueId)]) -> Admission,
+	) -> bool {
+		let (admission, duplicates) = self.admission(&items, &[], ask);
+		let items = admission.admitted(items, &duplicates);
+		if items.is_empty() {
+			return false;
+		}
+
+		let queue = self.get_mut(id);
+		let at = if prepend { 0 } else { queue.items().len() };
+		queue.insert_many(at, items);
+		true
+	}
+
+	/// Send a queue's selected rows to the end of its neighbour — the `←` / `→` buttons (PLAN
+	/// §7a). Whether anything moved.
+	///
+	/// Both halves or neither: tracks taken out of one queue and not put into another are
+	/// tracks the user just lost. Which is also why the rows are *looked at* before they are
+	/// taken — a warning the user cancels must leave them where they were, and putting them
+	/// back afterwards would have to rebuild the selection too. The warning can leave *some* of
+	/// them standing, so the rows and the tracks are filtered together: what leaves the queue is
+	/// exactly what arrives in the other.
+	pub fn shift(
+		&mut self,
+		id: QueueId,
+		right: bool,
+		ask: impl FnOnce(&[Item], &[(usize, QueueId)]) -> Admission,
+	) -> bool {
+		let Some(target) = id.neighbour(right) else {
+			return false;
+		};
+
+		let rows: Vec<usize> = self.get(id).selection().collect();
+		let items = self.get(id).selected_items();
+		let moving: Vec<(QueueId, usize)> = rows.iter().map(|&index| (id, index)).collect();
+
+		let (admission, duplicates) = self.admission(&items, &moving, ask);
+		let (rows, items): (Vec<usize>, Vec<Item>) = admission
+			.admitted(rows.into_iter().zip(items).collect(), &duplicates)
+			.into_iter()
+			.unzip();
+		if items.is_empty() {
+			return false;
+		}
+
+		self.get_mut(id).take_rows(&rows);
+		let at = self.get(target).items().len();
+		self.get_mut(target).insert_many(at, items);
+		true
+	}
+
+	/// Put a drag's tracks into a queue **above** row `at` (PLAN §7a, §10): `from` is the queue
+	/// and the rows they are being dragged out of, or `None` from the files pane. Whether
+	/// anything changed.
+	///
+	/// Three cases, and the first is the one worth separating: rows dragged **within their own
+	/// queue** are a reorder, not a remove followed by an insert. Doing it as two steps would
+	/// need the caret index adjusting for the holes the rows left behind, which is what
+	/// `relocate` exists to get right. A reorder is also the one drop that cannot produce a
+	/// duplicate — the rows are already in this queue and are only moving inside it — so it
+	/// never asks.
+	pub fn dropped(
+		&mut self,
+		into: QueueId,
+		at: usize,
+		items: Vec<Item>,
+		from: Option<(QueueId, Vec<usize>)>,
+		ask: impl FnOnce(&[Item], &[(usize, QueueId)]) -> Admission,
+	) -> bool {
+		if let Some((source, rows)) = &from
+			&& *source == into
+		{
+			return self.get_mut(into).relocate(rows, at);
+		}
+
+		// The rows on their way out, so a track dragged from one queue to another does not warn
+		// about colliding with itself.
+		let moving: Vec<(QueueId, usize)> = match &from {
+			Some((source, rows)) => rows.iter().map(|&row| (*source, row)).collect(),
+			None => Vec::new(),
+		};
+
+		let (admission, duplicates) = self.admission(&items, &moving, ask);
+		let items = admission.admitted(items, &duplicates);
+		if items.is_empty() {
+			return false;
+		}
+
+		// Across two queues: taken out of one and put into the other, in that order. `at` is
+		// the caret in the *destination*, which the removal cannot have moved. From the files
+		// pane there is nothing to take out — a drop from there is a copy, so the folder keeps
+		// its files.
+		if let Some((source, rows)) = from {
+			// Only what the warning left standing, by position, so what leaves is what lands.
+			let rows = admission.admitted(rows, &duplicates);
+			self.get_mut(source).take_rows(&rows);
+		}
+
+		self.get_mut(into).insert_many(at, items);
+		true
+	}
+
 	/// Where the track after this one comes from, when a player's track ends (PLAN §7a).
 	///
 	/// **Own cue first, the shared queue second.** A track deliberately cued to Player 1 outranks
@@ -241,6 +417,7 @@ impl Queues {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::select::Click;
 
 	fn queue(names: &[&str]) -> Queue {
 		Queue::from_paths(
@@ -424,5 +601,153 @@ mod tests {
 		assert_eq!(queues.scroll(QueueId::Shared), 120.0);
 		assert_eq!(queues.scroll(QueueId::Cue(DeckId::One)), 0.0);
 		assert_eq!(queues.scroll(QueueId::Cue(DeckId::Two)), 0.0);
+	}
+
+	const ONE: QueueId = QueueId::Cue(DeckId::One);
+
+	/// Each queue's tracks by file name, left to right — what the user would see.
+	fn names(queues: &Queues) -> [Vec<String>; 3] {
+		QueueId::ALL.map(|id| {
+			queues
+				.get(id)
+				.items()
+				.iter()
+				.map(|item| item.name.clone())
+				.collect()
+		})
+	}
+
+	/// Tracks as the files pane hands them over.
+	fn items(names: &[&str]) -> Vec<Item> {
+		names.iter().map(|name| Item::new(path(name))).collect()
+	}
+
+	/// A warning that must not be raised.
+	fn never(_: &[Item], _: &[(usize, QueueId)]) -> Admission {
+		panic!("asked about a batch with nothing to ask about")
+	}
+
+	#[test]
+	fn the_warnings_answer_filters_a_batch_by_position() {
+		// Arrange: a batch of four, of which the second and the fourth are already queued.
+		let duplicates = vec![(1, QueueId::Shared), (3, QueueId::Shared)];
+		let batch = || vec!["a", "b", "c", "d"];
+
+		// Act / Assert: Yes queues repeats too, No takes only the fresh ones, Cancel nothing.
+		assert_eq!(
+			Admission::All.admitted(batch(), &duplicates),
+			["a", "b", "c", "d"]
+		);
+		assert_eq!(Admission::Fresh.admitted(batch(), &duplicates), ["a", "c"]);
+		assert!(Admission::Nothing.admitted(batch(), &duplicates).is_empty());
+
+		// The `←` / `→` buttons zip rows and tracks and filter the pairs, so what leaves one
+		// queue is exactly what arrives in the other.
+		let paired = vec![(4, "a"), (7, "b")];
+		assert_eq!(
+			Admission::Fresh.admitted(paired, &[(1, QueueId::Shared)]),
+			[(4, "a")]
+		);
+	}
+
+	#[test]
+	fn a_batch_with_no_repeats_is_queued_without_a_word() {
+		// Arrange
+		let mut queues = three(&["a.mp3"], &[], &[]);
+
+		// Act: at the top, then at the end.
+		let first = queues.add(ONE, items(&["b.mp3"]), true, never);
+		let second = queues.add(ONE, items(&["c.mp3"]), false, never);
+
+		// Assert
+		assert!(first && second);
+		assert_eq!(names(&queues)[0], ["b.mp3", "a.mp3", "c.mp3"]);
+	}
+
+	#[test]
+	fn cancel_leaves_every_queue_as_it_was_whichever_way_in() {
+		// Arrange: `a` queued in Cue 1, `b` selected in the shared queue and also in Cue 2.
+		let mut queues = three(&["a.mp3"], &["b.mp3"], &["b.mp3"]);
+		queues.get_mut(QueueId::Shared).click(0, Click::Replace);
+		let before = names(&queues);
+		let cancel = |_: &[Item], _: &[(usize, QueueId)]| Admission::Nothing;
+
+		// Act: the three edits that ask, each answered Cancel.
+		let added = queues.add(QueueId::Shared, items(&["a.mp3"]), false, cancel);
+		let shifted = queues.shift(QueueId::Shared, true, cancel);
+		let dropped = queues.dropped(
+			ONE,
+			0,
+			items(&["b.mp3"]),
+			Some((QueueId::Shared, vec![0])),
+			cancel,
+		);
+
+		// Assert: nothing happened, and each says so.
+		assert_eq!((added, shifted, dropped), (false, false, false));
+		assert_eq!(names(&queues), before);
+	}
+
+	#[test]
+	fn no_moves_exactly_the_rows_it_admits_and_leaves_the_repeats_behind() {
+		// Arrange: two selected shared rows going right to Cue 2, which already holds `b`.
+		let mut queues = three(&[], &["a.mp3", "b.mp3"], &["b.mp3"]);
+		queues.get_mut(QueueId::Shared).click(0, Click::Toggle);
+		queues.get_mut(QueueId::Shared).click(1, Click::Toggle);
+		let mut asked = Vec::new();
+
+		// Act
+		let moved = queues.shift(QueueId::Shared, true, |batch, duplicates| {
+			asked = duplicates.to_vec();
+			assert_eq!(batch.len(), 2, "asked about the whole batch");
+			Admission::Fresh
+		});
+
+		// Assert: `a` left and arrived; `b` stayed where it was, both halves of it.
+		assert!(moved);
+		assert_eq!(asked, [(1, QueueId::Cue(DeckId::Two))]);
+		assert_eq!(
+			names(&queues),
+			[
+				vec![],
+				vec!["b.mp3".to_string()],
+				vec!["b.mp3".to_string(), "a.mp3".to_string()]
+			]
+		);
+	}
+
+	#[test]
+	fn a_drag_across_queues_takes_only_what_the_warning_lets_land() {
+		// Arrange: `a` and `b` dragged out of the shared queue into Cue 1, which holds `b`.
+		let mut queues = three(&["b.mp3"], &["a.mp3", "b.mp3"], &[]);
+
+		// Act
+		let changed = queues.dropped(
+			ONE,
+			1,
+			items(&["a.mp3", "b.mp3"]),
+			Some((QueueId::Shared, vec![0, 1])),
+			|_, _| Admission::Fresh,
+		);
+
+		// Assert: `a` moved under the caret; `b` stayed in the shared queue.
+		assert!(changed);
+		assert_eq!(names(&queues)[0], ["b.mp3", "a.mp3"]);
+		assert_eq!(names(&queues)[1], ["b.mp3"]);
+	}
+
+	#[test]
+	fn a_reorder_never_asks_and_a_copy_from_the_pane_takes_nothing_out() {
+		// Arrange
+		let mut queues = three(&["a.mp3", "b.mp3"], &[], &[]);
+
+		// Act: `b` above `a`, inside Cue 1; then `c` from the files pane into the shared queue.
+		let reordered = queues.dropped(ONE, 0, items(&["b.mp3"]), Some((ONE, vec![1])), never);
+		let copied = queues.dropped(QueueId::Shared, 0, items(&["c.mp3"]), None, never);
+
+		// Assert
+		assert!(reordered && copied);
+		assert_eq!(names(&queues)[0], ["b.mp3", "a.mp3"]);
+		assert_eq!(names(&queues)[1], ["c.mp3"]);
 	}
 }
