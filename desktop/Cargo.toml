@@ -23,7 +23,7 @@ iced = { version = "0.14.0", features = ["smol", "advanced"] }
 # ReadDirectoryChangesW on Windows — no polling, so nothing runs while nothing changes.
 # Default features are the macOS backend; Windows needs none. Pure Rust on both, so the
 # no-C-toolchain property (PLAN §11) holds.
-notify = "8.2.2"
+notify = "9.0.0-rc.8"
 # The Opus decoder symphonia 0.5 lacks, for the WebM files video sites serve (PLAN Q71,
 # `src/opus.rs`). Pure Rust with no dependencies of its own and no `build.rs`, BSD-3-Clause
 # (on the allow-list), checked against libopus and fuzzed; its `unsafe` is SIMD kernels
@@ -34,7 +34,7 @@ opus-pure = "0.2.3"
 # dependency of its own (`libc`, which is declarations rather than C), MIT OR Apache-2.0, and
 # no `cc` on either target — so the no-C-toolchain property (PLAN §11) survives it. SQLite
 # would not have: `libsqlite3-sys` compiles C, which is the one thing `deny.toml` bans.
-redb = "4.5.0"
+redb = "4.6.0"
 # Native folder picker (PLAN §3). NSOpenPanel / Win32, same crate as cmote.
 rfd = "0.18.0"
 # Audio output, mixing and decoding (PLAN §7, §8). Wraps `cpal` for the device and its
@@ -77,6 +77,9 @@ symphonia = { version = "0.5.5", default-features = false }
 # edit lists. Until then, deleting one of those breaks a test. The MP3 and Vorbis decoders' can
 # go the day symphonia stops clamping them; no test can say so, as no pure-Rust encoder makes
 # either, but the format probe prints every file's peak, and a lossy tone's is then past 1.0.
+# symphonia 0.6.1 has stopped, but rodio, 0.23.0 and `master` alike, decodes with 0.5, so
+# those two wait for a rodio on 0.6; 0.6.1's MP4 reader still reads no edit list and still
+# fails a seek when another track cannot be sought, so that copy outlives the move.
 # And block 0.1.6 (MIT), which iced's renderer reaches on macOS through wgpu's Metal backend,
 # with its one static of an uninhabited type made an opaque one in `src/lib.rs`, before a Rust
 # release makes that an error (PLAN Q74). It can go the day iced moves to a wgpu that no longer
