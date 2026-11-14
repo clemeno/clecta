@@ -1286,6 +1286,14 @@ impl Clecta {
 				self.decks_drag = false;
 
 				match self.drag.release() {
+					// The queue it came out of changed under it — a track ending hands its top
+					// row over — so the rows it remembers are other tracks by now (Q80). Nothing
+					// moves, and the notice says why the drop did nothing.
+					Some((_, carried)) if !carried.still_in(&self.queues) => {
+						self.collapse.cancel();
+						self.notice =
+							"the queue changed during the drag — nothing was moved".to_string();
+					}
 					// Onto a player: the first plays now, jumping whatever queue it came from,
 					// and the rest go to the top of that player's cue (PLAN §9a) — so rows
 					// dragged out of a queue leave the queue, exactly as they would have if the

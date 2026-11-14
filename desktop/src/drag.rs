@@ -10,7 +10,7 @@
 
 use crate::deck::DeckId;
 use crate::queue::Item;
-use crate::queues::QueueId;
+use crate::queues::{QueueId, Queues};
 
 /// Where a release would put what is being dragged (PLAN §10, §7a).
 ///
@@ -59,6 +59,29 @@ pub struct Carried {
 	pub from: Option<(QueueId, Vec<usize>)>,
 }
 
+impl Carried {
+	/// Whether the rows this was carried out of still hold what was carried (Q80).
+	///
+	/// A queue can change under a drag: a track ending mid-drag hands its queue's top row over,
+	/// which renumbers every row below it, and rows taken by their old numbers would then be
+	/// other tracks — moved, doubled or lost without a word. Checked by path, the same way the
+	/// delayed click proves its index still names its row (Q50). True from the files pane, which
+	/// takes nothing out.
+	pub fn still_in(&self, queues: &Queues) -> bool {
+		match &self.from {
+			None => true,
+			Some((queue, rows)) => {
+				let queue = queues.get(*queue);
+				rows.len() == self.items.len()
+					&& rows
+						.iter()
+						.zip(&self.items)
+						.all(|(&row, item)| queue.holds(row, &item.path))
+			}
+		}
+	}
+}
+
 /// Everything a drag in flight has to remember, in-app and from outside alike.
 #[derive(Debug, Default)]
 pub struct Drag {
@@ -84,8 +107,12 @@ impl Drag {
 
 	/// Stop carrying without landing: the rows have already gone somewhere else, as when the
 	/// press that armed this was the first half of a double click that played them.
+	///
+	/// Everything goes, as on a release: once nothing is armed the panels stop being drop
+	/// targets and the edges stop existing, so nothing would ever report the pointer leaving
+	/// them, and a scroll left running would run for ever.
 	pub fn disarm(&mut self) {
-		self.carried = None;
+		self.release();
 	}
 
 	/// Whether an in-app drag is in flight, which is what makes the panels drop targets.
@@ -355,5 +382,61 @@ mod tests {
 
 		// Assert
 		assert_eq!(drag.scrolling(), Some((QueueId::Shared, true)));
+	}
+
+	#[test]
+	fn disarming_stops_the_scroll_with_the_drag() {
+		// Arrange: a drag resting on an edge when the double click that armed it plays its rows.
+		let mut drag = armed();
+		drag.edge(CUE, true, true);
+
+		// Act
+		drag.disarm();
+
+		// Assert
+		assert!(!drag.is_armed());
+		assert_eq!(drag.scrolling(), None);
+	}
+
+	/// Cue 1 holding these files, the other two queues empty.
+	fn cue(names: &[&str]) -> Queues {
+		let paths = names.iter().map(|name| PathBuf::from("/m").join(name));
+		Queues::restored([
+			crate::queue::Queue::from_paths(paths.collect()),
+			Default::default(),
+			Default::default(),
+		])
+	}
+
+	#[test]
+	fn rows_renumbered_under_the_drag_are_no_longer_what_was_carried() {
+		// Arrange: `c` and `d` carried out of Cue 1 — rows 2 and 3 at the press.
+		let mut queues = cue(&["a.mp3", "b.mp3", "c.mp3", "d.mp3", "e.mp3"]);
+		let carried = Carried {
+			items: ["c.mp3", "d.mp3"]
+				.map(|name| Item::new(PathBuf::from("/m").join(name)))
+				.to_vec(),
+			from: Some((CUE, vec![2, 3])),
+		};
+		assert!(carried.still_in(&queues), "nothing has changed yet");
+
+		// Act: the track playing ends, and the cue hands its top row over mid-drag.
+		queues.get_mut(CUE).take_next();
+
+		// Assert: rows 2 and 3 are `d` and `e` now, so taking them would move the wrong tracks.
+		assert!(!carried.still_in(&queues));
+	}
+
+	#[test]
+	fn a_drag_from_the_files_pane_takes_nothing_out_and_is_always_still_in() {
+		// Arrange
+		let queues = cue(&[]);
+		let carried = Carried {
+			items: rows(),
+			from: None,
+		};
+
+		// Act / Assert
+		assert!(carried.still_in(&queues));
 	}
 }
