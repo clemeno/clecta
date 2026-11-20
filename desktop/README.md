@@ -468,9 +468,10 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   really does nothing, that the waveform of a *playing* track is not blanked by it, and that
   the next track loaded after it sweeps again — which is the whole visible difference between
   a cache that was cleared and a button that lied (PLAN §11a, §11b).
-- **Dialogs that keep the window moving.** *Not checked yet* (PLAN Q83). With a track playing,
-  open **Load…** on the other player: the playhead and the meters keep moving, a click on the
-  window does nothing until the dialog closes, and the dialog stays in front of it. Then the
+- **Dialogs that keep the window moving.** *Partly checked, on Windows, by hand* (PLAN Q83). With
+  a track playing, **Load…** on either player leaves the playing alone and the window takes no
+  clicks while the file dialog is open. Still unchecked: that the playhead and the meters keep
+  moving behind it, and that the dialog stays in front of the window. Then the
   two answers that arrive about a world that moved on: an Unload question left open until its
   track ends and hands over unloads nothing and says so, and a duplicate warning from **← →**
   left open across a handover out of that queue moves nothing. On macOS, that every dialog is
