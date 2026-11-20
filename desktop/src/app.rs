@@ -30,14 +30,14 @@ use crate::audio::Engine;
 use crate::browser::{self, Browser, Entry};
 use crate::cache::{self, Cache, Ready};
 use crate::deck::{self, Deck, DeckId, DropOutcome};
-use crate::drag::{Drag, DropTarget, Zone};
+use crate::drag::{Carried, Drag, DropTarget, Zone};
 use crate::focus::Focus;
 use crate::known::{Facts, Known};
 use crate::measure;
 use crate::mixer::{self, Curve};
 use crate::prepare::Preparing;
 use crate::queue::{self, Handover};
-use crate::queues::{Admission, QueueId, Queues};
+use crate::queues::{Admission, Layout, QueueId, Queues};
 use crate::select::{Click, Collapse};
 use crate::settings::Settings;
 use crate::tree::Tree;
@@ -177,8 +177,12 @@ pub enum Message {
 	KeyLockToggled(DeckId, bool),
 	/// The per-player **Load…** button — the third door that always works (PLAN §10).
 	LoadPressed(DeckId),
+	/// The file that dialog came back with. Cancel sends nothing.
+	FilePicked(DeckId, PathBuf),
 	/// The per-player **Unload** button: take the track out and leave the player empty.
 	UnloadPressed(DeckId),
+	/// **OK** on the question a playing track's Unload asks, naming the track it asked about.
+	UnloadConfirmed(DeckId, PathBuf),
 	/// Load the selected row into a named player.
 	LoadSelected(DeckId),
 	/// Load a file into the player an unaimed gesture lands on.
@@ -205,6 +209,8 @@ pub enum Message {
 	TempoApplied,
 	/// **Clear tempo corrections**, which asks first.
 	ClearCorrectionsPressed,
+	/// …and **OK** on its question.
+	ClearCorrectionsConfirmed,
 	/// ⌘A / Ctrl+A — every row the files pane is showing.
 	SelectAll,
 	/// Escape — nothing selected.
@@ -248,6 +254,9 @@ pub enum Message {
 	QueueMove(QueueId, bool),
 	/// Send the selected row to the neighbouring queue, right (`true`) or left (`false`).
 	QueueShift(QueueId, bool),
+	/// The duplicate warning's **Yes** or **No**, for the queue edit it was holding (Q83).
+	/// Cancel sends nothing.
+	Admitted(Held, Admission),
 	/// A queue's **Auto-load** switch: whether it hands its top track to a player that has
 	/// just run out (PLAN §7a).
 	QueueAutoLoad(QueueId, bool),
@@ -308,6 +317,8 @@ pub enum Message {
 	ScanFolderCancelled,
 	/// Throw away everything the app has worked out about other people's files (PLAN §11a).
 	ClearCachePressed,
+	/// …and **OK** on its question.
+	ClearCacheConfirmed,
 	CacheCleared,
 	/// The window was resized. Recorded, then saved with everything else once the app has
 	/// been still for `SAVE_AFTER`.
@@ -441,6 +452,27 @@ enum Pressed {
 	/// path that was under the press, so the delayed click can prove the index still names
 	/// the same row when it finally fires.
 	Queue(QueueId, usize, PathBuf),
+}
+
+/// One of the three queue edits that can raise the duplicate warning (PLAN §7a, §9a).
+#[derive(Debug, Clone)]
+enum Edit {
+	/// **⤒ ⤓**: the files pane's media at the top (`true`) or the end of a queue.
+	Add(QueueId, Vec<queue::Item>, bool),
+	/// **← →**: a queue's selected rows to its neighbour, right (`true`) or left.
+	Shift(QueueId, bool),
+	/// A drag released above row `usize` of a queue.
+	Drop(QueueId, usize, Carried),
+}
+
+/// A queue edit the duplicate warning is holding until it answers (Q83).
+#[derive(Debug, Clone)]
+pub struct Held {
+	edit: Edit,
+	/// The queues as they stood when the warning opened. The window keeps running behind it, so
+	/// a track that ends hands a row over and renumbers its queue — and an edit that names rows
+	/// or a caret by number would then move other tracks, the drag's problem (Q80).
+	layout: Layout,
 }
 
 /// Which row was right-clicked, and everything the menu over it needs to know.
@@ -766,39 +798,61 @@ impl Clecta {
 			}
 
 			Message::LoadPressed(id) => {
-				// `ponytail:` the native dialog is modal and blocks the GUI thread while
-				// it is open, which is what a modal dialog looks like anyway. rfd's async
-				// form would need the panel driven from the main thread regardless.
-				if let Some(file) = rfd::FileDialog::new()
-					.set_directory(self.browser.folder.clone().unwrap_or_else(fsio::home))
-					.pick_file()
-				{
-					return self.load(id, file);
-				}
+				let dialog = rfd::AsyncFileDialog::new()
+					.set_directory(self.browser.folder.clone().unwrap_or_else(fsio::home));
+				return ask(
+					move |window| dialog.clone().set_parent(window).pick_file(),
+					move |file| file.map(|file| Message::FilePicked(id, file.path().to_path_buf())),
+				);
 			}
+
+			// Into whatever the player holds by now, which a handover may have changed while the
+			// dialog was open — the same as pressing Load… at this moment would do.
+			Message::FilePicked(id, file) => return self.load(id, file),
 
 			Message::UnloadPressed(id) => {
 				// Asked only while the sound is on: unloading a stopped track costs one Load
 				// to undo, but cutting audible playback is the mistake a modal exists for —
 				// the same dialog the two destructive buttons in the corrections pane use.
-				if self.decks[id.index()].is_playing() {
-					let confirmed = ask(rfd::MessageDialog::new()
-						.set_level(rfd::MessageLevel::Warning)
-						.set_title("Unload the playing track")
-						.set_description(format!(
+				let deck = &self.decks[id.index()];
+				if deck.is_playing()
+					&& let Some(track) = &deck.track
+				{
+					let path = track.path.clone();
+					let dialog = warning(
+						"Unload the playing track",
+						format!(
 							"{} is playing {}.\n\nUnload it and cut the sound?",
 							id.label(),
-							self.decks[id.index()].title(),
-						))
-						.set_buttons(rfd::MessageButtons::OkCancel))
-						== rfd::MessageDialogResult::Ok;
-					if !confirmed {
-						return Task::none();
-					}
+							deck.title(),
+						),
+					);
+					return ask(
+						move |window| dialog.clone().set_parent(window).show(),
+						move |answer| {
+							confirmed(answer).then(|| Message::UnloadConfirmed(id, path.clone()))
+						},
+					);
 				}
+				self.unload(id);
+			}
 
-				self.decks[id.index()].unloaded(id, &self.engine);
-				self.notice = format!("{}: unloaded", id.label());
+			Message::UnloadConfirmed(id, path) => {
+				// The playhead ran on behind the question, so the track asked about may have
+				// ended and handed over: unloading the one that replaced it would cut a track
+				// nobody was asked about.
+				if self.decks[id.index()]
+					.track
+					.as_ref()
+					.is_some_and(|track| track.path == path)
+				{
+					self.unload(id);
+				} else {
+					self.notice = format!(
+						"{}: the track changed while the question was open — nothing was unloaded",
+						id.label()
+					);
+				}
 			}
 
 			Message::LoadSelected(id) => {
@@ -946,35 +1000,37 @@ impl Clecta {
 				// The same warning **Clear cache** shows, and deliberately a different sentence:
 				// that one costs time, this one costs answers nothing can work out again
 				// (PLAN §14d).
-				let confirmed = ask(rfd::MessageDialog::new()
-					.set_level(rfd::MessageLevel::Warning)
-					.set_title("Clear the tempo corrections")
-					.set_description(
-						"Throw away every tempo you have corrected by hand?\n\n\
-						 Every row goes back to what the detector said. Nothing else is touched.",
-					)
-					.set_buttons(rfd::MessageButtons::OkCancel))
-					== rfd::MessageDialogResult::Ok;
+				let dialog = warning(
+					"Clear the tempo corrections",
+					"Throw away every tempo you have corrected by hand?\n\n\
+					 Every row goes back to what the detector said. Nothing else is touched.",
+				);
+				return ask(
+					move |window| dialog.clone().set_parent(window).show(),
+					|answer| confirmed(answer).then_some(Message::ClearCorrectionsConfirmed),
+				);
+			}
 
-				if confirmed {
-					// No re-reading and no re-scanning: the corrections were applied as the rows
-					// were drawn, so dropping them *is* putting the detected numbers back.
-					let cleared = self.tempos.len();
-					self.tempos.clear();
-					self.dirty = true;
-					self.notice = format!("cleared {cleared} tempo corrections");
-				}
+			Message::ClearCorrectionsConfirmed => {
+				// No re-reading and no re-scanning: the corrections were applied as the rows
+				// were drawn, so dropping them *is* putting the detected numbers back.
+				let cleared = self.tempos.len();
+				self.tempos.clear();
+				self.dirty = true;
+				self.notice = format!("cleared {cleared} tempo corrections");
 			}
 
 			Message::FolderSelected(folder) => return self.select_folder(folder),
 
 			Message::OpenFolderPressed => {
-				if let Some(folder) = rfd::FileDialog::new()
-					.set_directory(self.browser.folder.clone().unwrap_or_else(fsio::home))
-					.pick_folder()
-				{
-					return self.select_folder(folder);
-				}
+				let dialog = rfd::AsyncFileDialog::new()
+					.set_directory(self.browser.folder.clone().unwrap_or_else(fsio::home));
+				return ask(
+					move |window| dialog.clone().set_parent(window).pick_folder(),
+					|folder| {
+						folder.map(|folder| Message::FolderSelected(folder.path().to_path_buf()))
+					},
+				);
 			}
 
 			Message::RefreshPressed => {
@@ -1122,9 +1178,7 @@ impl Clecta {
 					.into_iter()
 					.map(queue::Item::new)
 					.collect();
-				if self.queues.add(id, items, prepend, Self::admits) {
-					return self.queued();
-				}
+				return self.edit(Edit::Add(id, items, prepend), None);
 			}
 
 			Message::QueueRemove(id) => {
@@ -1140,10 +1194,19 @@ impl Clecta {
 				}
 			}
 
-			Message::QueueShift(id, right) => {
-				if self.queues.shift(id, right, Self::admits) {
-					return self.queued();
+			Message::QueueShift(id, right) => return self.edit(Edit::Shift(id, right), None),
+
+			Message::Admitted(held, admission) => {
+				// An add puts its tracks at the top or the end, which nothing can renumber; the
+				// other two name rows and a caret, and run only on the queues they were asked
+				// about (Q80, Q83).
+				if !matches!(held.edit, Edit::Add(..)) && held.layout != self.queues.layout() {
+					self.notice =
+						"the queues changed while the warning was open — nothing was moved"
+							.to_string();
+					return Task::none();
 				}
+				return self.edit(held.edit, Some(admission));
 			}
 
 			// The two switches, which are settings rather than edits: `dirty` alone, without
@@ -1329,15 +1392,7 @@ impl Clecta {
 					}
 					Some((DropTarget::Row(queue, index), carried)) => {
 						self.collapse.cancel();
-						if self.queues.dropped(
-							queue,
-							index,
-							carried.items,
-							carried.from,
-							Self::admits,
-						) {
-							return self.queued();
-						}
+						return self.edit(Edit::Drop(queue, index, carried), None);
 					}
 					// A drag that landed on nothing is a plain click, and so is the release of
 					// a press that armed none — on an already-selected row that is not media,
@@ -1467,23 +1522,19 @@ impl Clecta {
 			Message::ClearCachePressed => {
 				// Asked first, with the same modal the duplicate warning uses: this is the one
 				// button in the app that throws work away, and it is next to the one that makes
-				// it. `ponytail:` modal, so the playhead stops while it is open; and parentless,
-				// so macOS draws it from another process and logs
-				// `CFUserNotificationDisplayAlert: called from main application thread` — the
-				// warning the shortcut earns rather than a fault (PLAN §7a).
-				let confirmed = ask(rfd::MessageDialog::new()
-					.set_level(rfd::MessageLevel::Warning)
-					.set_title("Clear the cache")
-					.set_description(
-						"Throw away every waveform, length and music-start clecta has worked out?\n\n\
-						 Nothing is lost but the time to work them out again.",
-					)
-					.set_buttons(rfd::MessageButtons::OkCancel))
-					== rfd::MessageDialogResult::Ok;
-				if !confirmed {
-					return Task::none();
-				}
+				// it (PLAN §7a).
+				let dialog = warning(
+					"Clear the cache",
+					"Throw away every waveform, length and music-start clecta has worked out?\n\n\
+					 Nothing is lost but the time to work them out again.",
+				);
+				return ask(
+					move |window| dialog.clone().set_parent(window).show(),
+					|answer| confirmed(answer).then_some(Message::ClearCacheConfirmed),
+				);
+			}
 
+			Message::ClearCacheConfirmed => {
 				// Off the GUI thread like every other touch of the store: a commit is an
 				// `fsync` (PLAN §11a).
 				let cache = self.cache.clone();
@@ -1753,9 +1804,59 @@ impl Clecta {
 		preparing.chain(loading).map(PathBuf::as_path).collect()
 	}
 
+	/// Run a queue edit past the duplicate warning (PLAN §7a, §9a): at once when nothing in it is
+	/// queued already, and otherwise once the warning has answered (Q83).
+	///
+	/// `answer` is `None` the first time. A batch with repeats then changes nothing — its edit is
+	/// told `Nothing`, which leaves every queue as it was (Q76) — and the warning opens holding
+	/// the edit; **Yes** or **No** comes back through `Admitted` and runs this again with that
+	/// answer. Twice through the same `Queues` edit rather than a second copy of its rules, so
+	/// the queues stay pure and their tests answer with a fixed `Admission`.
+	fn edit(&mut self, edit: Edit, answer: Option<Admission>) -> Task<Message> {
+		let mut asked = None;
+		let admits = |items: &[queue::Item], duplicates: &[(usize, QueueId)]| {
+			answer.unwrap_or_else(|| {
+				asked = Some(Self::duplicate_warning(items, duplicates));
+				Admission::Nothing
+			})
+		};
+		let changed = match edit.clone() {
+			Edit::Add(id, items, prepend) => self.queues.add(id, items, prepend, admits),
+			Edit::Shift(id, right) => self.queues.shift(id, right, admits),
+			Edit::Drop(into, at, carried) => {
+				self.queues
+					.dropped(into, at, carried.items, carried.from, admits)
+			}
+		};
+
+		if let Some(dialog) = asked {
+			let held = Held {
+				edit,
+				layout: self.queues.layout(),
+			};
+			return ask(
+				move |window| dialog.clone().set_parent(window).show(),
+				move |answer| {
+					let admission = match answer {
+						rfd::MessageDialogResult::Yes => Admission::All,
+						rfd::MessageDialogResult::No => Admission::Fresh,
+						_ => return None,
+					};
+					Some(Message::Admitted(held.clone(), admission))
+				},
+			);
+		}
+		if changed { self.queued() } else { Task::none() }
+	}
+
+	/// A player's track out, leaving it empty.
+	fn unload(&mut self, id: DeckId) {
+		self.decks[id.index()].unloaded(id, &self.engine);
+		self.notice = format!("{}: unloaded", id.label());
+	}
+
 	/// The duplicate warning: what `Queues` asks when a batch it is adding has tracks already
-	/// queued somewhere (PLAN §7a, §9a). Passed to its edits rather than called by them, so the
-	/// queues stay pure and their tests answer with a fixed `Admission` instead of a dialog.
+	/// queued somewhere (PLAN §7a, §9a).
 	///
 	/// The app **asks** because queueing a track twice is sometimes exactly what someone means
 	/// and sometimes a mistake, and nothing in the app can tell those apart. A silent refusal
@@ -1772,11 +1873,10 @@ impl Clecta {
 	/// text, rather than rfd's custom labels — those need a Cargo feature that is off by
 	/// default and, by rfd's own documentation, work on Windows only with it. A dialog whose
 	/// buttons might be unlabelled on the one target nobody has run is not worth three words.
-	///
-	/// A modal, which blocks the GUI thread while it is open — the playhead stops with it,
-	/// exactly as it does for the **Load…** dialog. Parentless, like every dialog in the app,
-	/// which is what puts `CFUserNotificationDisplayAlert` in the macOS log (PLAN §7a).
-	fn admits(items: &[queue::Item], duplicates: &[(usize, QueueId)]) -> Admission {
+	fn duplicate_warning(
+		items: &[queue::Item],
+		duplicates: &[(usize, QueueId)],
+	) -> rfd::AsyncMessageDialog {
 		// Named rather than counted, up to a point: a queue of forty names is not a question
 		// anyone reads, and the count is the part that decides the answer.
 		const NAMED: usize = 6;
@@ -1809,16 +1909,7 @@ impl Clecta {
 			},
 		);
 
-		match ask(rfd::MessageDialog::new()
-			.set_level(rfd::MessageLevel::Warning)
-			.set_title("Already queued")
-			.set_description(description)
-			.set_buttons(rfd::MessageButtons::YesNoCancel))
-		{
-			rfd::MessageDialogResult::Yes => Admission::All,
-			rfd::MessageDialogResult::No => Admission::Fresh,
-			_ => Admission::Nothing,
-		}
+		warning("Already queued", description).set_buttons(rfd::MessageButtons::YesNoCancel)
 	}
 
 	/// Which of the three a press is, from whatever is being held right now (PLAN §9a).
@@ -2499,23 +2590,48 @@ fn watch(folder: &PathBuf) -> impl Stream<Item = Message> + use<> {
 	})
 }
 
-/// Ask the user a question, and wait for the answer.
+/// Show a native dialog on the app's window, and turn its answer into a message — or into none,
+/// for a Cancel (PLAN §7a, Q83).
 ///
-/// On Windows the box gets a thread of its own. A message box stays hidden until its thread's
-/// message queue is empty, and the GUI thread's never is while `update` is blocked inside the
-/// box: the box was created, never shown, and the app hung with a core spinning (PLAN Q70). A
-/// fresh thread has an empty queue, and the GUI thread waits for it exactly as it waited for
-/// the box before. `ponytail:` still modal by blocking — the window does not repaint while the
-/// box is open, and a click on it waits for the box to close; `rfd::AsyncMessageDialog` and a
-/// `Task` are the upgrade if that ever matters.
-fn ask(dialog: rfd::MessageDialog) -> rfd::MessageDialogResult {
-	if cfg!(windows) {
-		std::thread::spawn(move || dialog.show())
-			.join()
-			.unwrap_or(rfd::MessageDialogResult::Cancel)
-	} else {
-		dialog.show()
-	}
+/// **Attached and awaited.** `show` builds and opens the dialog with the window as its parent,
+/// which iced lends inside `window::run` alone, so the window takes no clicks while it is open —
+/// that is what a modal is for. But `update` returns at once and the answer comes back as a
+/// message, so the window goes on drawing: the playhead runs, a meter moves, a track that ends
+/// still hands over. Every arm the answer reaches has to allow for that.
+///
+/// rfd runs a Windows dialog on a thread of its own, which is also what keeps it visible: a
+/// message box stays hidden until its thread's queue is empty, and the GUI thread's never is
+/// (Q70). On macOS a parented dialog is a sheet on the window rather than `CFUserNotification`'s
+/// alert drawn by another process, so the log line Q38 explained is gone with the blocking.
+///
+/// `Fn` and `Clone`, because iced may ask for the window more than once in principle: each
+/// `show` clones its dialog, which is a few strings.
+fn ask<F, T>(
+	show: impl Fn(&dyn window::Window) -> F + Clone + Send + 'static,
+	answered: impl Fn(T) -> Option<Message> + Send + 'static,
+) -> Task<Message>
+where
+	F: Future<Output = T> + Send + 'static,
+	T: Send + 'static,
+{
+	window::oldest()
+		.and_then(move |id| window::run(id, show.clone()))
+		.then(Task::future)
+		.then(move |answer| answered(answer).map_or_else(Task::none, Task::done))
+}
+
+/// A warning with **OK** and **Cancel** — the shape of every question the app asks but one.
+fn warning(title: &str, description: impl Into<String>) -> rfd::AsyncMessageDialog {
+	rfd::AsyncMessageDialog::new()
+		.set_level(rfd::MessageLevel::Warning)
+		.set_title(title)
+		.set_description(description)
+		.set_buttons(rfd::MessageButtons::OkCancel)
+}
+
+/// Whether a warning was answered **OK**.
+fn confirmed(answer: rfd::MessageDialogResult) -> bool {
+	answer == rfd::MessageDialogResult::Ok
 }
 
 /// Run one blocking job on a thread of its own, and hand the executor a `oneshot` to wait

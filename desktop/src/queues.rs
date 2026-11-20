@@ -71,6 +71,9 @@ impl Admission {
 	}
 }
 
+/// The three queues' tracks and selections, in draw order: `Queues::layout`.
+pub type Layout = [(Vec<PathBuf>, Vec<usize>); 3];
+
 /// What a handover does, worked out before anything is loaded (PLAN §7a, §7b): the track, where
 /// it starts, and whether it plays. The app carries it out — the load is IO, and the seek and
 /// the Play only happen if the file actually arrived.
@@ -233,6 +236,22 @@ impl Queues {
 					.map(|id| (index, id))
 			})
 			.collect()
+	}
+
+	/// Every queue's tracks and selected rows, left to right — what an edit held behind the
+	/// duplicate warning checks has not moved while the warning was open (Q83).
+	///
+	/// Paths rather than whole rows, because a length or a scan landing in the meantime changes a
+	/// row without renumbering anything; a handover taking a queue's top row renumbers every row
+	/// below it, and that is the change an edit that names rows by number cannot survive (Q80).
+	pub fn layout(&self) -> Layout {
+		QueueId::ALL.map(|id| {
+			let queue = self.get(id);
+			(
+				queue.items().iter().map(|item| item.path.clone()).collect(),
+				queue.selection().collect(),
+			)
+		})
 	}
 
 	/// Whether the track playing on this player should give way now rather than at the end of
@@ -703,6 +722,26 @@ mod tests {
 			Admission::Fresh.admitted(paired, &[(1, QueueId::Shared)]),
 			[(4, "a")]
 		);
+	}
+
+	#[test]
+	fn a_handover_changes_the_layout_and_a_measurement_does_not() {
+		// Arrange: a selected row under the top of Cue 1, as a held `← →` would remember it.
+		let mut queues = three(&["a.mp3", "b.mp3"], &[], &[]);
+		queues.get_mut(ONE).click(1, Click::Replace);
+		let held = queues.layout();
+
+		// Act: a length lands while the warning is open.
+		queues.measured(&path("b.mp3"), Some(Duration::from_secs(200)), None);
+
+		// Assert: nothing was renumbered, so the held edit may still run.
+		assert_eq!(queues.layout(), held);
+
+		// Act: a track ends and Cue 1 hands its top row over.
+		queues.hand_over(DeckId::One, |_| None);
+
+		// Assert: row 1 is another track now (or none), so the held edit must not run.
+		assert_ne!(queues.layout(), held);
 	}
 
 	#[test]
