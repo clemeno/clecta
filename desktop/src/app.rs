@@ -2596,7 +2596,7 @@ fn watch(folder: &PathBuf) -> impl Stream<Item = Message> + use<> {
 /// **Attached and awaited.** `show` builds and opens the dialog with the window as its parent,
 /// which iced lends inside `window::run` alone, so the window takes no clicks while it is open —
 /// that is what a modal is for. But `update` returns at once and the answer comes back as a
-/// message, so the window goes on drawing: the playhead runs, a meter moves, a track that ends
+/// message, so the window goes on drawing: the playhead and the time run on, a track that ends
 /// still hands over. Every arm the answer reaches has to allow for that.
 ///
 /// rfd runs a Windows dialog on a thread of its own, which is also what keeps it visible: a

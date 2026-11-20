@@ -469,13 +469,13 @@ marked *confirmed* was confirmed by eye, and the defect was audible only.
   the next track loaded after it sweeps again — which is the whole visible difference between
   a cache that was cleared and a button that lied (PLAN §11a, §11b).
 - **Dialogs that keep the window moving.** *Partly checked, on Windows, by hand* (PLAN Q83). With
-  a track playing, **Load…** on either player leaves the playing alone and the window takes no
-  clicks while the file dialog is open. Still unchecked: that the playhead and the meters keep
-  moving behind it, and that the dialog stays in front of the window. Then the
-  two answers that arrive about a world that moved on: an Unload question left open until its
-  track ends and hands over unloads nothing and says so, and a duplicate warning from **← →**
-  left open across a handover out of that queue moves nothing. On macOS, that every dialog is
-  a sheet on the window and the `CFUserNotificationDisplayAlert` log line is gone.
+  a track playing, **Load…** on either player leaves the playing alone, the playhead and the
+  time keep moving behind the file dialog, and the window takes no clicks while it is open.
+  Still unchecked: the two answers that arrive about a world that moved on — an Unload question
+  left open until its track ends and hands over unloads nothing and says so, and a duplicate
+  warning from **← →** left open across a handover out of that queue moves nothing — and, on
+  macOS, that every dialog is a sheet on the window and the `CFUserNotificationDisplayAlert`
+  log line is gone.
 - **Playing a queued row on demand.** *Not checked yet.* That a double click on a cue row
   loads it into the player it sits under and on a **Next up** row into whichever player is
   free; that the row leaves the queue either way; and that the press which opened the double
