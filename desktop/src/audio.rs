@@ -1113,15 +1113,6 @@ pub(crate) mod tests {
 		[id, &size, &body].concat()
 	}
 
-	/// A probe, for files the suite cannot ship: what the app learns about each file named in
-	/// `CLECTA_PROBE` (a path list, `;`-separated on Windows and `:`-separated elsewhere) —
-	/// the length from the header and from a full decode, where four seeks land, and the
-	/// scan's answers — so two files that should agree can be read side by side. It found Q69,
-	/// an MP4 whose header said 66 s and whose decode said 228, and Q72's padding and late
-	/// seeks. It fails when a file disagrees with itself the way `assert_one_timeline` checks
-	/// a fixture, within `TOLERANCE`, after printing every file; `scripts/probe-formats.sh`
-	/// runs it on a tone per format, a few shaped the ways that broke, and any files given.
-	///
 	/// A player plays every file at that file's own rate, whatever it held before (PLAN Q84).
 	///
 	/// The bug this pins was heard, not seen: the WebM, then the MP4 of the same song loaded into
@@ -1193,6 +1184,15 @@ pub(crate) mod tests {
 		);
 	}
 
+	/// A probe, for files the suite cannot ship: what the app learns about each file named in
+	/// `CLECTA_PROBE` (a path list, `;`-separated on Windows and `:`-separated elsewhere) —
+	/// the length from the header and from a full decode, where four seeks land, and the
+	/// scan's answers — so two files that should agree can be read side by side. It found Q69,
+	/// an MP4 whose header said 66 s and whose decode said 228, and Q72's padding and late
+	/// seeks. It fails when a file disagrees with itself the way `assert_one_timeline` checks
+	/// a fixture, within `TOLERANCE`, after printing every file; `scripts/probe-formats.sh`
+	/// runs it on a tone per format, a few shaped the ways that broke, and any files given.
+	///
 	/// `CLECTA_PROBE="a.mp3;a.mp4" cargo test probe_files -- --ignored --nocapture`
 	#[test]
 	#[ignore = "reads the files named in CLECTA_PROBE"]
