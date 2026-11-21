@@ -11,9 +11,10 @@
 //! on drop) are already paid for.
 
 use anyhow::{Context, Result};
-use rodio::mixer::MixerSource;
+use rodio::mixer::{Mixer, MixerSource};
 use rodio::source::LimitSettings;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
+use std::cell::{Ref, RefCell};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -25,9 +26,13 @@ use crate::waveform::{Scan, Scanner};
 
 /// The audio output, alive for as long as the app can make a sound.
 pub struct Engine {
-	/// Held, never read: dropping the sink stops every player connected to it.
-	_sink: MixerDeviceSink,
-	players: [Player; 2],
+	/// Held, never read: dropping the sink stops every player connected to it. `None` for an
+	/// engine a test drains by hand (`Engine::on`).
+	_sink: Option<MixerDeviceSink>,
+	/// What every new player connects to: each load gets one (`load`).
+	mix: Mixer,
+	/// Replaced on every load, so behind a cell: `load` takes `&self` like every other command.
+	players: [RefCell<Player>; 2],
 	/// One per player, surviving every load: the rate slider and the file-timeline playhead
 	/// (PLAN §7c). The wrapper around each loaded source holds a clone.
 	shared: [Arc<Shared>; 2],
@@ -53,24 +58,35 @@ impl Engine {
 			sink.config().channel_count()
 		);
 
-		// Two players on one mixer — rodio's own central example, and the reason no
-		// mixing code is written here (PLAN §2). A mixer of their own, whose sum reaches the
-		// device's through the limiter (PLAN Q73). The players join it first: a mixer with
-		// nothing in it ends at its first sample, and the device's would then drop it.
+		// A mixer of the players' own, whose sum reaches the device's through the limiter
+		// (PLAN Q73). The players join it first (`on`): a mixer with nothing in it ends at its
+		// first sample, and the device's would then drop it.
 		let config = sink.config();
 		let (mix, mixed) = rodio::mixer::mixer(config.channel_count(), config.sample_rate());
+		let engine = Self::on(mix, description);
+		sink.mixer().add(Self::limited(mixed));
+
+		Ok(Self {
+			_sink: Some(sink),
+			..engine
+		})
+	}
+
+	/// Two players on one mixer — rodio's own central example, and the reason no mixing code is
+	/// written here (PLAN §2). Whoever holds the mixer's output plays it: the device, or a test.
+	fn on(mix: Mixer, description: String) -> Self {
 		let players = [Player::connect_new(&mix), Player::connect_new(&mix)];
 		for player in &players {
 			player.pause();
 		}
-		sink.mixer().add(Self::limited(mixed));
 
-		Ok(Self {
-			_sink: sink,
-			players,
+		Self {
+			_sink: None,
+			mix,
+			players: players.map(RefCell::new),
 			shared: [Arc::new(Shared::default()), Arc::new(Shared::default())],
 			description,
-		})
+		}
 	}
 
 	/// The two players' sum, on its way to the device (PLAN Q73): through rodio's own soft-knee
@@ -88,8 +104,8 @@ impl Engine {
 		&self.description
 	}
 
-	fn player(&self, id: DeckId) -> &Player {
-		&self.players[id.index()]
+	fn player(&self, id: DeckId) -> Ref<'_, Player> {
+		self.players[id.index()].borrow()
 	}
 
 	/// Decode a file into one player, replacing whatever was there, and leave it paused
@@ -101,17 +117,25 @@ impl Engine {
 		// before `clear()`, so a file that fails to decode leaves the loaded track alone.
 		let duration = source.total_duration();
 
+		let mut player = self.players[id.index()].borrow_mut();
+		// `ponytail:` `clear()` blocks until the audio thread has dropped the old source,
+		// which is at most one 5 ms control tick. Short enough to call on the GUI thread, and
+		// it is what lets the new wrapper below reset the playhead with the old one gone.
+		player.clear();
+
+		// A fresh player for every file (PLAN Q84). rodio resamples each player's output to the
+		// mixer's rate, and reads the rate and the channel count only at a span boundary — which
+		// a `Stretched` never reports (see `stretch`). A player kept from load to load therefore
+		// played every later file at its *first* file's rate: the MP4 after the WebM ran
+		// 48 000 / 44 100 fast and high. A new player is a new resampler, built for this file.
+		let fresh = Player::connect_new(&self.mix);
+		fresh.pause();
+		fresh.set_volume(player.volume());
+
 		// Wrapped on its way in (PLAN §7c): the wrapper keeps the file-timeline playhead
 		// this module's `position` answers with, and resets it to the top for the new track.
-		let source = Stretched::new(source, Arc::clone(&self.shared[id.index()]));
-
-		let player = self.player(id);
-		// `ponytail:` `clear()` blocks until the audio thread has dropped the old source,
-		// which is at most one 5 ms control tick. Short enough to call on the GUI thread;
-		// if it ever is not, the fix is a fresh `Player` rather than a background task.
-		player.clear();
-		player.append(source);
-		player.pause();
+		fresh.append(Stretched::new(source, Arc::clone(&self.shared[id.index()])));
+		*player = fresh;
 
 		Ok(duration)
 	}
@@ -183,8 +207,8 @@ impl Engine {
 	/// Push both gains at once, because they always change together: the crossfader
 	/// moves one up as it moves the other down (PLAN §8).
 	pub fn set_gains(&self, gains: (f32, f32)) {
-		self.players[0].set_volume(gains.0);
-		self.players[1].set_volume(gains.1);
+		self.player(DeckId::One).set_volume(gains.0);
+		self.player(DeckId::Two).set_volume(gains.1);
 	}
 
 	/// The decoder's playhead, polled on the tick (PLAN §4).
@@ -1098,6 +1122,77 @@ pub(crate) mod tests {
 	/// a fixture, within `TOLERANCE`, after printing every file; `scripts/probe-formats.sh`
 	/// runs it on a tone per format, a few shaped the ways that broke, and any files given.
 	///
+	/// A player plays every file at that file's own rate, whatever it held before (PLAN Q84).
+	///
+	/// The bug this pins was heard, not seen: the WebM, then the MP4 of the same song loaded into
+	/// Player 1, and the MP4 ran 8.8 % fast and high — 48 000 / 44 100 — because the player's
+	/// resampler had kept the first file's rate. So the test is the user's own sequence on the
+	/// real `Engine::load`, with a thread draining the mixer as the device would, and one
+	/// second of output has to have played one second of the second file.
+	#[test]
+	fn a_player_plays_each_file_at_its_own_rate_whatever_it_held_before() {
+		use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+
+		// Arrange: a 44.1 kHz engine nobody but this test listens to, and silence at 48 kHz and
+		// at 44.1 kHz — the WebM's rate and the MP4's.
+		const OUT: u32 = 44_100;
+		let (mix, mut mixed) = rodio::mixer::mixer(
+			std::num::NonZero::new(2).unwrap(),
+			std::num::NonZero::new(OUT).unwrap(),
+		);
+		let engine = Engine::on(mix, String::new());
+		let (pulled, running) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(true)));
+		let drain = {
+			let (pulled, running) = (Arc::clone(&pulled), Arc::clone(&running));
+			std::thread::spawn(move || {
+				while running.load(Relaxed) {
+					mixed.next();
+					pulled.fetch_add(1, Relaxed);
+				}
+			})
+		};
+		// Output frames are stereo: two samples a frame.
+		let seconds_out = |samples: u64| samples as f64 / f64::from(OUT * 2);
+		let after = |seconds: f64| {
+			let from = pulled.load(Relaxed);
+			while seconds_out(pulled.load(Relaxed) - from) < seconds {
+				std::thread::yield_now();
+			}
+		};
+		let dir = std::env::temp_dir();
+		let (first, second) = (
+			dir.join("clecta-rate-48k.wav"),
+			dir.join("clecta-rate-44k.wav"),
+		);
+		std::fs::write(&first, wav(&[0; 48_000 * 3], 48_000)).expect("writing the fixture");
+		std::fs::write(&second, wav(&[0; 44_100 * 3], 44_100)).expect("writing the fixture");
+
+		// Act: the 48 kHz file plays a moment; then the 44.1 kHz one, into the same player.
+		engine
+			.load(DeckId::One, &first)
+			.expect("loading the first file");
+		engine.play(DeckId::One);
+		after(0.2);
+		engine
+			.load(DeckId::One, &second)
+			.expect("loading the second file");
+		engine.play(DeckId::One);
+		after(0.2);
+		let (out_from, file_from) = (pulled.load(Relaxed), engine.position(DeckId::One));
+		after(1.5);
+		let (out_to, file_to) = (pulled.load(Relaxed), engine.position(DeckId::One));
+		running.store(false, Relaxed);
+		drain.join().expect("the drain");
+
+		// Assert: the file advanced as far as the output did, not 48 000 / 44 100 as far.
+		let played = seconds_out(out_to - out_from);
+		let file = (file_to - file_from).as_secs_f64();
+		assert!(
+			(file / played - 1.0).abs() < 0.02,
+			"{played:.3} s of output played {file:.3} s of the file"
+		);
+	}
+
 	/// `CLECTA_PROBE="a.mp3;a.mp4" cargo test probe_files -- --ignored --nocapture`
 	#[test]
 	#[ignore = "reads the files named in CLECTA_PROBE"]

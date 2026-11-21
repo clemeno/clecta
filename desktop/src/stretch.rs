@@ -467,7 +467,9 @@ impl<S: Source> Source for Stretched<S> {
 	/// from the input, so any finite promise would be wrong. `None` reads as "one span,
 	/// unknown length", which is what every file the app opens is (see `audio::scan`) — and it
 	/// is what lets the resampler behind the mixer be built once and then left alone, because
-	/// nothing downstream ever needs to read this source's rate twice (see the header).
+	/// nothing downstream ever needs to read this source's rate twice (see the header). That
+	/// holds only while a player holds one file in its life: a player loaded again would play
+	/// the new file at this one's rate, which is why every load gets a fresh one (PLAN Q84).
 	fn current_span_len(&self) -> Option<usize> {
 		None
 	}
