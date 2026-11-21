@@ -232,6 +232,7 @@ mod tests {
 			trim: None,
 			tempo: Some(128.0),
 			key: None,
+			rhythm: crate::waveform::Rhythm::default(),
 		};
 
 		// Act: the player's scan of it lands.

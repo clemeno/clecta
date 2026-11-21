@@ -108,8 +108,8 @@ Something on disk.
 The audio a file contains, once something has read it.
 
 **Scan**:
-One decode of one file, yielding its peaks, its trim, its tempo and its key together. All
-four or none — there is no half-scanned file.
+One decode of one file, yielding its peaks, its trim, its tempo, its key and its rhythm
+together. All five or none — there is no half-scanned file.
 
 **Prepare**:
 Scanning every file in a folder.
@@ -140,6 +140,18 @@ How long a track's music runs — the length of its trim. Labelled *⇥ music* o
 **Tempo**:
 How fast a track beats. BPM is its unit, not another name for it.
 _Avoid_: BPM as the quantity
+
+**Rhythm**:
+A track's loudness close up, every 10 ms, and its downbeat — what the rhythm band draws.
+_Avoid_: beatgrid as the stored thing — the grid is drawn from the rhythm and the tempo
+
+**Downbeat**:
+Where a bar starts: the first beat of four, as the scan guesses it from where the music
+accents. Every bar line is a downbeat plus whole bars at the tempo.
+
+**Grid**:
+The beats and bars drawn over a rhythm — the downbeat, stepped by the tempo, corrected
+where there is a correction.
 
 **Key**:
 A track's musical key — a root, major or minor — as the scan detects it. Printed with
@@ -174,6 +186,12 @@ The outline drawn on the deck a drop would land in.
 
 **Sweep**:
 The band that travels across a waveform or a row while its scan is running.
+
+**Rhythm band**:
+The full-width box above the decks and the mixer: each deck's rhythm in a lane of its own,
+Deck 1 above Deck 2, scrolling past one shared playhead in real time, so beats that line up
+are beats that land together.
+_Avoid_: top waveform — the waveform is the whole-track strip in a deck
 
 **Fader**:
 A deck's own volume.

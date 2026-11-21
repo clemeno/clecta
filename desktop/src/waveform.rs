@@ -170,6 +170,34 @@ pub struct Scan {
 	/// The musical key, and `None` for a file with no key to find: silence, or a recording
 	/// too short to fill a single analysis frame (PLAN §14e).
 	pub key: Option<Key>,
+	/// What the band above the players draws: the loudness close up, and where the bars start
+	/// (PLAN §14f).
+	pub rhythm: Rhythm,
+}
+
+/// How far apart the rhythm envelope's loudnesses are (PLAN §14f).
+///
+/// Ten milliseconds, because the band shows about eight seconds across a window's width — a
+/// step is then a pixel or two, and a kick drum, which lasts some fifty, is several steps wide
+/// and has an edge an eye can line up with another. Finer would be detail nobody can see at
+/// that width; coarser would round a kick's onset to the same step as the beat beside it.
+pub const RHYTHM_STEP: Duration = Duration::from_millis(10);
+
+/// A track's rhythm, close up (PLAN §14f): what the band above the players scrolls past the
+/// playhead, and the bar grid drawn over it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Rhythm {
+	/// The loudness every `RHYTHM_STEP` from the top of the file, `0..=255` of the loudest step.
+	///
+	/// Loudness rather than the peaks the strip draws: a mastered track's peaks sit near full
+	/// scale almost everywhere, so its kicks do not stand out of them, where they stand well out
+	/// of its loudness. One byte a step because nothing that draws it can show more than 256
+	/// levels in a lane forty pixels high, and a four-minute track is then 24 kilobytes.
+	pub envelope: Vec<u8>,
+	/// Where a bar starts, measured from the top of the file — the first one, so every bar line
+	/// is this plus a whole number of four-beat bars at the tempo, and every beat line is this
+	/// plus a whole number of beats. `None` when the file has no tempo to build a grid from.
+	pub downbeat: Option<Duration>,
 }
 
 /// One of the twenty-four keys a track can be in (PLAN §14e).
@@ -323,49 +351,165 @@ impl Tempo {
 	}
 
 	/// The tempo in beats per minute, or `None` when the file has none to give: silence, a
-	/// recording too short to hold a few beats, or a stream whose rate could not be read.
+	/// recording too short to hold a few beats, or a stream whose rate could not be read — and
+	/// the rhythm the band above the players draws, which the same envelope and the same period
+	/// give for almost nothing (PLAN §14f).
 	///
 	/// The partly-filled last bin is **dropped**, unlike the waveform's, and the difference is
 	/// what the two arrays are for: a bin holding half as many samples is quieter through no
 	/// fault of the music, and this array is read as a series of loudness *changes*.
-	pub fn finish(self, rate: u32, channels: u16) -> Option<f32> {
+	pub fn finish(self, rate: u32, channels: u16) -> (Option<f32>, Rhythm) {
 		let per_bin = f64::from(TEMPO_BIN) / (f64::from(rate) * f64::from(channels));
-		if per_bin <= 0.0 {
-			return None;
+		if per_bin <= 0.0 || !per_bin.is_finite() {
+			return (None, Rhythm::default());
 		}
 
+		let envelope = envelope(&self.bins, per_bin);
 		let onsets = onsets(&self.bins);
-		// The slowest tempo asked about, in bins, which is also the shortest useful recording:
-		// a comparison with nothing like two of the longest beats to run over says nothing.
-		let longest = (60.0 / (f64::from(MIN_BPM) * per_bin)).round() as usize;
-		let shortest = (60.0 / (f64::from(MAX_BPM) * per_bin)).round() as usize;
-		// Two bins is the floor, not one: the refining pass sweeps a bin either side of what this
-		// finds, and a period it could walk down to zero is a division by nothing. Reachable only
-		// from a stream of a couple of kilohertz, which is why it is a guard and not a feature.
-		if shortest < 2 || onsets.len() < 2 * longest {
-			return None;
-		}
-
-		// The coarse pass: whole bins, and the first of any equal pair wins, which means the
-		// faster of two tempi that fit the same beats equally well.
-		let mut best = (f32::NEG_INFINITY, shortest);
-		for lag in shortest..=longest {
-			let score = agreement(&onsets, lag);
-			if score > best.0 {
-				best = (score, lag);
-			}
-		}
-		if best.0 <= 0.0 {
-			return None;
-		}
-
-		let period = refine(&onsets, best.1 as f32);
+		let Some(period) = period(&onsets, per_bin) else {
+			return (
+				None,
+				Rhythm {
+					envelope,
+					downbeat: None,
+				},
+			);
+		};
 		let bpm = 60.0 / (f64::from(period) * per_bin);
 
 		// The store keeps whatever comes out of here and the column prints it, so the one number
 		// that must not leave this function is one that could be drawn as a tempo and is not.
-		(bpm.is_finite() && bpm > 0.0).then_some(bpm as f32)
+		if !(bpm.is_finite() && bpm > 0.0) {
+			return (
+				None,
+				Rhythm {
+					envelope,
+					downbeat: None,
+				},
+			);
+		}
+
+		// An onset is the rise *into* the bin after its index, so a beat found at index `n` is a
+		// beat in bin `n + 1` — and somewhere in it, so its middle is the best guess.
+		let downbeat = downbeat(&onsets, period).map(|at| (f64::from(at) + 1.5) * per_bin);
+		(
+			Some(bpm as f32),
+			Rhythm {
+				envelope,
+				downbeat: downbeat.map(Duration::from_secs_f64),
+			},
+		)
 	}
+}
+
+/// The beat period in bins, to a thousandth of one, or `None` when the onsets beat at nothing in
+/// the range asked about (PLAN §14d).
+fn period(onsets: &[f32], per_bin: f64) -> Option<f32> {
+	// The slowest tempo asked about, in bins, which is also the shortest useful recording:
+	// a comparison with nothing like two of the longest beats to run over says nothing.
+	let longest = (60.0 / (f64::from(MIN_BPM) * per_bin)).round() as usize;
+	let shortest = (60.0 / (f64::from(MAX_BPM) * per_bin)).round() as usize;
+	// Two bins is the floor, not one: the refining pass sweeps a bin either side of what this
+	// finds, and a period it could walk down to zero is a division by nothing. Reachable only
+	// from a stream of a couple of kilohertz, which is why it is a guard and not a feature.
+	if shortest < 2 || onsets.len() < 2 * longest {
+		return None;
+	}
+
+	// The coarse pass: whole bins, and the first of any equal pair wins, which means the
+	// faster of two tempi that fit the same beats equally well.
+	let mut best = (f32::NEG_INFINITY, shortest);
+	for lag in shortest..=longest {
+		let score = agreement(onsets, lag);
+		if score > best.0 {
+			best = (score, lag);
+		}
+	}
+	if best.0 <= 0.0 {
+		return None;
+	}
+
+	Some(refine(onsets, best.1 as f32))
+}
+
+/// The tempo bins resampled to one loudness every `RHYTHM_STEP`, scaled to the loudest
+/// (PLAN §14f).
+///
+/// The loudest bin a step overlaps, so a kick inside a step is never averaged away, and a bin
+/// longer than a step — mono at 44.1 kHz, where a bin is 11.6 ms — fills every step it covers
+/// rather than leaving one empty between two that are not.
+fn envelope(bins: &[f32], per_bin: f64) -> Vec<u8> {
+	let loudest = bins
+		.iter()
+		.copied()
+		.filter(|bin| bin.is_finite())
+		.fold(0.0_f32, f32::max);
+	let step = RHYTHM_STEP.as_secs_f64() / per_bin;
+	let steps = (bins.len() as f64 / step).ceil() as usize;
+
+	(0..steps)
+		.map(|index| {
+			let start = ((index as f64 * step) as usize).min(bins.len().saturating_sub(1));
+			let end = (((index + 1) as f64 * step).ceil() as usize).clamp(start + 1, bins.len());
+			let bin = bins[start..end].iter().copied().fold(0.0_f32, f32::max);
+			if loudest > 0.0 {
+				(bin / loudest * 255.0).round().clamp(0.0, 255.0) as u8
+			} else {
+				0
+			}
+		})
+		.collect()
+}
+
+/// Where a bar starts, as an index into the onsets: the first beat of the four-beat class whose
+/// onsets are the strongest (PLAN §14f).
+///
+/// Two steps, both on numbers the tempo already had. Where the beats fall is the *angle* of the
+/// Fourier bin `strength` measured — its size said how much of the track beats at the period,
+/// and its angle says at what offset. Which of four beats starts a bar is then a vote: in most
+/// music the bar's first beat is where the kick or the accent is, so the class of beats that
+/// rises hardest is taken to be it. `ponytail:` a guess on music with no accent on its one —
+/// the grid's beats are still right, and only the longer bar lines can sit a beat or three off.
+/// A downbeat detector proper is the upgrade, if the bars are ever trusted for more than looks.
+fn downbeat(onsets: &[f32], period: f32) -> Option<f32> {
+	let (real, imaginary) = fourier(onsets, period);
+	if real == 0.0 && imaginary == 0.0 {
+		return None;
+	}
+	// The sum turns backwards by one period per beat, so a beat at offset `b` leaves the sum
+	// pointing at `-b`'s angle: undo the sign and scale the angle back to bins.
+	let first = ((-imaginary.atan2(real) / std::f64::consts::TAU) * f64::from(period))
+		.rem_euclid(f64::from(period)) as f32;
+
+	// The strongest rise within a bin of each beat, summed per place in the bar. Within a bin,
+	// because the grid is a straight line and a real track's beats wander a little off it.
+	let near = |at: f32| {
+		let middle = at.round() as isize;
+		(middle - 1..=middle + 1)
+			.filter_map(|index| usize::try_from(index).ok())
+			.filter_map(|index| onsets.get(index))
+			.copied()
+			.fold(f32::NEG_INFINITY, f32::max)
+	};
+	let mut votes = [0.0_f32; 4];
+	let mut beat = 0;
+	loop {
+		let at = first + beat as f32 * period;
+		if at as usize >= onsets.len() {
+			break;
+		}
+		votes[beat % 4] += near(at).max(0.0);
+		beat += 1;
+	}
+
+	let (class, _) =
+		votes
+			.iter()
+			.enumerate()
+			.fold((0, f32::NEG_INFINITY), |best, (class, &vote)| {
+				if vote > best.1 { (class, vote) } else { best }
+			});
+	Some(first + class as f32 * period)
 }
 
 /// How many interleaved samples one chroma sample stands for (PLAN §14e).
@@ -577,11 +721,13 @@ impl Scanner {
 	/// the accumulators that report *times and frequencies* need them — and asking once, at the
 	/// end, is what keeps `push` a function of one argument.
 	pub fn finish(self, rate: u32, channels: u16) -> Scan {
+		let (tempo, rhythm) = self.tempo.finish(rate, channels);
 		Scan {
 			peaks: self.fold.finish(),
 			trim: self.edges.finish(rate, channels),
-			tempo: self.tempo.finish(rate, channels),
+			tempo,
 			key: self.chroma.finish(rate, channels),
+			rhythm,
 		}
 	}
 }
@@ -649,8 +795,17 @@ fn agreement(onsets: &[f32], lag: usize) -> f32 {
 /// turning, because a hundred thousand multiplications of a unit vector by itself is exactly the
 /// place where `f32` drifts off the unit circle.
 fn strength(onsets: &[f32], period: f32) -> f32 {
-	if period <= 1.0 || onsets.is_empty() {
+	if onsets.is_empty() {
 		return 0.0;
+	}
+	let (real, imaginary) = fourier(onsets, period);
+	(real.hypot(imaginary) / onsets.len() as f64) as f32
+}
+
+/// The Fourier bin itself, as its two parts: `strength` wants its size, `downbeat` its angle.
+fn fourier(onsets: &[f32], period: f32) -> (f64, f64) {
+	if period <= 1.0 || onsets.is_empty() {
+		return (0.0, 0.0);
 	}
 
 	let angle = -std::f64::consts::TAU / f64::from(period);
@@ -668,7 +823,7 @@ fn strength(onsets: &[f32], period: f32) -> f32 {
 		phase_cos = turned;
 	}
 
-	(real.hypot(imaginary) / onsets.len() as f64) as f32
+	(real, imaginary)
 }
 
 /// The period to a thousandth of a bin, starting from the whole bin the coarse pass found.
@@ -905,11 +1060,7 @@ mod tests {
 
 	/// Push a whole slice through `Tempo`, the way `audio::scan` pushes a whole file.
 	fn tempo(samples: &[f32], rate: u32, channels: u16) -> Option<f32> {
-		let mut tempo = Tempo::default();
-		for sample in samples {
-			tempo.push(*sample);
-		}
-		tempo.finish(rate, channels)
+		rhythm(samples, rate, channels).0
 	}
 
 	/// A pure tone, for building keys out of the notes that spell them.
@@ -1073,6 +1224,110 @@ mod tests {
 		// A decoder emitting `NaN` must not invent onsets: the samples are skipped, so this is
 		// the silence it actually is rather than a tempo read off arithmetic.
 		assert_eq!(tempo(&[f32::NAN; 441_000], 44_100, 1), None, "not a number");
+	}
+
+	/// Push a whole slice through `Tempo` for everything it finds, not only the tempo.
+	fn rhythm(samples: &[f32], rate: u32, channels: u16) -> (Option<f32>, Rhythm) {
+		let mut tempo = Tempo::default();
+		for sample in samples {
+			tempo.push(*sample);
+		}
+		tempo.finish(rate, channels)
+	}
+
+	/// How far `time` sits from the nearest beat of a grid starting at `first`, in seconds.
+	fn off_grid(time: Duration, first: f64, period: f64) -> f64 {
+		let beats = (time.as_secs_f64() - first) / period;
+		(beats - beats.round()).abs() * period
+	}
+
+	#[test]
+	fn the_downbeat_lands_on_a_beat_wherever_the_first_one_is() {
+		// Arrange: 128 BPM of clicks starting a quarter of a second in, as a track with a short
+		// leader does — so a grid that assumed the file starts on a beat would be off by 0.25 s.
+		const RATE: u32 = 44_100;
+		let mut samples = vec![0.0; RATE as usize / 4];
+		samples.extend(clicks(128.0, 20.0, RATE));
+
+		// Act
+		let (_, found) = rhythm(&samples, RATE, 1);
+
+		// Assert: on one of the clicks, to within a bin — 11.6 ms here, under a sixteenth of a
+		// beat, which is what an eye lining two kicks up can tell apart.
+		let downbeat = found.downbeat.expect("a click track has a downbeat");
+		let error = off_grid(downbeat, 0.25, 60.0 / 128.0);
+		assert!(error < 0.012, "{downbeat:?} is {error:.4} s off the clicks");
+	}
+
+	#[test]
+	fn the_downbeat_is_the_accented_beat_of_four() {
+		// Arrange: 120 BPM, every fourth click louder starting from the *second* — so the bar
+		// starts half a second in, and the first click of the file is a fourth beat.
+		const RATE: u32 = 44_100;
+		const BPM: f32 = 120.0;
+		let mut samples = clicks(BPM, 20.0, RATE);
+		let period = 60.0 / BPM * RATE as f32;
+		for beat in 0.. {
+			let at = (beat as f32 * period).round() as usize;
+			if at >= samples.len() {
+				break;
+			}
+			// The click is 0.8 at its loudest; the others go down to a third of it.
+			if beat % 4 != 1 {
+				for sample in samples.iter_mut().skip(at).take(RATE as usize / 100) {
+					*sample *= 0.3;
+				}
+			}
+		}
+
+		// Act
+		let (_, found) = rhythm(&samples, RATE, 1);
+
+		// Assert: on the accented grid — half a second plus whole bars of two seconds.
+		let downbeat = found
+			.downbeat
+			.expect("an accented click track has a downbeat");
+		let error = off_grid(downbeat, 0.5, 2.0);
+		assert!(error < 0.012, "{downbeat:?} is {error:.4} s off the bar");
+	}
+
+	#[test]
+	fn the_envelope_is_one_loudness_every_step_scaled_to_the_loudest() {
+		// Arrange: one second of silence, then one second at half scale and one at full — mono at
+		// 44.1 kHz, where a tempo bin is 11.6 ms and so *longer* than a step: the steps it covers
+		// must repeat it rather than leave holes.
+		const RATE: u32 = 44_100;
+		let mut samples = vec![0.0; RATE as usize];
+		samples.extend(vec![0.5; RATE as usize]);
+		samples.extend(vec![1.0; RATE as usize]);
+
+		// Act
+		let (_, found) = rhythm(&samples, RATE, 1);
+		let envelope = found.envelope;
+
+		// Assert: three seconds of steps, give or take the partial bin dropped at the end.
+		let steps = (3.0 / RHYTHM_STEP.as_secs_f64()) as usize;
+		assert!(
+			envelope.len().abs_diff(steps) <= 2,
+			"{} steps for three seconds",
+			envelope.len()
+		);
+		// Silent, half, full — read in the middle of each second, away from the edges.
+		let at = |second: f64| envelope[(second / RHYTHM_STEP.as_secs_f64()) as usize];
+		assert_eq!(at(0.5), 0, "silence");
+		assert!(at(1.5).abs_diff(128) <= 1, "half scale read {}", at(1.5));
+		assert_eq!(at(2.5), 255, "the loudest");
+	}
+
+	#[test]
+	fn a_file_with_no_tempo_has_an_envelope_and_no_downbeat() {
+		// Arrange / Act: two seconds of one held level — loud, and with nothing to count.
+		let (tempo, found) = rhythm(&[0.5; 88_200], 44_100, 1);
+
+		// Assert: the band can still draw it; it just has no grid to draw over it.
+		assert_eq!(tempo, None);
+		assert_eq!(found.downbeat, None);
+		assert!(!found.envelope.is_empty());
 	}
 
 	#[test]

@@ -102,17 +102,22 @@ pub const MIN_PANE: f32 = 170.0;
 /// browser: the divider *is* the gap, so one constant serves both and they cannot drift.
 const PANE_SPACING: f32 = 6.0;
 
-/// The three numbers around the body, and the difference they add up to.
+/// The numbers around the players and the browser, and the difference they add up to.
 ///
-/// `CHROME` is what the window spends on everything that is not the body: padding twice,
-/// the gap above the status bar, and the bar itself. The bar's height is *pinned* rather
-/// than measured from its text so this stays a constant, which is what lets `dragged_height`
-/// stop a divider drag before it pushes the browser off the bottom. The *layout* needs none
-/// of it — iced compacts a too-tall panel itself (PLAN §6).
+/// `CHROME` is what the window spends on everything that is fixed: padding twice, the rhythm
+/// band above the players with the gap under it (PLAN §14f), the gap above the status bar, and
+/// the bar itself. The bar's and the band's heights are *pinned* rather than measured, so this
+/// stays a constant, which is what lets `dragged_height` stop a divider drag before it pushes
+/// the browser off the bottom. The *layout* needs none of it — iced compacts a too-tall panel
+/// itself (PLAN §6).
 const WINDOW_PADDING: f32 = 6.0;
 const STATUS_GAP: f32 = 4.0;
 const STATUS_HEIGHT: f32 = 24.0;
-const CHROME: f32 = 2.0 * WINDOW_PADDING + STATUS_GAP + STATUS_HEIGHT;
+/// Inside the band's box, round the lanes.
+const BAND_PADDING: f32 = 4.0;
+/// From the window's top padding to the top of the players: the band and the gap under it.
+const ABOVE_DECKS: f32 = ui::rhythm::HEIGHT + 2.0 * BAND_PADDING + PANE_SPACING;
+const CHROME: f32 = 2.0 * WINDOW_PADDING + ABOVE_DECKS + STATUS_GAP + STATUS_HEIGHT;
 
 /// Width of the mixer strip. Fixed, because the two players should keep the width they
 /// are given as the window resizes; the mixer's controls do not grow usefully.
@@ -1274,8 +1279,10 @@ impl Clecta {
 				// see. The pointer sits mid-divider rather than at its top edge, which is
 				// what makes the panel follow the cursor instead of jumping by the
 				// divider's height the moment it is grabbed.
-				self.decks_height =
-					dragged_height(self.window.1, y - WINDOW_PADDING - PANE_SPACING / 2.0);
+				self.decks_height = dragged_height(
+					self.window.1,
+					y - WINDOW_PADDING - ABOVE_DECKS - PANE_SPACING / 2.0,
+				);
 				self.dirty = true;
 			}
 
@@ -2240,6 +2247,8 @@ impl Clecta {
 		// `Limits::height` clamps a `Fixed` to what is actually available — measured at
 		// layout time, so it is never a frame behind.
 		let body = column![
+			self.rhythm_band(),
+			Space::new().height(PANE_SPACING),
 			container(self.decks_view())
 				.style(container::bordered_box)
 				.height(self.decks_height),
@@ -2267,6 +2276,46 @@ impl Clecta {
 			),
 		});
 		ui::tempo::over(window, panel, self.window)
+	}
+
+	/// The band above the players (PLAN §14f): both players' rhythm close up, on one playhead,
+	/// with a label naming each lane.
+	///
+	/// The grid's tempo is the corrected one where there is one — the same rule as the panel's
+	/// readout and every row (PLAN §14d) — so halving a tempo by hand halves the beats drawn.
+	fn rhythm_band(&self) -> Element<'_, Message> {
+		let lane = |id: DeckId| {
+			let deck = &self.decks[id.index()];
+			let grid = deck.track.as_ref().and_then(|track| {
+				Some(ui::rhythm::Grid {
+					bpm: ui::corrected_tempo(&self.tempos, &track.path, Some(track.tempo))
+						.flatten()?,
+					downbeat: deck.rhythm.downbeat?,
+				})
+			});
+			ui::rhythm::Lane {
+				envelope: &deck.rhythm.envelope,
+				position: deck.position,
+				rate: deck.rate,
+				grid,
+			}
+		};
+		let label = |id: DeckId| {
+			container(text(id.label()).size(11))
+				.height(ui::rhythm::LANE)
+				.center_y(ui::rhythm::LANE)
+		};
+
+		container(
+			row![
+				column![label(DeckId::One), label(DeckId::Two)].spacing(ui::rhythm::GAP),
+				ui::rhythm::view([lane(DeckId::One), lane(DeckId::Two)]),
+			]
+			.spacing(BAND_PADDING),
+		)
+		.padding(BAND_PADDING)
+		.style(container::bordered_box)
+		.into()
 	}
 
 	/// The horizontal splitter, hand-written — the one thing `pane_grid` could not be bent
@@ -2778,7 +2827,7 @@ mod tests {
 
 		// Act / Assert: exactly, not approximately. A drag that is inside the bounds must
 		// survive untouched, or the panel would creep by a pixel every time it was grabbed.
-		for wanted in [MIN_PANE, 200.0, 300.0, 500.0, 780.0] {
+		for wanted in [MIN_PANE, 200.0, 300.0, 500.0, 690.0] {
 			let stored = dragged_height(window, wanted);
 			assert_eq!(stored, wanted, "a drag to {wanted} was stored as {stored}");
 		}
@@ -2786,8 +2835,11 @@ mod tests {
 
 	#[test]
 	fn a_drag_can_never_push_the_browser_off_the_bottom() {
-		// Arrange: every window worth having, dragged well past the bottom of each.
-		for window in (400..=2000).step_by(37) {
+		// Arrange: every window worth having, dragged well past the bottom of each — from the
+		// shortest that can hold the fixed chrome and both minimums at all. Below it nothing can
+		// keep both, and the players keep theirs (`dragged_height`'s floor).
+		let shortest = (CHROME + PANE_SPACING + 2.0 * MIN_PANE).ceil() as i32;
+		for window in (shortest..=2000).step_by(37) {
 			let window = window as f32;
 
 			// Act: the pointer is far below the window's own bottom edge.

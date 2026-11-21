@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::audio::Engine;
-use crate::waveform::{Key, Scan};
+use crate::waveform::{Key, Rhythm, Scan};
 
 /// Which of the two players.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -146,6 +146,10 @@ pub struct Deck {
 	/// which is a case the notice line has already explained — a player with no waveform
 	/// still plays.
 	pub peaks: Vec<f32>,
+	/// The loaded track's rhythm close up, drawn by `ui::rhythm` in the band above the players
+	/// (PLAN §14f). Cleared and filled at exactly the moments `peaks` is, for the same reason:
+	/// nothing of the outgoing track may scroll past the incoming one's playhead.
+	pub rhythm: Rhythm,
 	/// A scan is running for this player right now, which is what makes the strip animate.
 	///
 	/// Not derivable from `peaks` being empty: so is an empty player, and so is one whose
@@ -168,6 +172,7 @@ impl Default for Deck {
 			// Wide open, not zero. A player that starts silent reads as broken.
 			fader: 1.0,
 			peaks: Vec::new(),
+			rhythm: Rhythm::default(),
 			scanning: false,
 			// The track's own speed, for the same reason the fader starts open.
 			rate: 1.0,
@@ -352,6 +357,7 @@ impl Deck {
 		self.transport = transition(self.transport, Event::Loaded);
 		self.position = Duration::ZERO;
 		self.peaks = Vec::new();
+		self.rhythm = Rhythm::default();
 		self.scanning = true;
 		self.track = Some(Track {
 			name: crate::fsio::name_of(&path),
@@ -382,6 +388,7 @@ impl Deck {
 		match result {
 			Ok(scan) => {
 				self.peaks = scan.peaks;
+				self.rhythm = scan.rhythm;
 				track.tempo = scan.tempo;
 				track.key = scan.key;
 				None
@@ -408,6 +415,7 @@ impl Deck {
 		self.track = None;
 		self.position = Duration::ZERO;
 		self.peaks = Vec::new();
+		self.rhythm = Rhythm::default();
 		self.scanning = false;
 	}
 }
@@ -664,6 +672,10 @@ mod tests {
 			trim: None,
 			tempo: Some(128.0),
 			key: None,
+			rhythm: Rhythm {
+				envelope: vec![9, 99],
+				downbeat: Some(Duration::from_millis(40)),
+			},
 		})
 	}
 
@@ -673,6 +685,7 @@ mod tests {
 		let mut player = deck(Transport::Playing);
 		player.position = Duration::from_secs(90);
 		player.peaks = vec![0.5];
+		player.rhythm.envelope = vec![200];
 
 		// Act
 		player.loaded(
@@ -684,6 +697,7 @@ mod tests {
 		assert_eq!(player.transport, Transport::Stopped);
 		assert_eq!(player.position, Duration::ZERO);
 		assert!(player.peaks.is_empty());
+		assert_eq!(player.rhythm, Rhythm::default(), "the band forgets it too");
 		assert!(player.scanning);
 		let track = player.track.expect("a track after a load");
 		assert_eq!(track.name, "next.mp3");
@@ -703,6 +717,7 @@ mod tests {
 		assert_eq!(notice, None);
 		assert!(!player.scanning);
 		assert_eq!(player.peaks, vec![0.25, 0.75]);
+		assert_eq!(player.rhythm.envelope, vec![9, 99], "and the band");
 		assert_eq!(player.track.and_then(|track| track.tempo), Some(128.0));
 	}
 

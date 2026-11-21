@@ -11,6 +11,7 @@ pub mod deck;
 pub mod mixer;
 pub mod pointer;
 pub mod queue;
+pub mod rhythm;
 pub mod tempo;
 pub mod tree;
 pub mod waveform;

@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 
-use crate::waveform::{Key, Scan, Trim};
+use crate::waveform::{Key, Rhythm, Scan, Trim};
 
 /// One table per kind of fact, keyed by the same file. Separate rather than one record with
 /// optional fields because they are worked out at different moments by different jobs — a
@@ -50,10 +50,14 @@ const TEMPOS: TableDefinition<&str, &[u8]> = TableDefinition::new("tempos");
 /// migration: a store written before keys existed misses on every file and is re-scanned once,
 /// with every waveform already on disk still readable by the build before this one.
 const KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("keys");
+/// And a fourth for the rhythm the band above the players draws (PLAN §14f), with the same
+/// migration: every file prepared before it misses once and is decoded again.
+const RHYTHMS: TableDefinition<&str, &[u8]> = TableDefinition::new("rhythms");
 
 /// All of them, for the two operations that are about the store rather than about a file:
 /// pruning what the library no longer has, and emptying it on request.
-const TABLES: [TableDefinition<&str, &[u8]>; 5] = [WAVEFORMS, DURATIONS, TRIMS, TEMPOS, KEYS];
+const TABLES: [TableDefinition<&str, &[u8]>; 6] =
+	[WAVEFORMS, DURATIONS, TRIMS, TEMPOS, KEYS, RHYTHMS];
 
 /// The four a full scan is spread across, **in the order a `Scan`'s fields are written**.
 ///
@@ -61,7 +65,11 @@ const TABLES: [TableDefinition<&str, &[u8]>; 5] = [WAVEFORMS, DURATIONS, TRIMS, 
 /// to be written twice, once in the app's `cached_scan` (now `measure::scan`) and once in
 /// `prepared` here, with a comment saying the two had to be kept in step by hand. Adding the
 /// tempo table meant editing both, which is how a comment like that gets found out.
-const FULL: [TableDefinition<&str, &[u8]>; 4] = [WAVEFORMS, TRIMS, TEMPOS, KEYS];
+const FULL: [TableDefinition<&str, &[u8]>; 5] = [WAVEFORMS, TRIMS, TEMPOS, KEYS, RHYTHMS];
+
+/// Which of `FULL` are arrays rather than a few bytes: what `ready` needs to *exist* and never
+/// reads, so it is not copied out for it (see `full`).
+const ARRAYS: [bool; 5] = [true, false, false, false, true];
 
 /// The record layout's version, in the first byte of every value.
 ///
@@ -193,12 +201,13 @@ impl Cache {
 	/// The caller does not know how many tables there are, what order they are in, or that the
 	/// stamp is checked three times. It asks whether the file has been scanned and is told.
 	pub fn scan(&self, path: &Path, stamp: Stamp) -> Option<Scan> {
-		let [peaks, trim, tempo, keysig] = self.full(path, stamp)?;
+		let [peaks, trim, tempo, keysig, rhythm] = self.full(path, stamp, true)?;
 		Some(Scan {
 			peaks: decode_peaks(&peaks)?,
 			trim: decode_trim(&trim)?,
 			tempo: decode_tempo(&tempo)?,
 			key: decode_key(&keysig)?,
+			rhythm: decode_rhythm(&rhythm)?,
 		})
 	}
 
@@ -216,6 +225,7 @@ impl Cache {
 			encode_trim(scan.trim),
 			encode_tempo(scan.tempo),
 			encode_key(scan.key),
+			encode_rhythm(&scan.rhythm),
 		];
 
 		let (Some(key), Some(db)) = (key(path), self.db.as_ref()) else {
@@ -246,11 +256,11 @@ impl Cache {
 	/// (PLAN §11c, §14c, §14d).
 	///
 	/// The same all-or-nothing test `scan` makes — literally the same function — so a row that
-	/// shows a playing time is a row a load will not decode. What it skips is turning eight
-	/// kilobytes of little-endian bytes back into `f32`s that nothing is going to draw, which is
-	/// the whole reason a queue edit reading fifty tracks is cheap.
+	/// shows a playing time is a row a load will not decode. What it skips is copying out the
+	/// waveform and the rhythm, some thirty kilobytes that nothing is going to draw, which is the
+	/// whole reason a queue edit reading fifty tracks is cheap.
 	pub fn ready(&self, path: &Path, stamp: Stamp) -> Option<Ready> {
-		let [_, trim, tempo, keysig] = self.full(path, stamp)?;
+		let [_, trim, tempo, keysig, _] = self.full(path, stamp, false)?;
 		Some(Ready {
 			tempo: decode_tempo(&tempo)?,
 			trim: decode_trim(&trim)?,
@@ -278,11 +288,6 @@ impl Cache {
 	/// One `ready` per file and nothing else: the mark is the key being present, and its value is
 	/// everything the row shows beside the mark. Both come out of the same read, and the test is
 	/// the one `scan` makes, so a marked row is a row that will not be decoded again.
-	///
-	/// `ponytail:` an 8 KB copy per file, because the waveform's payload is fetched and then not
-	/// decoded. One transaction now rather than three, which was the note that used to be here;
-	/// what is left is a header-only presence test, worth writing the day a listing of tens of
-	/// thousands takes long enough to see.
 	pub fn prepared(&self, files: &[(PathBuf, Stamp)]) -> HashMap<PathBuf, Ready> {
 		files
 			.iter()
@@ -359,25 +364,27 @@ impl Cache {
 	/// from an older `FORMAT`, or a stamp that has moved since it was written. The caller cannot
 	/// see which, and there is nothing it would do differently if it could.
 	///
-	/// The payloads come back undecoded so the one caller that does not need the waveform does
-	/// not pay to turn it back into floats.
-	fn full(&self, path: &Path, stamp: Stamp) -> Option<[Vec<u8>; 4]> {
+	/// The payloads come back undecoded so the one caller that does not need the arrays does not
+	/// pay to turn them back into anything — and with `whole` false they come back *empty*, having
+	/// been checked and not copied: `ready` needs the waveform and the rhythm to be there for this
+	/// version of the file, and nothing else about them (PLAN §11c).
+	fn full(&self, path: &Path, stamp: Stamp, whole: bool) -> Option<[Vec<u8>; 5]> {
 		let key = key(path)?;
 		let transaction = self.db.as_ref()?.begin_read().ok()?;
 
-		let fetch = |definition| -> Option<Vec<u8>> {
-			let table = transaction.open_table(definition).ok()?;
+		let fetch = |index: usize| -> Option<Vec<u8>> {
+			let table = transaction.open_table(FULL[index]).ok()?;
 			let stored = table.get(key).ok()??;
+			let payload = payload(stored.value(), stamp)?;
 			// Copied out rather than borrowed: the value guard cannot outlive the table.
-			payload(stored.value(), stamp).map(<[u8]>::to_vec)
+			Some(if ARRAYS[index] && !whole {
+				Vec::new()
+			} else {
+				payload.to_vec()
+			})
 		};
 
-		Some([
-			fetch(FULL[0])?,
-			fetch(FULL[1])?,
-			fetch(FULL[2])?,
-			fetch(FULL[3])?,
-		])
+		Some([fetch(0)?, fetch(1)?, fetch(2)?, fetch(3)?, fetch(4)?])
 	}
 
 	/// One lookup, with the staleness test on the way out. Every `?` here is a cache miss and
@@ -567,6 +574,31 @@ fn decode_key(payload: &[u8]) -> Option<Option<Key>> {
 	}
 }
 
+/// The downbeat in nanoseconds — `u64::MAX` for a file with no grid — then the envelope, a byte a
+/// step (PLAN §14f).
+///
+/// Not the empty-payload shape of the four above, because there is always something to store: a
+/// file with no tempo still has a loudness to draw, so "no downbeat" is said in the downbeat's own
+/// eight bytes, which also keeps the envelope behind them at a fixed place.
+fn encode_rhythm(rhythm: &Rhythm) -> Vec<u8> {
+	let nanos = rhythm.downbeat.map_or(u64::MAX, |at| {
+		at.as_nanos().min(u128::from(u64::MAX - 1)) as u64
+	});
+	let mut out = Vec::with_capacity(8 + rhythm.envelope.len());
+	out.extend(nanos.to_le_bytes());
+	out.extend(&rhythm.envelope);
+	out
+}
+
+fn decode_rhythm(payload: &[u8]) -> Option<Rhythm> {
+	let (nanos, envelope) = payload.split_first_chunk::<8>()?;
+	let nanos = u64::from_le_bytes(*nanos);
+	Some(Rhythm {
+		envelope: envelope.to_vec(),
+		downbeat: (nanos != u64::MAX).then(|| Duration::from_nanos(nanos)),
+	})
+}
+
 fn decode_trim(payload: &[u8]) -> Option<Option<Trim>> {
 	match payload.len() {
 		0 => Some(None),
@@ -734,6 +766,26 @@ mod tests {
 	}
 
 	#[test]
+	fn a_rhythm_with_and_without_a_grid_survives_a_round_trip() {
+		// Arrange: a grid and no grid — a file with no tempo still has a loudness to draw.
+		let gridded = Rhythm {
+			envelope: vec![0, 7, 255],
+			downbeat: Some(Duration::from_micros(437_500)),
+		};
+		let gridless = Rhythm {
+			envelope: vec![12, 12],
+			downbeat: None,
+		};
+
+		// Act / Assert: each comes back as itself, the downbeat to the nanosecond.
+		assert_eq!(decode_rhythm(&encode_rhythm(&gridded)), Some(gridded));
+		assert_eq!(decode_rhythm(&encode_rhythm(&gridless)), Some(gridless));
+
+		// Shorter than the downbeat's eight bytes is a record this build did not write.
+		assert_eq!(decode_rhythm(&[1, 2, 3]), None, "a torn downbeat");
+	}
+
+	#[test]
 	fn a_malformed_waveform_is_not_half_a_waveform() {
 		// Arrange / Act / Assert: an array of floats is four bytes a column, and a payload
 		// that is not a whole number of them is a record to throw away rather than to
@@ -768,6 +820,10 @@ mod tests {
 				root: 9,
 				minor: true,
 			}),
+			rhythm: Rhythm {
+				envelope: vec![0, 128, 255],
+				downbeat: Some(Duration::from_millis(250)),
+			},
 		};
 
 		// Act / Assert: a miss before anything is stored, and one answer after — all three
@@ -840,6 +896,10 @@ mod tests {
 				trim: None,
 				tempo: None,
 				key: None,
+				rhythm: Rhythm {
+					envelope: vec![0],
+					downbeat: None,
+				},
 			},
 		);
 

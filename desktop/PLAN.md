@@ -260,10 +260,10 @@ clecta/
         │                keep itself, and the key lock's WSOLA time-stretch: every source is
         │                wrapped on its way in (§7c)
         ├── waveform.rs  PURE, and about what is in a *file*: `Scanner` folds its samples to a
-        │                bounded array, finds the music's edges and works out its tempo, all in
-        │                one pass; `Scan` is the three answers, declared here so `cache` can name
-        │                them without depending on the module that knows rodio exists (§14a, Q44,
-        │                Q46). The strip's pixel geometry lives with the widget, not here
+        │                bounded array, finds the music's edges, works out its tempo, key and
+        │                rhythm, all in one pass; `Scan` is the answers, declared here so `cache`
+        │                can name them without depending on the module that knows rodio exists
+        │                (§14a, §14f, Q44, Q46). The strip's pixel geometry lives with the widget
         └── ui/
             ├── mod.rs       what more than one pane shares: the formatting helpers, the row
             │                window, and the selected-row fill all three queues are drawn with
@@ -272,6 +272,7 @@ clecta/
             ├── deck.rs      one player's panel: title, transport buttons, time, drop ring
             ├── mixer.rs     the two faders and the crossfader
             ├── queue.rs  one queue's panel: add, select, reorder, send to a neighbour, the two switches (§7a)
+            ├── rhythm.rs    the band above the players: both rhythms on one playhead, in real time (§14f)
             ├── browser.rs   the files pane and its rows
             ├── tempo.rs     the row menu, the tempo editor, and the one overlay they are drawn in (§14d)
             ├── tree.rs      the folder tree pane, its splitter and its fold button
@@ -3253,6 +3254,63 @@ wrong for the entire off-lock half of the slider's life. Rounded because a key n
 to say 51 cents; a 3% beatmatch nudge therefore reads as a semitone, which is the nearest thing
 that is true.
 
+## 14f. The rhythm band (`waveform.rs`, `cache.rs`, `ui/rhythm.rs`)
+
+The strips in the two players each show a whole track, at whatever scale fits it, six hundred
+pixels apart. They answer "where am I in this track", and they cannot answer the question a mix
+turns on: **do the two tracks' beats land together right now?** The rhythm band does. It is a
+full-width box above the players and the mixer, with one lane per player, Player 1 above
+Player 2. Each lane scrolls its track's loudness past **one shared playhead** in the middle,
+four seconds either side, and marks every beat and every bar over it. Two kicks that land
+together are drawn one above the other, and two that do not are visibly apart, and the gap
+shows which way.
+
+**The scale is real time, not file time.** A lane is drawn at its player's rate: at 104% a lane
+passes 4.16 seconds of its file under the playhead in four seconds, so its beats sit 4% closer
+together. Two tracks at different tempi, matched with the rate sliders, then show the same beat
+spacing. That is the whole point, so the rate is part of what a lane is given.
+
+**What it draws comes from the scan, for almost nothing more.** Three things:
+
+- **The loudness, every 10 ms.** The tempo's own envelope (§14d), resampled to a fixed step
+  and scaled to the track's loudest, one byte a step: some 24 KB for four minutes. Loudness,
+  not peaks: a mastered track's peaks sit near full scale almost everywhere, so its kicks do
+  not stand out of them. The widget squares it before drawing, which turns a loud passage's
+  0.8-between-kicks against 1.0 into 0.64 against 1.0. It was checked on a screenshot of a
+  real chorus, where the straight level read as a ragged block.
+- **Where the beats fall.** The tempo is refined with one Fourier bin of the onset track
+  (§14d). That bin's size said how strongly the track beats at the period, and its **angle**
+  says at what offset. One `atan2` on numbers already computed, accurate to a bin: 6–12 ms,
+  under a sixteenth of a beat.
+- **Which beat starts a bar.** A vote: the onsets at each beat are summed by place in the bar,
+  and the strongest of the four places is taken to be the bar's first beat. In most music
+  that is where the kick or the accent is. `ponytail:` a guess on music with no accent on its
+  first beat. The beats stay right, and only the bar lines can sit one to three beats off. A
+  downbeat detector proper is the upgrade, if the bars are ever trusted for more than looks.
+
+Stored as `Scan::rhythm` (the envelope and the downbeat) in a table of its own, `rhythms`, which
+joins the all-or-nothing set. That carries the price every new fact has paid (Q40, the key):
+every file prepared before it misses once and is decoded again. `ready` reads the table only to
+know it is there. `full` now checks the two arrays, waveform and rhythm, without copying them
+out, which is also the end of the 8 KB `ponytail:` that `prepared` used to carry.
+
+**The grid's tempo is the corrected one** where there is a correction (§14d), the same rule as
+the readout and every row. Halving a tempo by hand halves the beats drawn, from the same
+downbeat.
+
+**The marks, as checked on a screenshot:**
+- A **beat** is a short tick at each edge of its lane, under the music.
+- A **bar** is a full-height line over the music, in the text colour at half strength. The
+  first draft drew bar lines under the music in the ticks' grey, and a bar then read as a
+  beat: only its two ends showed.
+- Played audio is `primary` and audio still to come is `secondary`, with the playhead in
+  `danger`: the strip's roles, so the two read as one design.
+
+`ponytail:` the band moves when the playhead does, which is the 20 Hz tick (§4). It scrolls in
+steps of about seven pixels at a thousand-pixel width. That is readable, and the beats line up at
+every step. A faster tick while something plays is the upgrade, if the steps ever bother anyone.
+Its price is a whole `view` per frame.
+
 ---
 
 ## 15. The decision log
@@ -3353,6 +3411,7 @@ decided.
 | Q82 | What a handover does with a file the player refuses | **Skips it and loads the next one at once; the user chose it (2026-11-14).** The handover used to take the refused track out of its queue and stop there: the previous track stayed in the player, stopped, and nothing more happened until someone played that again and it ended. Leaving the refused track at the top — Q81's "nothing moves" — was weighed and turned down, because every later handover would hit the same file and stop: a broken file would block the queue for good. So `advance` loops: each refusal has already left its queue, and the next track is handed over at once, until one loads or the queues run dry. The notice keeps the loaded track's line and names what was skipped, or says nothing queued would load. Every refusal is about the file — `Engine::load` fails only in `decoder(path)` — except "no audio device", and `advance` returns before the loop without a device, so a lost device cannot empty a queue. `ponytail:` no cap on the skipping: each refusal is a header probe of one file, and a queue of broken files is emptied in one tick, which is what one handover per tick would have done eventually | §7, §7a, Q78, Q81 |
 | Q83 | Whether a native dialog may stop the window while it is open | **No — every dialog is attached to the window and awaited, so the window keeps drawing but takes no clicks; the user chose it (2026-11-20).** **Load…**, **Open folder…**, the Unload question, **Clear cache**, **Clear tempo corrections** and the duplicate warning all blocked `update` until they closed, so the playhead, the time and the handovers froze with them — worst on the mixer's own move, loading one player while the other plays. Two shapes were offered. *Modal, still moving* won. *Modeless* — faders live behind the dialog — was turned down: it needs a one-question-at-a-time guard, a parentless dialog can sink behind the window, and every answer would race the user's own edits. `ask` builds each dialog inside `window::run`, the one place iced lends the window, with that window as its parent; awaits it as a `Task`; and hands its answer back as a message, or none for Cancel. Q38's obstacle was the duplicate warning answering in the middle of a queue edit; it falls to running the edit twice (§7a): told `Nothing` the first time, which changes nothing, then with the answer. The window running on means an answer can arrive about a world that has moved, so each one re-checks what it names. Unload cuts only the track it asked about. `← →` and a drop run only if `Queues::layout` — every queue's paths and selection — is what it was, since a handover renumbers rows (Q80). Load…, Open folder, **⤒ ⤓** and the two clears have nothing to re-check. On Windows rfd runs every async dialog on a thread of its own, which is Q70's fix, now rfd's rather than ours. On macOS a parented dialog is a sheet, not `CFUserNotification`'s alert, so Q38's log line goes with the blocking | §7a, §10, §11a, Q38, Q70, Q80 |
 | Q84 | Why an MP4 played faster than the WebM and the MP3 of the same song | **A player kept the rate of the first file it ever loaded; every load now gets a fresh `Player`.** Heard, not seen. The WebM, then the MP4, then the MP3 went into Player 1, and the MP4 ran 8.8 % fast and high, exactly 48 000 / 44 100. The files were innocent: each decodes to its header's length at its own rate (48 kHz for the WebM and the MP3, 44.1 kHz for the MP4), and each plays right in a fresh player. rodio resamples a player's whole queue to the mixer's rate through one `UniformSourceIterator`, built in `Mixer::add`, and that converter re-reads the rate and the channel count only at a span boundary. A queue reports its current source's span, and `Stretched` reports none on purpose (§7c): one endless span, so the resampler is never rebuilt mid-track. So the converter read the rate once, when the first file followed the empty queue's filler, and played every later file at it, whatever its rate or channel count. Reporting spans from `Stretched` was turned down for the reason §7c gives, a click at every rebuild. Resampling inside the wrapper to the device's rate was turned down as surgery on the stretch for what one new player per load fixes. `Engine::load` still `clear()`s the old player, which waits for its source to be gone, then appends to a fresh `Player` that inherits the old one's volume. The new wrapper now resets the playhead after the old track has gone, closing a small race where the old one's last count could land on the new track. Found by a loop that runs the user's sequence on the real `Engine::load` with a thread draining the mixer as the device would. `Engine::on` is the seam that made it reachable: the same engine on a mixer a test holds | §7, §7c, Q63 |
+| Q85 | What the band above the players shows, and where | **Both players' rhythm on one playhead, with beats and bars, in a full-width band on top, four seconds either side; the user chose all three (2026-11-21).** *Scope*: the scrolling loudness, the beat grid and the bar lines. Loudness only, or beats without bars, were the smaller options. The user took bars, knowing the downbeat would be a guess, and the guess is a vote by accent rather than an arbitrary beat (§14f). *Place*: one band above the players and the mixer, the lanes stacked on one centre line. A strip in each player was turned down, because the two would be 600 px apart, which defeats comparing them. *Zoom*: fixed. Buttons are the upgrade, unasked for. Built from the scan's own numbers: the tempo's envelope at 10 ms, and the phase from the angle of the Fourier bin that already refines the tempo. Stored in a fifth table of the all-or-nothing set, at Q40's price of one re-preparation | §14f, §14d, §11c, Q40 |
 
 Nothing is open. Q5 and Q6 were the two the plan deliberately left for a compiler to
 answer; both were settled by a throwaway spike, which is now deleted — what it proved
